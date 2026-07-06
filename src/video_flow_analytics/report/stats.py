@@ -52,3 +52,32 @@ def rollup_by_period(
     return rolled.with_columns(pl.Series("weekday", weekdays)).select(
         "date", "weekday", "period", "zone", "value"
     )
+
+
+def meal_time_reminder(hour: int) -> str:
+    if 11 <= hour < 14:
+        return "加強午餐動線"
+    if 17 <= hour < 20:
+        return "加強晚餐動線"
+    return "無"
+
+
+def peak_per_day(rollup_df: pl.DataFrame) -> pl.DataFrame:
+    """每個 (date, zone) 取 value 最大的期間；並列時取時間較早的期間。"""
+    sorted_df = rollup_df.sort(
+        ["date", "zone", "value", "period"],
+        descending=[False, False, True, False],
+    )
+    peaks = sorted_df.group_by(["date", "zone"], maintain_order=True).first()
+    reminders = [
+        meal_time_reminder(int(period.split(":")[0]))
+        for period in peaks["period"].to_list()
+    ]
+    return peaks.with_columns(pl.Series("reminder", reminders)).select(
+        "date",
+        "weekday",
+        "zone",
+        pl.col("period").alias("peak_period"),
+        pl.col("value").alias("peak_value"),
+        "reminder",
+    )
