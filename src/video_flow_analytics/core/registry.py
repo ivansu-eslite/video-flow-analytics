@@ -1,12 +1,15 @@
 from pathlib import Path
+from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Zone(BaseModel):
     """單一攝影機畫面內的一個多邊形區域。polygon 為 pixel 座標的頂點清單，
     對應該攝影機整天固定的解析度。"""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str
     polygon: list[tuple[float, float]]
@@ -23,22 +26,28 @@ class CameraEntry(BaseModel):
     camera_id: str
     location: str
     ip: str
-    # 該攝影機的 zone 定義（人工維護）；空清單代表這台攝影機不參與 zone mapping
-    zones: list[Zone] = Field(default_factory=list)
-
-    @field_validator("zones")
-    @classmethod
-    def _unique_zone_names(cls, value: list[Zone]):
-        names = [z.name for z in value]
-        dupes = {n for n in names if names.count(n) > 1}
-        if dupes:
-            raise ValueError(f"同一攝影機的 zone name 不可重複: {sorted(dupes)}")
-        return value
+    # 該攝影機的 zone 定義（人工維護，原始資料，未經驗證）；空清單代表這台攝影機
+    # 不參與 zone mapping。刻意用 list[Any]（而非 list[Zone] 或 list[dict]）：
+    # CameraEntry 也被 analyze_daily（重、GPU 路徑）透過 load_registry 讀取，若在
+    # 此驗證 zone 內容（哪怕只是「必須是 dict」的形狀檢查），zone 定義打錯字會連
+    # 帶讓不需要 zone 的 analyze_daily 也失敗。改由 parsed_zones() 延後到
+    # zone_mapping 真正使用 zone 時才驗證。
+    zones: list[Any] = Field(default_factory=list)
 
     @property
     def stream_dirname(self) -> str:
         # 對應 bucket 內的目錄命名規則 <location>_<camera_id>
         return f"{self.location}_{self.camera_id}"
+
+    def parsed_zones(self) -> list[Zone]:
+        """把原始 zone 定義解析並驗證成 Zone model；只在真的需要 zone 幾何
+        （zone_mapping）時呼叫，避免拖累 analyze_daily。"""
+        zones = [Zone(**z) for z in self.zones]
+        names = [z.name for z in zones]
+        dupes = {n for n in names if names.count(n) > 1}
+        if dupes:
+            raise ValueError(f"同一攝影機的 zone name 不可重複: {sorted(dupes)}")
+        return zones
 
 
 class StorageConfig(BaseModel):

@@ -54,12 +54,18 @@ def map_zones_daily(
 
     registry_path = Path(bucket_dir) / "camera_registry.yaml"
     registry = load_registry(Path(bucket_dir))
-    zone_cameras: dict[str, list[Zone]] = {
-        entry.stream_dirname: entry.zones for entry in registry.cameras if entry.zones
+    zone_entries = {
+        entry.stream_dirname: entry for entry in registry.cameras if entry.zones
     }
 
     df = pl.read_parquet(results_path)
-    validate_zone_cameras(zone_cameras, set(df["camera_id"].unique()))
+    # 先比對「哪些攝影機有登記 zone」對不對得上當天資料，通過後才解析 zone 幾何：
+    # 停用/改名攝影機的陳舊 zone 定義即使打錯字，也不該蓋過更根本的「camera 對不
+    # 上當天資料」錯誤訊息。
+    validate_zone_cameras(set(zone_entries), set(df["camera_id"].unique()))
+    zone_cameras: dict[str, list[Zone]] = {
+        camera_id: entry.parsed_zones() for camera_id, entry in zone_entries.items()
+    }
 
     df = df.with_columns(
         ((pl.col("x1") + pl.col("x2")) / 2).alias("foot_x"),

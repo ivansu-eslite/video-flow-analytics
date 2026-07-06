@@ -97,16 +97,14 @@ def count_zone_visits(
     )
 
 
-def validate_zone_cameras(
-    zone_cameras: dict[str, list[Zone]], data_cameras: set[str]
-) -> None:
+def validate_zone_cameras(zone_camera_ids: set[str], data_cameras: set[str]) -> None:
     """fail-loud：camera_registry.yaml 定義了 zone 的每個 camera 都要在當天
     tracking_results 中出現。
 
     攝影機改名或 key 打錯時，這裡會直接報錯中止，而不是靜默略過那台攝影機、
     默默算出漏掉區域的人流。
     """
-    unknown = sorted(set(zone_cameras) - data_cameras)
+    unknown = sorted(zone_camera_ids - data_cameras)
     if unknown:
         raise ValueError(
             "camera_registry.yaml 定義了這些 camera 的 zone，"
