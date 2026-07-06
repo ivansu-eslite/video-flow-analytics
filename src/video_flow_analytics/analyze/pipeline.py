@@ -9,9 +9,9 @@ from pathlib import Path
 
 from video_flow_analytics.analyze.detector import YOLODetector
 from video_flow_analytics.analyze.inference import InferencePipeline
-from video_flow_analytics.analyze.registry import load_registry
 from video_flow_analytics.analyze.tracker import MultiStreamByteTracker
 from video_flow_analytics.core.config import settings
+from video_flow_analytics.core.registry import load_registry
 from video_flow_analytics.io.frame_ring import (
     RING_SLOTS,
     FrameRing,

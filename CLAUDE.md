@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 專案概述
 
-多路離線影片流分析系統：以「一天」為單位，從本機模擬 GCS bucket 的目錄結構（`bucket_name/<location>_<camera_id>/{YYYY}/{MM}/{DD}/{HHmmss}.{SSS}Z.mkv`，檔名時間為 RFC 3339 UTC）讀取各攝影機的影片片段，用 YOLO（僅偵測 `person`）做偵測、ByteTrack 做多路追蹤。輸出兩種結果：追蹤明細 Parquet（`outputs/{bucket_name}/{date}/tracking_results.parquet`）與逐片段標註影片（路徑鏡射輸入、根目錄換成 `outputs/{bucket_name}/`）。攝影機清單定義在 `bucket_dir/camera_registry.yaml`（雲端輸出，不進版控）。
+多路離線影片流分析系統：以「一天」為單位，從本機模擬 GCS bucket 的目錄結構（`bucket_name/<location>_<camera_id>/{YYYY}/{MM}/{DD}/{HHmmss}.{SSS}Z.mkv`，檔名時間為 RFC 3339 UTC）讀取各攝影機的影片片段，用 YOLO（僅偵測 `person`）做偵測、ByteTrack 做多路追蹤。輸出兩種結果：追蹤明細 Parquet（`outputs/{bucket_name}/{date}/tracking_results.parquet`）與逐片段標註影片（路徑鏡射輸入、根目錄換成 `outputs/{bucket_name}/`）。攝影機清單與各攝影機的 zone 定義統一寫在 `bucket_dir/camera_registry.yaml`（不進版控）。
 
 進入點是函式呼叫，CLI 只是從 `config.toml` 組參數再呼叫：
 - `analyze.pipeline.analyze_daily(date, bucket_dir, camera_ids=None) -> AnalysisResult`（偵測/追蹤，重、GPU、多進程）
-- `zone_mapping.pipeline.map_zones_daily(date, bucket_dir, zones_path, bucket_minutes, ...) -> Path`（zone 人流統計，輕、純運算，讀上一步的 parquet）
+- `zone_mapping.pipeline.map_zones_daily(date, bucket_dir, bucket_minutes, ...) -> Path`（zone 人流統計，輕、純運算，讀上一步的 parquet）
 
-兩階段刻意獨立：調 `zones.yaml` 只需重跑 `zone-map`，不必重跑昂貴的 GPU 偵測。
+兩階段刻意獨立：調 `camera_registry.yaml` 內的 zone 定義只需重跑 `zone-map`，不必重跑昂貴的 GPU 偵測。
 
 ## 常用指令
 
@@ -29,11 +29,11 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
 
 `src/video_flow_analytics/` 依職責分五個子套件，依賴方向單向、無循環：
 
-- **`core/`**：`config.py`，Pydantic 設定模型 + 全域 `settings` 單例。不依賴其他子套件。
+- **`core/`**：`config.py`（Pydantic 設定模型 + 全域 `settings` 單例）、`registry.py`（`CameraRegistry`/`CameraEntry`/`Zone`，讀 `camera_registry.yaml`）。不依賴其他子套件。
 - **`io/`**：`video_reader.py`（逐日掃描片段、讀影格）、`video_writer.py`（標註影片輸出）、`frame_ring.py`（共享記憶體環形緩衝）。只依賴 `core`。
 - **`visualization/`**：`visualizer.py`（`TrackAnnotator`，畫追蹤框）。無內部依賴。
-- **`analyze/`**：`detector.py`、`tracker.py`、`inference.py`、`pipeline.py`、`tracking_results.py`、`registry.py`。依賴 `core`、`io`、`visualization`。
-- **`zone_mapping/`**：`zones.py`、`stats.py`、`pipeline.py`，獨立下游功能。只依賴 `core`。
+- **`analyze/`**：`detector.py`、`tracker.py`、`inference.py`、`pipeline.py`、`tracking_results.py`。依賴 `core`、`io`、`visualization`。
+- **`zone_mapping/`**：`stats.py`、`pipeline.py`，獨立下游功能。只依賴 `core`。
 
 `cli.py` 是唯一進入點，依子命令 lazy import `analyze` 或 `zone_mapping`（讓 `zone-map` 不必載入 torch/ultralytics）。
 
@@ -55,16 +55,16 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
 
 ### Zone Mapping
 
-- **zone 定義**（`zone_mapping/zones.py` → `ZoneRegistry`）：`zones.yaml`（**不進版控**，人工維護），key 為 `<location>_<camera_id>`（需對齊 parquet 的 `camera_id`）。與雲端輸出的 `camera_registry.yaml` 分開，避免人工 zone 被覆蓋。
-- **`map_zones_daily`**：讀 parquet → `validate_zone_cameras` fail-loud（camera 對不上當天資料就報錯）→ 逐 camera/zone 呼叫 `stats.py` 演算法 → 寫 `zone_counts.parquet`（`.tmp` + 原子 rename）→ 快照 `zones.yaml` 成 `zones_used.yaml`。
+- **zone 定義**（`core/registry.py` → `CameraEntry.zones: list[Any]`）：與攝影機身份一起寫在 `camera_registry.yaml`（**不進版控**，人工維護），以 `CameraEntry.stream_dirname`（`<location>_<camera_id>`）對齊 parquet 的 `camera_id`。刻意不拆成獨立檔案，因為此專案沒有真的雲端同步流程會覆蓋這份人工維護的檔案。**`zones` 刻意留在未經驗證的原始形式，不在 `CameraEntry` 上驗證幾何**：`CameraEntry` 也被 `analyze_daily`（重、GPU 路徑）透過 `load_registry` 讀取，若在此驗證 zone 內容，zone 定義打錯字（如頂點數 <3、整段結構寫錯）會連帶讓不需要 zone 的 `analyze_daily` 也失敗。`CameraEntry.parsed_zones()` 才把原始資料解析、驗證成 `Zone` model（含同攝影機內 zone name 不可重複），只在 `zone_mapping` 真正需要 zone 幾何時呼叫。`CameraRegistry` 另外對 `camera_id` 與 `stream_dirname` 都做唯一性驗證（fail-loud，避免重複登錄的攝影機讓 `resolve_cameras`／zone mapping 的查詢字典靜默覆蓋其中一筆）。
+- **`map_zones_daily`**：讀 parquet → `load_registry` 取各 camera 的 `zones` → `validate_zone_cameras` fail-loud（先比對 camera 對不上當天資料，不必等 zone 幾何解析完才報錯）→ 通過後才對每台攝影機呼叫 `parsed_zones()` 解析驗證 → 逐 camera/zone 呼叫 `stats.py` 演算法 → 寫 `zone_counts.parquet`（`.tmp` + 原子 rename）→ 快照 `camera_registry.yaml` 成 `camera_registry_used.yaml`。
 - **`stats.py`**（純運算）：`points_in_polygon`（numpy 向量化 ray casting）判定腳底中心點 `((x1+x2)/2, y2)`；`count_zone_visits` 依 `time_bucket` 聚合 `unique_visitors`（不重複 track_id 數）與 `entries`（out→in 轉換次數，`entry_debounce_frames` 控制去抖，預設 1 = 不去抖）。
 
 ### 設定
 
 - `core/config.py`：Pydantic 模型（`TrackerConfig`/`ModelConfig`/`OutputConfig`/`InputConfig`/`ZoneConfig`）組成 `AppConfig`，模組載入時建立全域單例 `settings`，各模組直接 import 使用（非依賴注入）。`load_config()` 找不到 repo 根目錄的 `config.toml` 就印警告、回退預設值。
-- `camera_registry.yaml`（雲端輸出，描述「資料長什麼樣」）與 `config.toml`（描述「這次要怎麼跑」）分工分開。
+- `camera_registry.yaml`（描述「資料長什麼樣＋zone 定義」）與 `config.toml`（描述「這次要怎麼跑」）分工分開。
 
 ### 其他注意事項
 
-- `yolo26m.pt`、`bucket_name*/`、`outputs/`、`zones.yaml` 皆在 `.gitignore`，不進版控。
+- `yolo26m.pt`、`bucket_name*/`、`outputs/` 皆在 `.gitignore`，不進版控（`camera_registry.yaml` 含 zone 定義，隨 `bucket_name*/` 一起不進版控）。
 - 下游任務讀 `tracking_results.parquet` 的時間戳為 UTC，本地時段報表需自行轉時區（台北 +8）。

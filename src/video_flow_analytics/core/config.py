@@ -31,8 +31,6 @@ class OutputConfig(BaseModel):
 
 
 class ZoneConfig(BaseModel):
-    # zone 定義檔（人工維護、不進版控）；相對路徑以 repo 根目錄為基準
-    zones_path: str = "zones.yaml"
     # 人流統計的時段粒度（分鐘），time_bucket 依此在 UTC 上向下取整
     bucket_minutes: int = Field(default=15, ge=1)
     # 連續幾格都在區域內才算一次「進入」，用來過濾邊界抖動造成的假進入；
