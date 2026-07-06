@@ -11,7 +11,7 @@
 import numpy as np
 import polars as pl
 
-from video_flow_analytics.zone_mapping.zones import CameraZones, Zone
+from video_flow_analytics.core.registry import Zone
 
 
 def points_in_polygon(
@@ -98,9 +98,10 @@ def count_zone_visits(
 
 
 def validate_zone_cameras(
-    zone_cameras: dict[str, CameraZones], data_cameras: set[str]
+    zone_cameras: dict[str, list[Zone]], data_cameras: set[str]
 ) -> None:
-    """fail-loud：zones.yaml 定義的每個 camera 都要在當天 tracking_results 中出現。
+    """fail-loud：camera_registry.yaml 定義了 zone 的每個 camera 都要在當天
+    tracking_results 中出現。
 
     攝影機改名或 key 打錯時，這裡會直接報錯中止，而不是靜默略過那台攝影機、
     默默算出漏掉區域的人流。
@@ -108,7 +109,7 @@ def validate_zone_cameras(
     unknown = sorted(set(zone_cameras) - data_cameras)
     if unknown:
         raise ValueError(
-            "zones.yaml 定義了這些 camera，但當天 tracking_results 沒有對應資料"
-            f"（camera 改名或 key 打錯？）: {unknown}。"
-            f"當天實際的 camera_id: {sorted(data_cameras)}"
+            "camera_registry.yaml 定義了這些 camera 的 zone，"
+            f"但當天 tracking_results 沒有對應資料（camera 改名或 key 打錯？）: "
+            f"{unknown}。當天實際的 camera_id: {sorted(data_cameras)}"
         )

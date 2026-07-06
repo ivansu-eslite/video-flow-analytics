@@ -18,9 +18,6 @@ bucket_name*/
 # 分析輸出（標註影片與追蹤結果）
 outputs/
 
-# Zone 定義（人工維護、每天可能不同，不進版控）
-zones.yaml
-
 # 影片檔案
 *.mp4
 *.avi

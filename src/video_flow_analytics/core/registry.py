@@ -1,13 +1,39 @@
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+class Zone(BaseModel):
+    """單一攝影機畫面內的一個多邊形區域。polygon 為 pixel 座標的頂點清單，
+    對應該攝影機整天固定的解析度。"""
+
+    name: str
+    polygon: list[tuple[float, float]]
+
+    @field_validator("polygon")
+    @classmethod
+    def _need_three_vertices(cls, value: list[tuple[float, float]]):
+        if len(value) < 3:
+            raise ValueError("polygon 至少需要 3 個頂點才能構成區域")
+        return value
 
 
 class CameraEntry(BaseModel):
     camera_id: str
     location: str
     ip: str
+    # 該攝影機的 zone 定義（人工維護）；空清單代表這台攝影機不參與 zone mapping
+    zones: list[Zone] = Field(default_factory=list)
+
+    @field_validator("zones")
+    @classmethod
+    def _unique_zone_names(cls, value: list[Zone]):
+        names = [z.name for z in value]
+        dupes = {n for n in names if names.count(n) > 1}
+        if dupes:
+            raise ValueError(f"同一攝影機的 zone name 不可重複: {sorted(dupes)}")
+        return value
 
     @property
     def stream_dirname(self) -> str:

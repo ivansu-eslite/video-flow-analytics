@@ -3,8 +3,8 @@
 - analyze：偵測/追蹤階段（重、GPU、多進程），輸出 tracking_results.parquet 與標註影片。
 - zone-map：zone 人流統計階段（輕、純運算），讀上一階段的 parquet 輸出 zone_counts。
 
-兩階段各對應一個獨立可呼叫的函式進入點，刻意維持各自獨立可跑：調 zones.yaml 後
-只重跑 zone-map，不必重跑昂貴的偵測階段。
+兩階段各對應一個獨立可呼叫的函式進入點，刻意維持各自獨立可跑：調 camera_registry.yaml
+內的 zone 定義後只重跑 zone-map，不必重跑昂貴的偵測階段。
 
 各分支才 lazy import 對應模組，讓 zone-map 不必載入 torch/ultralytics。
 """
