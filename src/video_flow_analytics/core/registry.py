@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Zone(BaseModel):
@@ -61,6 +61,23 @@ class CameraRegistry(BaseModel):
     bucket_name: str
     storage: StorageConfig
     cameras: list[CameraEntry]
+
+    @model_validator(mode="after")
+    def _unique_camera_identity(self) -> "CameraRegistry":
+        # camera_id 是 resolve_cameras() 的查詢鍵、stream_dirname 是 zone_mapping
+        # 對齊 parquet camera_id 的鍵，兩者都不可重複，否則對應的 dict 建構會靜默
+        # 覆蓋其中一筆攝影機。
+        camera_ids = [cam.camera_id for cam in self.cameras]
+        stream_dirnames = [cam.stream_dirname for cam in self.cameras]
+        dupes = {n for n in camera_ids if camera_ids.count(n) > 1} | {
+            n for n in stream_dirnames if stream_dirnames.count(n) > 1
+        }
+        if dupes:
+            raise ValueError(
+                f"camera_registry.yaml 中有重複的攝影機（camera_id 或 "
+                f"location_camera_id 相同）: {sorted(dupes)}"
+            )
+        return self
 
     def resolve_cameras(self, camera_ids: list[str] | None) -> list[CameraEntry]:
         """依 camera_ids 過濾；None 或空清單代表全部。查無對應 ID 時直接報錯。"""
