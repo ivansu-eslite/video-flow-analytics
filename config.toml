@@ -1,0 +1,28 @@
+[tracker]
+tracker_type = "bytetrack"
+track_high_thresh = 0.5
+track_low_thresh = 0.1
+new_track_thresh = 0.6
+track_buffer = 30
+match_thresh = 0.8
+gnum = 1
+cnum = 1
+fuse_score = true
+gmc_method = "none"
+
+[model]
+model_path = "yolo26m.pt"
+batch = 8                 # YOLO 單次批次推理的影格數上限
+
+[output]
+save_video = true # 設為 true 會儲存影片；設為 false 則只跑推理不存檔
+
+[input]
+bucket_dir = "bucket_name1" # 本機模擬 GCS bucket 的根目錄
+date = 2026-05-01           # 開發時指定的分析日期；正式呼叫端可直接以參數呼叫 analyze_daily
+camera_ids = []             # 空 = camera_registry.yaml 內全部攝影機
+
+[zone]
+zones_path = "zones.yaml" # zone 定義檔（人工維護、不進版控），相對路徑以 repo 根為基準
+bucket_minutes = 15       # 人流統計的時段粒度（分鐘）
+entry_debounce_frames = 1 # 連續幾格都在區域內才算一次進入；1 = 不去抖，調高可濾掉邊界抖動

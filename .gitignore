@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Model Weights
+*.pt
+
+# 雲端 GCS bucket 的本機鏡像（含影片與 camera_registry.yaml，皆由雲端輸出，不進版控）
+bucket_name*/
+
+# 分析輸出（標註影片與追蹤結果）
+outputs/
+
+# Zone 定義（人工維護、每天可能不同，不進版控）
+zones.yaml
+
+# 影片檔案
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flv
+*.wmv
