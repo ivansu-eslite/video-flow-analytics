@@ -26,6 +26,10 @@ def main() -> None:
         "zone-map",
         help="讀 tracking_results.parquet 套 zone 幾何，輸出每時段每區域人流",
     )
+    subparsers.add_parser(
+        "report",
+        help="讀 zone_counts.parquet 彙總成跨日累加的 Excel 人流報表",
+    )
     args = parser.parse_args()
 
     if args.command == "analyze":
@@ -36,6 +40,10 @@ def main() -> None:
         from video_flow_analytics.zone_mapping.pipeline import run_zone_map
 
         run_zone_map()
+    elif args.command == "report":
+        from video_flow_analytics.report.pipeline import run_report
+
+        run_report()
 
 
 if __name__ == "__main__":
