@@ -17,7 +17,7 @@ from pathlib import Path
 import polars as pl
 
 from video_flow_analytics.core.config import settings
-from video_flow_analytics.core.registry import Zone, load_registry
+from video_flow_analytics.core.registry import Zone, load_registry, registry_path
 from video_flow_analytics.zone_mapping.stats import (
     count_zone_visits,
     validate_zone_cameras,
@@ -52,8 +52,8 @@ def map_zones_daily(
             f"找不到追蹤結果 {results_path}，請先執行 analyze_daily 產生當日 parquet。"
         )
 
-    registry_path = Path(bucket_dir) / "camera_registry.yaml"
-    registry = load_registry(Path(bucket_dir))
+    bucket_path = Path(bucket_dir)
+    registry = load_registry(bucket_path)
     zone_entries = {
         entry.stream_dirname: entry for entry in registry.cameras if entry.zones
     }
@@ -102,7 +102,9 @@ def map_zones_daily(
 
     # 快照當下套用的 camera_registry.yaml，讓這份 zone_counts 自帶當天的 zone 依據、
     # 可回溯。
-    shutil.copyfile(registry_path, output_dir / "camera_registry_used.yaml")
+    shutil.copyfile(
+        registry_path(bucket_path), output_dir / "camera_registry_used.yaml"
+    )
 
     logger.info(
         "Zone 人流統計已寫入 %s（%d 台攝影機、共 %d 列時段×區域）。",

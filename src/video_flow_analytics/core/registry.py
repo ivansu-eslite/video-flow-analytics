@@ -5,6 +5,10 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+def _find_duplicates(items: list[str]) -> set[str]:
+    return {item for item in items if items.count(item) > 1}
+
+
 class Zone(BaseModel):
     """單一攝影機畫面內的一個多邊形區域。polygon 為 pixel 座標的頂點清單，
     對應該攝影機整天固定的解析度。"""
@@ -23,6 +27,8 @@ class Zone(BaseModel):
 
 
 class CameraEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     camera_id: str
     location: str
     ip: str
@@ -43,8 +49,7 @@ class CameraEntry(BaseModel):
         """把原始 zone 定義解析並驗證成 Zone model；只在真的需要 zone 幾何
         （zone_mapping）時呼叫，避免拖累 analyze_daily。"""
         zones = [Zone(**z) for z in self.zones]
-        names = [z.name for z in zones]
-        dupes = {n for n in names if names.count(n) > 1}
+        dupes = _find_duplicates([z.name for z in zones])
         if dupes:
             raise ValueError(f"同一攝影機的 zone name 不可重複: {sorted(dupes)}")
         return zones
@@ -67,11 +72,9 @@ class CameraRegistry(BaseModel):
         # camera_id 是 resolve_cameras() 的查詢鍵、stream_dirname 是 zone_mapping
         # 對齊 parquet camera_id 的鍵，兩者都不可重複，否則對應的 dict 建構會靜默
         # 覆蓋其中一筆攝影機。
-        camera_ids = [cam.camera_id for cam in self.cameras]
-        stream_dirnames = [cam.stream_dirname for cam in self.cameras]
-        dupes = {n for n in camera_ids if camera_ids.count(n) > 1} | {
-            n for n in stream_dirnames if stream_dirnames.count(n) > 1
-        }
+        dupes = _find_duplicates(
+            [cam.camera_id for cam in self.cameras]
+        ) | _find_duplicates([cam.stream_dirname for cam in self.cameras])
         if dupes:
             raise ValueError(
                 f"camera_registry.yaml 中有重複的攝影機（camera_id 或 "
@@ -92,10 +95,14 @@ class CameraRegistry(BaseModel):
         return [by_id[cid] for cid in camera_ids]
 
 
+def registry_path(bucket_dir: Path) -> Path:
+    return bucket_dir / "camera_registry.yaml"
+
+
 def load_registry(bucket_dir: Path) -> CameraRegistry:
-    registry_path = bucket_dir / "camera_registry.yaml"
-    if not registry_path.exists():
-        raise FileNotFoundError(f"找不到設備登錄檔: {registry_path}")
-    with open(registry_path, encoding="utf-8") as f:
+    path = registry_path(bucket_dir)
+    if not path.exists():
+        raise FileNotFoundError(f"找不到設備登錄檔: {path}")
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return CameraRegistry(**data)
