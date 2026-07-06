@@ -25,3 +25,8 @@ camera_ids = []             # 空 = camera_registry.yaml 內全部攝影機
 [zone]
 bucket_minutes = 15       # 人流統計的時段粒度（分鐘）
 entry_debounce_frames = 1 # 連續幾格都在區域內才算一次進入；1 = 不去抖，調高可濾掉邊界抖動
+
+[report]
+period_minutes = 60              # 報表人流彙總的時段粒度（分鐘），需為 zone.bucket_minutes 的倍數
+metric = "entries"                # "entries" 或 "unique_visitors"，決定人流量/尖峰人流用哪個統計量
+on_duplicate_date = "overwrite"   # 同一天資料已存在時："overwrite"（預設）/ "append" / "error"

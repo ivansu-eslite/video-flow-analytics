@@ -13,6 +13,7 @@ dependencies = [
     "polars>=1.42.0",
     "pyarrow>=17.0.0",
     "lap>=0.5.12",
+    "openpyxl>=3.1.5",
 ]
 
 [project.scripts]
@@ -24,6 +25,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pytest>=9.1.1",
     "ruff>=0.15.20",
 ]
 
@@ -33,3 +35,6 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
