@@ -7,10 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 多路離線影片流分析系統：以「一天」為單位，從本機模擬 GCS bucket 的目錄結構（`bucket_name/<location>_<camera_id>/{YYYY}/{MM}/{DD}/{HHmmss}.{SSS}Z.mkv`，檔名時間為 RFC 3339 UTC）讀取各攝影機的影片片段，用 YOLO（僅偵測 `person`）做偵測、ByteTrack 做多路追蹤。輸出兩種結果：追蹤明細 Parquet（`outputs/{bucket_name}/{date}/tracking_results.parquet`）與逐片段標註影片（路徑鏡射輸入、根目錄換成 `outputs/{bucket_name}/`）。攝影機清單與各攝影機的 zone 定義統一寫在 `bucket_dir/camera_registry.yaml`（不進版控）。
 
 進入點是函式呼叫，CLI 只是從 `config.toml` 組參數再呼叫：
-- `analyze.pipeline.analyze_daily(date, bucket_dir, camera_ids=None) -> AnalysisResult`（偵測/追蹤，重、GPU、多進程）
-- `zone_mapping.pipeline.map_zones_daily(date, bucket_dir, bucket_minutes, ...) -> Path`（zone 人流統計，輕、純運算，讀上一步的 parquet）
+- `analyze.pipeline.analyze_daily(date, bucket_dir, camera_ids=None) -> AnalysisResult`（YOLO 偵測 + ByteTrack 多路追蹤，輸出 `tracking_results.parquet` 與標註影片；GPU、多進程，執行成本高）
+- `zone_mapping.pipeline.map_zones_daily(date, bucket_dir, bucket_minutes, ...) -> Path`（讀 `tracking_results.parquet` 依 zone 定義統計人流，輸出 `zone_counts.parquet`；純 CPU 向量化運算，不必重跑 GPU 偵測）
+- `report.pipeline.export_report_daily(date, bucket_dir, period_minutes, metric, on_duplicate_date, bucket_minutes) -> Path`（讀 `zone_counts.parquet` 彙總成跨日累加更新的 Excel 報表 `outputs/{bucket}/report.xlsx`；純 CPU 運算，不需重跑偵測或 zone mapping）
 
-兩階段刻意獨立：調 `camera_registry.yaml` 內的 zone 定義只需重跑 `zone-map`，不必重跑昂貴的 GPU 偵測。
+三個階段刻意獨立：調 `camera_registry.yaml` 內的 zone 定義只需重跑 `zone-map`，不必重跑昂貴的 GPU 偵測；調報表參數後也只重跑 `report`。
 
 ## 常用指令
 
@@ -18,6 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 uv sync                              # 安裝依賴
 uv run video-flow-analytics analyze  # 偵測/追蹤，參數讀 config.toml 的 [input]
 uv run video-flow-analytics zone-map # zone 人流統計，參數讀 config.toml 的 [zone]
+uv run video-flow-analytics report   # 彙總 zone 人流成 Excel 報表，參數讀 config.toml 的 [report]
 uv run ruff check .                  # lint（line-length=88, select=["E","F","I","W"]）
 ```
 
@@ -34,6 +36,9 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
 - **`visualization/`**：`visualizer.py`（`TrackAnnotator`，畫追蹤框）。無內部依賴。
 - **`analyze/`**：`detector.py`、`tracker.py`、`inference.py`、`pipeline.py`、`tracking_results.py`。依賴 `core`、`io`、`visualization`。
 - **`zone_mapping/`**：`stats.py`、`pipeline.py`，獨立下游功能。只依賴 `core`。
+- **`report/`**：`stats.py`（時區轉換、期間彙總、尖峰計算、用餐時段規則）、
+  `pipeline.py`（讀 `zone_counts.parquet`、驗證、寫 Excel），獨立下游功能。
+  只依賴 `core`。
 
 `cli.py` 是唯一進入點，依子命令 lazy import `analyze` 或 `zone_mapping`（讓 `zone-map` 不必載入 torch/ultralytics）。
 
@@ -58,6 +63,27 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
 - **zone 定義**（`core/registry.py` → `CameraEntry.zones: list[Any]`）：與攝影機身份一起寫在 `camera_registry.yaml`（**不進版控**，人工維護），以 `CameraEntry.stream_dirname`（`<location>_<camera_id>`）對齊 parquet 的 `camera_id`。刻意不拆成獨立檔案，因為此專案沒有真的雲端同步流程會覆蓋這份人工維護的檔案。**`zones` 刻意留在未經驗證的原始形式，不在 `CameraEntry` 上驗證幾何**：`CameraEntry` 也被 `analyze_daily`（重、GPU 路徑）透過 `load_registry` 讀取，若在此驗證 zone 內容，zone 定義打錯字（如頂點數 <3、整段結構寫錯）會連帶讓不需要 zone 的 `analyze_daily` 也失敗。`CameraEntry.parsed_zones()` 才把原始資料解析、驗證成 `Zone` model（含同攝影機內 zone name 不可重複），只在 `zone_mapping` 真正需要 zone 幾何時呼叫。`CameraRegistry` 另外對 `camera_id` 與 `stream_dirname` 都做唯一性驗證（fail-loud，避免重複登錄的攝影機讓 `resolve_cameras`／zone mapping 的查詢字典靜默覆蓋其中一筆）。
 - **`map_zones_daily`**：讀 parquet → `load_registry` 取各 camera 的 `zones` → `validate_zone_cameras` fail-loud（先比對 camera 對不上當天資料，不必等 zone 幾何解析完才報錯）→ 通過後才對每台攝影機呼叫 `parsed_zones()` 解析驗證 → 逐 camera/zone 呼叫 `stats.py` 演算法 → 寫 `zone_counts.parquet`（`.tmp` + 原子 rename）→ 快照 `camera_registry.yaml` 成 `camera_registry_used.yaml`。
 - **`stats.py`**（純運算）：`points_in_polygon`（numpy 向量化 ray casting）判定腳底中心點 `((x1+x2)/2, y2)`；`count_zone_visits` 依 `time_bucket` 聚合 `unique_visitors`（不重複 track_id 數）與 `entries`（out→in 轉換次數，`entry_debounce_frames` 控制去抖，預設 1 = 不去抖）。
+
+### Report（Excel 人流報表）
+
+- **輸出**：`outputs/{bucket}/report.xlsx`，是跨日累加更新的單一檔案（不像
+  `zone_counts.parquet` 逐日各一份），含三個分頁：「每小時人流」「每日尖峰」
+  「活動事件」。「活動事件」目前只建標題列、由其他來源填入，`export_report_daily`
+  不會動這個分頁。
+- **zone 名稱全域唯一（新前提）**：報表的「區域」欄位以 zone 名稱分組、不含
+  camera_id，因此要求整份 `camera_registry.yaml` 的 zone 名稱**跨攝影機也不可
+  重複**（原本 `parsed_zones()` 只驗證同一攝影機內不重複）。此驗證只加在
+  `report/pipeline.py._validate_unique_zone_names`，不影響 `analyze_daily` /
+  `zone_mapping` 既有路徑。未來若有 UI 維護 `camera_registry.yaml`，會在該處
+  即時擋下重複命名。
+- **時區**：`zone_counts.parquet` 以 UTC 曆日切分，報表顯示台北時區
+  （固定 +8 小時，無 DST）的本地小時／日期。單次執行涵蓋的 UTC 一天資料，轉換
+  後會落在本地「當天 08:00–23:59」與「隔天 00:00–07:59」兩個曆日；若店家凌晨
+  無營業不影響正確性，若有 24 小時營運資料則凌晨時段只會計入當次執行的輸出，
+  不會等隔天執行時自動合併成完整一天。
+- **`on_duplicate_date`**（`config.toml` 的 `[report]`）：重跑同一天時的處理
+  方式，`overwrite`（預設）刪除既有相同日期的列後插入新列，`append` 直接加到
+  尾端不檢查，`error` 發現重複日期就整個中止不寫入。
 
 ### 設定
 
