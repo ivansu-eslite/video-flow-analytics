@@ -75,7 +75,10 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
   重複**（原本 `parsed_zones()` 只驗證同一攝影機內不重複）。此驗證只加在
   `report/pipeline.py._validate_unique_zone_names`，不影響 `analyze_daily` /
   `zone_mapping` 既有路徑。未來若有 UI 維護 `camera_registry.yaml`，會在該處
-  即時擋下重複命名。
+  即時擋下重複命名。**驗證對象是產生該日 `zone_counts.parquet` 當時的
+  `camera_registry_used.yaml` 快照，而非「當下」的 `camera_registry.yaml`**：
+  若兩者之間改過 zone 名稱，用即時檔案驗證會通過，但 parquet 裡的 zone 名稱其實
+  是舊定義，可能讓不同攝影機的人流被靜默合併。
 - **時區**：`zone_counts.parquet` 以 UTC 曆日切分，報表顯示台北時區
   （固定 +8 小時，無 DST）的本地小時／日期。單次執行涵蓋的 UTC 一天資料，轉換
   後會落在本地「當天 08:00–23:59」與「隔天 00:00–07:59」兩個曆日；若店家凌晨
@@ -83,7 +86,20 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
   不會等隔天執行時自動合併成完整一天。
 - **`on_duplicate_date`**（`config.toml` 的 `[report]`）：重跑同一天時的處理
   方式，`overwrite`（預設）刪除既有相同日期的列後插入新列，`append` 直接加到
-  尾端不檢查，`error` 發現重複日期就整個中止不寫入。
+  尾端不檢查，`error` 發現重複日期就整個中止不寫入。**判斷「重複」只看曆日期，
+  不看期間**：24 小時營運資料下，連續執行相鄰兩個 UTC 日會各自在共用的那個本地
+  曆日寫入不同期間（例如前一天執行寫入當天 00:00–07:59、當天執行寫入
+  08:00–23:59）。`overwrite` 模式重跑會把該曆日「全部既有列」刪除再插入本次
+  資料，因此會把前一次執行寫入、屬於同一曆日但不同期間的列一併刪除、永久遺失；
+  `error` 模式則會把這種時段不重疊的正常接續執行誤判為衝突而整批拒絕寫入。
+  這是目前已知限制，非預期使用情境（24 小時營運且需要跨執行保留當日全部期間）
+  請避免依賴 `overwrite`/`error` 模式在共用曆日上的資料完整性。
+- **`metric='unique_visitors'` 的彙總是近似值**：`rollup_by_period` 對
+  `unique_visitors` 一律用 `sum()` 把多個 `bucket_minutes` 彙總成
+  `period_minutes`，但 `unique_visitors` 本身是「該 bucket 內不重複人數」，
+  若同一人跨越多個相鄰 bucket 停留，會在彙總後被重複計入。`zone_counts.parquet`
+  未保留原始 `track_id`，`report` 這層無法在彙總時消除重複計數。`metric='entries'`
+  不受影響（本身即為可疊加的事件次數）。
 
 ### 設定
 

@@ -32,6 +32,11 @@ def rollup_by_period(
     輸入需含 local_time（naive datetime）、zone、metric 指定的欄位。
     輸出欄位：date（字串 YYYY-MM-DD）、weekday（中文）、period（字串 HH:MM，
     該期間起始時間）、zone、value（Int64）。
+
+    metric='unique_visitors' 時是近似值：輸入欄位本身已是每個 bucket_minutes
+    內的不重複人數，跨 bucket 用 sum() 彙總會讓同一人跨相鄰 bucket 停留時被
+    重複計入（track_id 未保留到這一層，無法在彙總時消除重複）。metric='entries'
+    不受影響。
     """
     rolled = (
         df.with_columns(
