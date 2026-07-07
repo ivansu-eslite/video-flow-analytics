@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 專案概述
 
-多路離線影片流分析系統：以「一天」為單位，從本機模擬 GCS bucket 的目錄結構（`bucket_name/<location>_<camera_id>/{YYYY}/{MM}/{DD}/{HHmmss}.{SSS}Z.mkv`，檔名時間為 RFC 3339 UTC）讀取各攝影機的影片片段，用 YOLO（僅偵測 `person`）做偵測、ByteTrack 做多路追蹤。輸出兩種結果：追蹤明細 Parquet（`outputs/{bucket_name}/{date}/tracking_results.parquet`）與逐片段標註影片（路徑鏡射輸入、根目錄換成 `outputs/{bucket_name}/`）。攝影機清單與各攝影機的 zone 定義統一寫在 `bucket_dir/camera_registry.yaml`（不進版控）。
+多路離線影片流分析系統：以「一天」為單位，從本機模擬 GCS bucket 的目錄結構（`bucket_name/<location>_<camera_id>/{YYYY}/{MM}/{DD}/{HHmmss}.{SSS}Z.mkv`）讀取各攝影機的影片片段，用 YOLO（僅偵測 `person`）做偵測、ByteTrack 做多路追蹤。**檔名的 `Z` 尾綴排版沿用 RFC 3339，但實際時間並非真正的 UTC：攝影機錄影時鐘本身就是台北時間（UTC+8），`io/video_reader.py` 解析時明確標記為 `Asia/Taipei`**（見該檔 `_RECORDING_TZ`）。輸出兩種結果：追蹤明細 Parquet（`outputs/{bucket_name}/{date}/tracking_results.parquet`）與逐片段標註影片（路徑鏡射輸入、根目錄換成 `outputs/{bucket_name}/`）。攝影機清單與各攝影機的 zone 定義統一寫在 `bucket_dir/camera_registry.yaml`（不進版控）。
 
 進入點是函式呼叫，CLI 只是從 `config.toml` 組參數再呼叫：
 - `analyze.pipeline.analyze_daily(date, bucket_dir, camera_ids=None) -> AnalysisResult`（YOLO 偵測 + ByteTrack 多路追蹤，輸出 `tracking_results.parquet` 與標註影片；GPU、多進程，執行成本高）
@@ -76,11 +76,12 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
   `report/pipeline.py._validate_unique_zone_names`，不影響 `analyze_daily` /
   `zone_mapping` 既有路徑。未來若有 UI 維護 `camera_registry.yaml`，會在該處
   即時擋下重複命名。
-- **時區**：`zone_counts.parquet` 以 UTC 曆日切分，報表顯示台北時區
-  （固定 +8 小時，無 DST）的本地小時／日期。單次執行涵蓋的 UTC 一天資料，轉換
-  後會落在本地「當天 08:00–23:59」與「隔天 00:00–07:59」兩個曆日；若店家凌晨
-  無營業不影響正確性，若有 24 小時營運資料則凌晨時段只會計入當次執行的輸出，
-  不會等隔天執行時自動合併成完整一天。
+- **時區**：攝影機錄影時鐘本身就是台北時間（UTC+8，見專案概述段落與
+  `io/video_reader.py` 的 `_RECORDING_TZ`），`tracking_results.parquet` 的
+  `timestamp` 與 `zone_counts.parquet` 的 `time_bucket` 皆正確標記為
+  `Asia/Taipei`，報表不需要、也不應該再對它們做任何 UTC→+8 的時區位移；報表
+  算出來的日期／小時會與 `zone_counts.parquet` 所在的日期資料夾一致，不會
+  跨曆日。
 - **`on_duplicate_date`**（`config.toml` 的 `[report]`）：重跑同一天時的處理
   方式，`overwrite`（預設）刪除既有相同日期的列後插入新列，`append` 直接加到
   尾端不檢查，`error` 發現重複日期就整個中止不寫入。
@@ -93,4 +94,6 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
 ### 其他注意事項
 
 - `yolo26m.pt`、`bucket_name*/`、`outputs/` 皆在 `.gitignore`，不進版控（`camera_registry.yaml` 含 zone 定義，隨 `bucket_name*/` 一起不進版控）。
-- 下游任務讀 `tracking_results.parquet` 的時間戳為 UTC，本地時段報表需自行轉時區（台北 +8）。
+- `tracking_results.parquet` 的 `timestamp`／`zone_counts.parquet` 的 `time_bucket`
+  皆標記為 `Asia/Taipei`（非 UTC，見專案概述段落），下游不需要、也不應該再對
+  它們做 UTC→台北 +8 的時區位移。

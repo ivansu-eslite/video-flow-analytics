@@ -28,10 +28,12 @@ logger = logging.getLogger(__name__)
 OUTPUT_ROOT = Path("outputs")
 
 # 空輸出時仍寫出帶正確欄位 schema 的 parquet，讓下游讀取行為一致。
+# time_bucket 沿用 tracking_results.parquet 的 timestamp tz 標記（台北時間，
+# 非 UTC，見 io/video_reader.py 的 _RECORDING_TZ 註解）。
 _ZONE_COUNTS_SCHEMA = {
     "camera_id": pl.Utf8,
     "zone": pl.Utf8,
-    "time_bucket": pl.Datetime("us", "UTC"),
+    "time_bucket": pl.Datetime("us", "Asia/Taipei"),
     "unique_visitors": pl.Int64,
     "entries": pl.Int64,
 }
