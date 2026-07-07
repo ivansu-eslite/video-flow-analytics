@@ -1,4 +1,5 @@
 import datetime
+from zoneinfo import ZoneInfo
 
 import polars as pl
 
@@ -24,13 +25,12 @@ def test_weekday_zh_covers_full_week():
 
 
 def test_to_taipei_keeps_wall_clock_time_unchanged():
-    # 攝影機錄影時鐘本身就是台北時間（UTC+8），time_bucket 雖然被標記成 UTC，
-    # 實際 wall-clock 值已經是台北時間，to_taipei 不應該再額外加 8 小時，
-    # 否則會造成雙重位移。
+    # time_bucket 正確標記為 Asia/Taipei，wall-clock 值已是台北時間，
+    # to_taipei 不應再額外加 8 小時，否則會造成雙重位移
     df = pl.DataFrame(
         {
             "time_bucket": [
-                datetime.datetime(2026, 5, 1, 11, 0, tzinfo=datetime.timezone.utc)
+                datetime.datetime(2026, 5, 1, 11, 0, tzinfo=ZoneInfo("Asia/Taipei"))
             ]
         }
     )
