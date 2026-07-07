@@ -16,11 +16,14 @@ def weekday_zh(d: datetime.date) -> str:
 
 
 def to_taipei(df: pl.DataFrame, column: str = "time_bucket") -> pl.DataFrame:
-    """新增 local_time 欄位：column 轉為台北時區（固定 +8 小時，台北無 DST）。"""
+    """新增 local_time 欄位：直接沿用 column 的 wall-clock 值，不做時區位移。
+
+    `column`（來自 zone_counts.parquet 的 time_bucket）雖然在 schema 上標記為
+    UTC，但攝影機錄影時鐘本身就是台北時間（UTC+8），因此這裡不能再額外加 8
+    小時，否則會造成雙重位移；只需要去掉這個（其實標錯的）tz 標記即可。
+    """
     return df.with_columns(
-        (pl.col(column).dt.replace_time_zone(None) + pl.duration(hours=8)).alias(
-            "local_time"
-        )
+        pl.col(column).dt.replace_time_zone(None).alias("local_time")
     )
 
 

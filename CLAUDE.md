@@ -79,21 +79,16 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
   `camera_registry_used.yaml` 快照，而非「當下」的 `camera_registry.yaml`**：
   若兩者之間改過 zone 名稱，用即時檔案驗證會通過，但 parquet 裡的 zone 名稱其實
   是舊定義，可能讓不同攝影機的人流被靜默合併。
-- **時區**：`zone_counts.parquet` 以 UTC 曆日切分，報表顯示台北時區
-  （固定 +8 小時，無 DST）的本地小時／日期。單次執行涵蓋的 UTC 一天資料，轉換
-  後會落在本地「當天 08:00–23:59」與「隔天 00:00–07:59」兩個曆日；若店家凌晨
-  無營業不影響正確性，若有 24 小時營運資料則凌晨時段只會計入當次執行的輸出，
-  不會等隔天執行時自動合併成完整一天。
+- **時區**：攝影機錄影時鐘本身就是台北時間（UTC+8），`io/video_reader.py`
+  解析檔名時把這個時間戳「標記」成 UTC（`tzinfo=timezone.utc`），但數值上
+  從頭到尾都沒有做過任何時區位移——`tracking_results.parquet` 的 `timestamp`
+  與 `zone_counts.parquet` 的 `time_bucket` 都只是原樣沿用這個（標記錯誤的）
+  UTC 時間戳。`report/stats.py.to_taipei()` 因此**不能**再對它加 8 小時
+  （曾經誤加過、已修正），只需要去掉這個標錯的 tz 標記即可；報表算出來的
+  日期／小時因此與 `zone_counts.parquet` 所在的日期資料夾一致，不會跨曆日。
 - **`on_duplicate_date`**（`config.toml` 的 `[report]`）：重跑同一天時的處理
   方式，`overwrite`（預設）刪除既有相同日期的列後插入新列，`append` 直接加到
-  尾端不檢查，`error` 發現重複日期就整個中止不寫入。**判斷「重複」只看曆日期，
-  不看期間**：24 小時營運資料下，連續執行相鄰兩個 UTC 日會各自在共用的那個本地
-  曆日寫入不同期間（例如前一天執行寫入當天 00:00–07:59、當天執行寫入
-  08:00–23:59）。`overwrite` 模式重跑會把該曆日「全部既有列」刪除再插入本次
-  資料，因此會把前一次執行寫入、屬於同一曆日但不同期間的列一併刪除、永久遺失；
-  `error` 模式則會把這種時段不重疊的正常接續執行誤判為衝突而整批拒絕寫入。
-  這是目前已知限制，非預期使用情境（24 小時營運且需要跨執行保留當日全部期間）
-  請避免依賴 `overwrite`/`error` 模式在共用曆日上的資料完整性。
+  尾端不檢查，`error` 發現重複日期就整個中止不寫入。
 - **`metric='unique_visitors'` 的彙總是近似值**：`rollup_by_period` 對
   `unique_visitors` 一律用 `sum()` 把多個 `bucket_minutes` 彙總成
   `period_minutes`，但 `unique_visitors` 本身是「該 bucket 內不重複人數」，

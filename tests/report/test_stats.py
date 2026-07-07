@@ -23,7 +23,10 @@ def test_weekday_zh_covers_full_week():
         assert weekday_zh(base + datetime.timedelta(days=offset)) == name
 
 
-def test_to_taipei_adds_eight_hours():
+def test_to_taipei_keeps_wall_clock_time_unchanged():
+    # 攝影機錄影時鐘本身就是台北時間（UTC+8），time_bucket 雖然被標記成 UTC，
+    # 實際 wall-clock 值已經是台北時間，to_taipei 不應該再額外加 8 小時，
+    # 否則會造成雙重位移。
     df = pl.DataFrame(
         {
             "time_bucket": [
@@ -32,7 +35,7 @@ def test_to_taipei_adds_eight_hours():
         }
     )
     result = to_taipei(df)
-    assert result["local_time"][0] == datetime.datetime(2026, 5, 1, 19, 0)
+    assert result["local_time"][0] == datetime.datetime(2026, 5, 1, 11, 0)
 
 
 def _make_zone_counts(rows):

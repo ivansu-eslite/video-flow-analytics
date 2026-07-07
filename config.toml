@@ -31,7 +31,5 @@ period_minutes = 60              # 報表人流彙總的時段粒度（分鐘）
 # "entries" 或 "unique_visitors"；unique_visitors 是跨 bucket 加總的近似值，
 # 同一人跨相鄰 bucket 停留時會被重複計入，詳見 CLAUDE.md 的 Report 說明
 metric = "entries"
-# 同一天資料已存在時："overwrite"（預設）/ "append" / "error"。
-# 注意：判斷「重複」只看曆日期、不看期間，24 小時營運資料下連續執行相鄰兩個
-# UTC 日可能誤刪/誤擋共用曆日的既有資料，詳見 CLAUDE.md 的 Report 說明
+# 同一天資料已存在時："overwrite"（預設）/ "append" / "error"
 on_duplicate_date = "overwrite"
