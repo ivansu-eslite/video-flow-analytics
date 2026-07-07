@@ -32,12 +32,8 @@ class CameraEntry(BaseModel):
     camera_id: str
     location: str
     ip: str
-    # 該攝影機的 zone 定義（人工維護，原始資料，未經驗證）；空清單代表這台攝影機
-    # 不參與 zone mapping。刻意用 list[Any]（而非 list[Zone] 或 list[dict]）：
-    # CameraEntry 也被 analyze_daily（重、GPU 路徑）透過 load_registry 讀取，若在
-    # 此驗證 zone 內容（哪怕只是「必須是 dict」的形狀檢查），zone 定義打錯字會連
-    # 帶讓不需要 zone 的 analyze_daily 也失敗。改由 parsed_zones() 延後到
-    # zone_mapping 真正使用 zone 時才驗證。
+    # 刻意用 list[Any]（非 list[Zone]）：也被重的 analyze_daily 讀取，若在此驗證
+    # zone 內容，打錯字會連帶讓不需要 zone 的路徑失敗；驗證延後到 parsed_zones()
     zones: list[Any] = Field(default_factory=list)
 
     @property
@@ -69,9 +65,7 @@ class CameraRegistry(BaseModel):
 
     @model_validator(mode="after")
     def _unique_camera_identity(self) -> "CameraRegistry":
-        # camera_id 是 resolve_cameras() 的查詢鍵、stream_dirname 是 zone_mapping
-        # 對齊 parquet camera_id 的鍵，兩者都不可重複，否則對應的 dict 建構會靜默
-        # 覆蓋其中一筆攝影機。
+        # camera_id 與 stream_dirname 是兩處查詢字典的鍵，重複會讓攝影機被靜默覆蓋
         dupes = _find_duplicates(
             [cam.camera_id for cam in self.cameras]
         ) | _find_duplicates([cam.stream_dirname for cam in self.cameras])

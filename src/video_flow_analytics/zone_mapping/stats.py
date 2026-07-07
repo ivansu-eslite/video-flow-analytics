@@ -28,10 +28,8 @@ def points_in_polygon(
     j = len(polygon) - 1
     with np.errstate(divide="ignore", invalid="ignore"):
         for i in range(len(polygon)):
-            # 邊 (j -> i) 是否在 y 方向跨越目標點（水平射線會穿到這條邊）
-            crosses = (py[i] > ys) != (py[j] > ys)
-            # 射線與該邊交點的 x 座標；crosses 為 False 的列不會用到（下方 & 遮蔽），
-            # 故 py[i]==py[j] 造成的除零結果會被 errstate 忽略、不影響結果。
+            crosses = (py[i] > ys) != (py[j] > ys)  # 邊 (j->i) 是否在 y 方向跨越目標點
+            # crosses 為 False 的列不會用到 x_cross，故 py[i]==py[j] 的除零結果無影響
             x_cross = (px[j] - px[i]) * (ys - py[i]) / (py[j] - py[i]) + px[i]
             inside ^= crosses & (xs < x_cross)
             j = i
@@ -64,9 +62,7 @@ def count_zone_visits(
         .agg(pl.col("track_id").n_unique().alias("unique_visitors"))
     )
 
-    # 「確認進入」= 連續 entry_debounce_frames 格都在區域內（含當格）；預設值 1 時
-    # 等同於單純的 in_zone，不改變原本行為。取 out->in 的轉換（首格 prev 視為
-    # False，故一開始就滿足連續格數也算一次進入）。
+    # 「確認進入」= 連續 entry_debounce_frames 格都在區域內；預設值 1 時等同單純 in_zone
     confirmed_in = (
         pl.col("in_zone")
         .cast(pl.Int8)

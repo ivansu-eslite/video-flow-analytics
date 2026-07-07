@@ -22,18 +22,16 @@ _SCHEMA = {
     "y2": pl.Float64,
 }
 
-# 每累積這麼多列就 flush 成一個 parquet row group 並清空記憶體緩衝，避免整天的
-# 追蹤明細（單日多鏡頭可能有數千萬列）常駐記憶體。以列數為門檻而非「逐段」，
-# 是因為多路串流交錯寫入、片段長度不一，列數門檻能給出穩定的記憶體上限。
+# 累積這麼多列就 flush 一個 row group，避免整天追蹤明細（數千萬列）常駐記憶體；
+# 用列數而非逐段門檻，因多路串流交錯寫入、片段長度不一
 _FLUSH_EVERY_ROWS = 200_000
 
 
 class TrackingResultCollector:
     """收集每格的追蹤結果，累積到門檻列數就 flush 成一個 row group 並清空緩衝。
 
-    flush 的內容先寫到 `{results_path}.tmp`；只有 save() 成功時才會把它原子性地
-    改名成正式檔名。中途例外時呼叫 discard() 清掉暫存檔，確保不會留下不完整的
-    tracking_results.parquet（fail-loud）。
+    flush 內容先寫到 `{results_path}.tmp`，只有 save() 成功才原子性改名成正式檔名；
+    中途例外改呼叫 discard() 清掉暫存檔，不留下不完整的 parquet（fail-loud）。
     """
 
     def __init__(self, results_path: Path):

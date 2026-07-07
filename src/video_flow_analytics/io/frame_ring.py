@@ -20,15 +20,11 @@ def create_ring_buffer(num_slots: int, height: int, width: int):
 
 
 class FrameRing:
-    """單一路的共享記憶體環形緩衝。
+    """單一路的共享記憶體環形緩衝，避免每格 6MB 影格走 pickle + pipe（實測該 IPC
+    佔推理進程時間約 60%，是搬走影片編碼後的新瓶頸）。
 
-    reader 進程把解碼後的影格 memcpy 進某個 slot，只透過 queue 傳「slot 索引 +
-    metadata」給推理進程；推理進程直接在該 slot 上讀出（copy 成私有陣列後隨即
-    歸還 slot 供 reader 覆寫）。藉此避免每格 6MB 影格走 pickle + pipe——實測該
-    IPC 佔推理進程時間約 60%，是搬走影片編碼後的新瓶頸。
-
-    假設同一路（攝影機）整天解析度固定（緩衝在父進程依首格尺寸一次配置）；若某格
-    尺寸與建立時不符，write_slot 會直接拋出 ValueError（fail-loud），而非靜默寫壞。
+    假設同一路整天解析度固定（緩衝依首格尺寸一次配置）；尺寸不符時 write_slot
+    直接拋 ValueError（fail-loud），不會靜默寫壞。
     """
 
     def __init__(self, buffer, num_slots: int, height: int, width: int):

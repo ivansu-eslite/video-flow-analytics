@@ -91,10 +91,8 @@ def discover_segments(
 class DailyStreamVideoReader:
     """依時間序逐段讀取單一攝影機一整天的片段。
 
-    影格不再逐格 pickle 進 queue，而是 memcpy 進共享環形緩衝的某個 slot：先從
-    free_queue 領一個空 slot（無空 slot 時阻塞，形成對推理進程的天然背壓），寫入
-    後只把「slot 索引 + metadata」丟進 data_queue。推理進程讀出 slot 後會把索引還回
-    free_queue 供覆寫。
+    影格 memcpy 進共享環形緩衝的 slot、queue 只傳「slot 索引 + metadata」，避免逐格
+    pickle。無空 slot 時阻塞，形成對推理進程的天然背壓。
     """
 
     def __init__(
@@ -135,8 +133,7 @@ class DailyStreamVideoReader:
             cap.release()
 
     def run(self) -> None:
-        # free_queue 由 reader 自己在起跑時填滿（避免「父進程先 put 再 fork」在
-        # mp.Queue feeder 執行緒上的競態）；推理進程只負責歸還，不會早於此執行。
+        # free_queue 由 reader 自己起跑時填滿，避免「父進程先 put 再 fork」的競態
         for slot in range(self.ring.num_slots):
             self.free_queue.put(slot)
         failed = False

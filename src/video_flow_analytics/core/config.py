@@ -34,8 +34,7 @@ class OutputConfig(BaseModel):
 class ZoneConfig(BaseModel):
     # 人流統計的時段粒度（分鐘），time_bucket 依此在台北時間上向下取整
     bucket_minutes: int = Field(default=15, ge=1)
-    # 連續幾格都在區域內才算一次「進入」，用來過濾邊界抖動造成的假進入；
-    # 預設 1 = 不去抖（一格在內就算一次進入）
+    # 連續幾格都在區域內才算一次「進入」，濾除邊界抖動；預設 1 = 不去抖
     entry_debounce_frames: int = Field(default=1, ge=1)
 
 

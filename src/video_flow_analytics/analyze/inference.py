@@ -15,9 +15,7 @@ from video_flow_analytics.visualization.visualizer import TrackAnnotator
 
 logger = logging.getLogger(__name__)
 
-# 湊批：當下可取的影格不足目標批次時，最多再等這麼久嘗試湊更多，讓 YOLO 吃到較滿
-# 的批次（實測 batch=4 → 8 可讓每格推理從 ~3.8ms 降到 ~2.4ms）。等待期以此輪詢間隔
-# 短暫休眠。離線批次處理不在意單格延遲，這點等待換來的批次效率是划算的。
+# 影格不足目標批次時最多再等這麼久湊批（實測 batch 4→8 可讓每格推理 3.8ms→2.4ms）
 _FILL_MAX_WAIT = 0.004
 _FILL_POLL = 0.0005
 
@@ -39,7 +37,7 @@ class InferencePipeline:
         self.writer = MultiStreamVideoWriter(output_root=output_root)
         self.annotator = TrackAnnotator()
         self.collector = TrackingResultCollector(results_path)
-        # 每次推理湊到約兩個模型批次量再送 predict，讓 ultralytics 內部能組成完整批
+        # 湊約兩倍 batch 讓 ultralytics 組成完整批
         self._target_batch = settings.model.batch * 2
 
     def _collect_batch(
@@ -48,15 +46,9 @@ class InferencePipeline:
         free_queues: list[mp.Queue],
         rings: list[FrameRing],
     ) -> tuple[list[FramePacket], list[int], list[int]]:
-        # 逐路非阻塞取出「slot 索引 + metadata」，從共享環形緩衝把該格複製成私有陣列
-        # 後，立刻把 slot 還回 free_queue 供 reader 覆寫。累積到 _target_batch 就送出；
-        # 不足時最多再等 _FILL_MAX_WAIT 嘗試湊更多，以維持 GPU 批次效率。記憶體不會
-        # 因追著 reader 而爆——在途影格數受環形緩衝 slot 數硬性上限。
-        #
-        # 讀到某路的 None（正常讀完）時，只記進 newly_finished、不在此關閉該路 writer：
-        # 本批 batch_packets 裡先前收進來的、屬於這一路的影格還沒寫出（要等 collect
-        # 返回後才 writer.write）。若在這裡就 close_stream，writer 執行緒會先收尾關檔，
-        # 之後那些影格再 write 會重開同一個檔、把它截斷。故延到本批影格全部寫完再關。
+        # slot 讀出後立即歸還 free_queue；在途影格數受環形緩衝 slot 數上限，不爆記憶體。
+        # 讀到 None 只記進 newly_finished、不在此關閉 writer：本批已收但未寫出的同路影格
+        # 若此時 close_stream，會被 writer 背景緒搶先關檔、之後補寫時重開檔案而截斷。
         batch_packets: list[FramePacket] = []
         batch_stream_ids: list[int] = []
         newly_finished: list[int] = []
@@ -73,9 +65,7 @@ class InferencePipeline:
                     except Empty:
                         break
                     progressed = True
-                    if item is None:
-                        # None 是讀取進程放入的結束訊號，代表該路已正常讀完；writer 延到
-                        # 本批影格寫完後再關（見上方說明），這裡只標記結束、停止輪詢該路
+                    if item is None:  # 該路正常讀完，close 延後（見上方說明）
                         self.finished_streams.add(stream_id)
                         newly_finished.append(stream_id)
                         break
@@ -145,18 +135,12 @@ class InferencePipeline:
                     self.writer.write(
                         stream_id, packet.segment_relpath, annotated_frame, packet.fps
                     )
-                # 本批影格已全部寫入各自的 writer queue，這時才安全地關閉剛讀完的路，
-                # 避免上面尚未寫出的影格在 writer 收尾後又被重開寫入、把檔案截斷
+                # 本批已全部 write()，才可安全 close_stream（避免截斷，見上方說明）
                 for stream_id in newly_finished:
                     self.writer.close_stream(stream_id)
-            # 編碼在背景 writer 執行緒進行，收尾要等它們寫完；close_all() 也會把
-            # 任一路 writer 執行緒的中途例外重拋到這裡，讓 parquet 走 discard 而非 save
-            self.writer.close_all()
-            # 僅在全部串流正常跑完（含影片編碼）時才把結果原子性地改名成正式檔名
-            self.collector.save()
+            self.writer.close_all()  # 會把 writer 背景緒的中途例外重拋到這裡
+            self.collector.save()  # 僅全部串流（含編碼）跑完才原子性改名成正式檔名
         except BaseException:
-            # 中途例外（含 Ctrl+C、writer 執行緒失敗）：清掉尚未改名成正式檔名的
-            # 暫存 parquet，並停掉所有 writer 執行緒，寧可不留下不完整結果（fail-loud）
-            self.collector.discard()
+            self.collector.discard()  # fail-loud：不留下不完整結果
             self.writer.abort()
             raise

@@ -31,16 +31,12 @@ def to_taipei(df: pl.DataFrame, column: str = "time_bucket") -> pl.DataFrame:
 def rollup_by_period(
     df: pl.DataFrame, period_minutes: int, metric: str
 ) -> pl.DataFrame:
-    """把已轉為本地時間的 zone 人流資料，依 period_minutes 彙總成期間×區域的統計。
+    """依 period_minutes 把已轉本地時間的 zone 人流資料彙總成期間×區域統計。
 
     輸入需含 local_time（naive datetime）、zone、metric 指定的欄位。
-    輸出欄位：date（字串 YYYY-MM-DD）、weekday（中文）、period（字串 HH:MM，
-    該期間起始時間）、zone、value（Int64）。
 
-    metric='unique_visitors' 時是近似值：輸入欄位本身已是每個 bucket_minutes
-    內的不重複人數，跨 bucket 用 sum() 彙總會讓同一人跨相鄰 bucket 停留時被
-    重複計入（track_id 未保留到這一層，無法在彙總時消除重複）。metric='entries'
-    不受影響。
+    metric='unique_visitors' 是近似值：跨 bucket 用 sum() 彙總會讓同一人跨相鄰
+    bucket 停留時被重複計入（track_id 未保留到這層無法消除重複）；'entries' 不受影響。
     """
     rolled = (
         df.with_columns(

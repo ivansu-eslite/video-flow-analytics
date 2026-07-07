@@ -11,9 +11,7 @@ from video_flow_analytics.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 每路 writer 執行緒的待編碼影格緩衝上限。編碼（234 fps/路）遠快於單路的實際
-# 影格產出速率，正常情況 queue 不會積壓；設上限只為防止病態情況吃光記憶體，
-# 滿了就讓生產端（推理主緒）阻塞在 put 上、自然退回編碼速度。
+# 每路 writer 待編碼影格緩衝上限；正常不會積壓，設上限只防病態情況吃光記憶體
 _WRITER_QUEUE_MAXSIZE = 60
 
 
@@ -29,23 +27,12 @@ class _OpenSegment:
 
 
 class MultiStreamVideoWriter:
-    """為每一支輸入片段各自輸出一支標註影片。
+    """為每一支輸入片段各自輸出一支標註影片，路徑鏡射輸入（見 mirrored_output_path）。
 
-    輸出路徑鏡射輸入片段相對 bucket 的路徑，只是把根從 bucket 換成 output_root，
-    例如 test_cam001/2026/05/01/110000.000Z.mkv 會輸出到
-    outputs/test_cam001/2026/05/01/110000.000Z.mkv。
-    同一路的影格依片段順序抵達，偵測到 segment_relpath 改變時就關掉舊檔、開新檔。
+    mp4v 編碼是 CPU 重工，inline 執行會卡住 GPU（實測單日吞吐腰斬），故每路各起一個
+    背景 writer 執行緒編碼，與下一批 GPU 推理重疊（cv2.VideoWriter.write 會釋放 GIL）。
 
-    mp4v 編碼是 CPU 重工，若在推理主迴圈裡 inline 執行會卡住 GPU（實測讓單日
-    吞吐腰斬）。因此每一路各起一個背景 writer 執行緒負責實際 cv2 編碼：主緒的
-    write() 只把影格丟進該路的 queue 就返回，編碼與下一批 GPU 推理重疊進行
-    （cv2.VideoWriter.write 會釋放 GIL，故多路 writer 執行緒能真正並行）。影格以
-    參考傳遞、不額外複製；FramePacket 逐格是獨立的 numpy 陣列，enqueue 後主緒不再
-    改動它，故 thread-safe。
-
-    fail-loud：writer 執行緒中途例外（如開檔失敗）時會記錄下來，主緒在下一次
-    write() 或收尾的 close_all() 會重新拋出，讓推理進程以非零 exitcode 結束、
-    丟棄尚未改名的 .tmp parquet，與 reader 一致地「寧可 fail-loud 也不產生無效輸出」。
+    fail-loud：writer 執行緒例外會記錄下來，主緒在下次 write() 或 close_all() 重新拋出。
     """
 
     def __init__(self, output_root: Path):

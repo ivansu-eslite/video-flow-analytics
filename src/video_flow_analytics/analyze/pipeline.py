@@ -32,18 +32,12 @@ OUTPUT_ROOT = Path("outputs")
 
 @dataclass
 class AnalysisResult:
-    """analyze_daily 的回傳結果（原 DailyAnalysisResponse，改為就地定義的
-    dataclass；不再是 pydantic 模型，也不再為 HTTP 化預留）。"""
+    """analyze_daily 的回傳結果。"""
 
     date: datetime.date
-    # 實際分析過的攝影機，格式與 tracking_results.parquet 的 camera_id 欄位一致
-    # （即 stream_dirname，`<location>_<camera_id>`），可直接用來 join 追蹤結果；
-    # 與用來篩選攝影機的裸 camera_id 格式不同
-    camera_ids: list[str]
-    # 各 camera 的追蹤結果明細（Parquet）
+    camera_ids: list[str]  # stream_dirname 格式，與 parquet 的 camera_id 一致
     tracking_results_path: str
-    # 開發驗證用的標註影片；save_video=False 時為空清單，
-    # 只列出實際成功寫出的檔案（略過 0 幀等未產生輸出的片段）
+    # save_video=False 時為空
     output_video_paths: list[str] = field(default_factory=list)
 
 
@@ -117,8 +111,7 @@ def analyze_daily(
     results_path = output_root / date.isoformat() / "tracking_results.parquet"
 
     num_streams = len(stream_names)
-    # 每路各一組：資料 queue（傳 slot 索引 + metadata）、空 slot queue、共享環形緩衝。
-    # 影格走共享記憶體，queue 只傳輕量索引，避免每格 6MB 走 pickle + pipe。
+    # 影格走共享記憶體環形緩衝，queue 只傳輕量索引，避免每格 6MB 走 pickle + pipe
     data_queues = [mp.Queue() for _ in range(num_streams)]
     free_queues = [mp.Queue() for _ in range(num_streams)]
     ring_buffers = [
@@ -172,9 +165,7 @@ def analyze_daily(
                 p.join(timeout=0.5)
             _raise_if_abnormal(processes)
 
-        # 迴圈結束代表所有進程都已死亡；即使最後一個進程剛好在上一輪檢查「之後」
-        # 才異常結束（因此走不到下一輪 while 判斷），這裡再補一次檢查，避免把
-        # 「最後一步才失敗」誤判為成功。
+        # 補一次檢查：避免最後一個進程恰好在上一輪之後才異常結束而被誤判為成功
         _raise_if_abnormal(processes)
     except KeyboardInterrupt:
         logger.warning("收到中斷訊號（Ctrl+C），正在優雅關閉所有子進程...")
@@ -196,8 +187,6 @@ def analyze_daily(
     )
     return AnalysisResult(
         date=date,
-        # 與 parquet 的 camera_id 欄位（stream_dirname）保持一致，避免下游用
-        # 這裡回傳的值去 join tracking_results.parquet 時因格式不同而全數落空
         camera_ids=stream_names,
         tracking_results_path=str(results_path),
         output_video_paths=output_video_paths,

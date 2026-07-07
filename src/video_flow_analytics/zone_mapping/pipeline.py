@@ -27,9 +27,7 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_ROOT = Path("outputs")
 
-# 空輸出時仍寫出帶正確欄位 schema 的 parquet，讓下游讀取行為一致。
-# time_bucket 沿用 tracking_results.parquet 的 timestamp tz 標記（台北時間，
-# 非 UTC，見 io/video_reader.py 的 _RECORDING_TZ 註解）。
+# 空輸出也寫出正確 schema 的 parquet；time_bucket tz 沿用 timestamp（見 _RECORDING_TZ）
 _ZONE_COUNTS_SCHEMA = {
     "camera_id": pl.Utf8,
     "zone": pl.Utf8,
@@ -61,9 +59,7 @@ def map_zones_daily(
     }
 
     df = pl.read_parquet(results_path)
-    # 先比對「哪些攝影機有登記 zone」對不對得上當天資料，通過後才解析 zone 幾何：
-    # 停用/改名攝影機的陳舊 zone 定義即使打錯字，也不該蓋過更根本的「camera 對不
-    # 上當天資料」錯誤訊息。
+    # 先驗證 camera 對得上當天資料再解析 zone，避免陳舊 zone 定義打錯字蓋過更根本錯誤
     validate_zone_cameras(set(zone_entries), set(df["camera_id"].unique()))
     zone_cameras: dict[str, list[Zone]] = {
         camera_id: entry.parsed_zones() for camera_id, entry in zone_entries.items()
@@ -102,8 +98,7 @@ def map_zones_daily(
     result.write_parquet(tmp_path)
     tmp_path.replace(counts_path)
 
-    # 快照當下套用的 camera_registry.yaml，讓這份 zone_counts 自帶當天的 zone 依據、
-    # 可回溯。
+    # 快照當下套用的 camera_registry.yaml，讓這份 zone_counts 自帶當天的 zone 依據可回溯
     shutil.copyfile(
         registry_path(bucket_path), output_dir / "camera_registry_used.yaml"
     )
