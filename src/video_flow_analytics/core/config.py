@@ -2,6 +2,7 @@ import datetime
 import logging
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -38,6 +39,15 @@ class ZoneConfig(BaseModel):
     entry_debounce_frames: int = Field(default=1, ge=1)
 
 
+class ReportConfig(BaseModel):
+    # 報表人流彙總的時段粒度（分鐘），需為 zone.bucket_minutes 的倍數
+    period_minutes: int = Field(default=60, ge=1)
+    # 決定「人流量」「尖峰人流」用哪個統計量
+    metric: Literal["entries", "unique_visitors"] = "entries"
+    # 同一天資料已存在時的處理方式
+    on_duplicate_date: Literal["overwrite", "append", "error"] = "overwrite"
+
+
 class InputConfig(BaseModel):
     # 本機模擬 GCS bucket 的根目錄（內含 camera_registry.yaml 與各攝影機片段）
     bucket_dir: str = "bucket_name"
@@ -53,6 +63,7 @@ class AppConfig(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     input: InputConfig = Field(default_factory=InputConfig)
     zone: ZoneConfig = Field(default_factory=ZoneConfig)
+    report: ReportConfig = Field(default_factory=ReportConfig)
 
 
 def load_config() -> AppConfig:

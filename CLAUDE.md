@@ -75,7 +75,10 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
   重複**（原本 `parsed_zones()` 只驗證同一攝影機內不重複）。此驗證只加在
   `report/pipeline.py._validate_unique_zone_names`，不影響 `analyze_daily` /
   `zone_mapping` 既有路徑。未來若有 UI 維護 `camera_registry.yaml`，會在該處
-  即時擋下重複命名。
+  即時擋下重複命名。**驗證對象是產生該日 `zone_counts.parquet` 當時的
+  `camera_registry_used.yaml` 快照，而非「當下」的 `camera_registry.yaml`**：
+  若兩者之間改過 zone 名稱，用即時檔案驗證會通過，但 parquet 裡的 zone 名稱其實
+  是舊定義，可能讓不同攝影機的人流被靜默合併。
 - **時區**：攝影機錄影時鐘本身就是台北時間（UTC+8，見專案概述段落與
   `io/video_reader.py` 的 `_RECORDING_TZ`），`tracking_results.parquet` 的
   `timestamp` 與 `zone_counts.parquet` 的 `time_bucket` 皆正確標記為
@@ -85,6 +88,12 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
 - **`on_duplicate_date`**（`config.toml` 的 `[report]`）：重跑同一天時的處理
   方式，`overwrite`（預設）刪除既有相同日期的列後插入新列，`append` 直接加到
   尾端不檢查，`error` 發現重複日期就整個中止不寫入。
+- **`metric='unique_visitors'` 的彙總是近似值**：`rollup_by_period` 對
+  `unique_visitors` 一律用 `sum()` 把多個 `bucket_minutes` 彙總成
+  `period_minutes`，但 `unique_visitors` 本身是「該 bucket 內不重複人數」，
+  若同一人跨越多個相鄰 bucket 停留，會在彙總後被重複計入。`zone_counts.parquet`
+  未保留原始 `track_id`，`report` 這層無法在彙總時消除重複計數。`metric='entries'`
+  不受影響（本身即為可疊加的事件次數）。
 
 ### 設定
 
