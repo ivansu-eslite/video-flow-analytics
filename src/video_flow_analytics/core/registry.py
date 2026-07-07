@@ -99,10 +99,14 @@ def registry_path(bucket_dir: Path) -> Path:
     return bucket_dir / "camera_registry.yaml"
 
 
-def load_registry(bucket_dir: Path) -> CameraRegistry:
-    path = registry_path(bucket_dir)
+def load_registry_from_path(path: Path) -> CameraRegistry:
+    """讀指定路徑的 registry yaml；用於讀取 camera_registry_used.yaml 這類快照檔。"""
     if not path.exists():
         raise FileNotFoundError(f"找不到設備登錄檔: {path}")
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return CameraRegistry(**data)
+
+
+def load_registry(bucket_dir: Path) -> CameraRegistry:
+    return load_registry_from_path(registry_path(bucket_dir))

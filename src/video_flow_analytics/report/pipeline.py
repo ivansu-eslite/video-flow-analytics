@@ -17,7 +17,11 @@ from openpyxl.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 from video_flow_analytics.core.config import settings
-from video_flow_analytics.core.registry import CameraRegistry, load_registry
+from video_flow_analytics.core.registry import (
+    CameraRegistry,
+    _find_duplicates,
+    load_registry_from_path,
+)
 from video_flow_analytics.report.stats import peak_per_day, rollup_by_period, to_taipei
 
 logger = logging.getLogger(__name__)
@@ -30,7 +34,7 @@ def _validate_unique_zone_names(registry: CameraRegistry) -> None:
     名稱全域唯一；此驗證只在產報表時檢查，不影響 analyze_daily / zone_mapping。
     """
     names = [zone.name for cam in registry.cameras for zone in cam.parsed_zones()]
-    dupes = sorted({name for name in names if names.count(name) > 1})
+    dupes = sorted(_find_duplicates(names))
     if dupes:
         raise ValueError(
             "camera_registry.yaml 中有跨攝影機重複的 zone 名稱，報表需要 zone "
@@ -53,17 +57,20 @@ def _build_report_frames(
         )
 
     bucket_path = Path(bucket_dir)
-    registry = load_registry(bucket_path)
-    _validate_unique_zone_names(registry)
-
-    counts_path = (
-        output_root / bucket_path.name / date.isoformat() / "zone_counts.parquet"
-    )
+    output_dir = output_root / bucket_path.name / date.isoformat()
+    counts_path = output_dir / "zone_counts.parquet"
     if not counts_path.exists():
         raise FileNotFoundError(
             f"找不到 zone 人流統計 {counts_path}，"
             "請先執行 map_zones_daily 產生當日 parquet。"
         )
+
+    # 驗證用產生這份 zone_counts.parquet 當時的 registry 快照（而非「當下」的
+    # camera_registry.yaml）：兩者之間若改過 zone 名稱，用即時檔案驗證會通過，
+    # 但 parquet 裡的 zone 名稱其實是舊定義，可能讓不同攝影機的人流被靜默合併
+    # （快照機制見 zone_mapping.pipeline.map_zones_daily）。
+    registry = load_registry_from_path(output_dir / "camera_registry_used.yaml")
+    _validate_unique_zone_names(registry)
 
     df = to_taipei(pl.read_parquet(counts_path))
     hourly_df = rollup_by_period(df, period_minutes, metric)
@@ -86,6 +93,14 @@ _EVENTS_HEADERS = [
     "活動名稱",
     "活動類型",
 ]
+
+# _sort_rows 用欄位名稱指定排序鍵，避免欄位順序調整時忘記同步改數字索引。
+_HOURLY_SORT_COLUMNS = ("日期", "小時", "區域")
+_PEAK_SORT_COLUMNS = ("日期", "區域")
+
+
+def _sort_key_columns(headers: list[str], columns: tuple[str, ...]) -> tuple[int, ...]:
+    return tuple(headers.index(column) for column in columns)
 
 
 def _init_sheet(wb: Workbook, name: str, headers: list[str]) -> Worksheet:
@@ -161,8 +176,13 @@ def _write_report(
     _append_rows(peak_ws, peak_new)
 
     if on_duplicate_date == "overwrite":
-        _sort_rows(hourly_ws, key_columns=(0, 2, 3))  # 日期, 小時, 區域
-        _sort_rows(peak_ws, key_columns=(0, 2))  # 日期, 區域
+        _sort_rows(
+            hourly_ws,
+            key_columns=_sort_key_columns(_HOURLY_HEADERS, _HOURLY_SORT_COLUMNS),
+        )
+        _sort_rows(
+            peak_ws, key_columns=_sort_key_columns(_PEAK_HEADERS, _PEAK_SORT_COLUMNS)
+        )
 
     tmp_path = path.with_name(path.name + ".tmp")
     wb.save(tmp_path)
