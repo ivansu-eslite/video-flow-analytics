@@ -13,29 +13,20 @@ class TrackerConfig(BaseModel):
     """ByteTrack 多路追蹤器參數。
 
     Attributes:
-        tracker_type: 傳給 ultralytics `BYTETracker` 的演算法名稱欄位；本專案
-            `analyze/tracker.py` 目前寫死只建構 `BYTETracker`，並未依此值切換
-            實作，改動此欄位不會改變實際使用的追蹤演算法。
         track_high_thresh: 高信心度偵測框的關聯門檻。
         track_low_thresh: 低信心度偵測框的關聯門檻。
         new_track_thresh: 建立新軌跡所需的最低偵測信心度。
         track_buffer: 軌跡遺失後可保留等待重新關聯的幀數。
         match_thresh: 偵測框與既有軌跡配對的 IoU 門檻。
-        gnum: 傳給 `BYTETracker` 的欄位；已於原始碼確認 `gnum` 未出現在目前安裝的
-            ultralytics 套件任何地方，改動它不會影響實際追蹤行為。
-        cnum: 同 `gnum`，傳入但目前未被 ultralytics 讀取。
         fuse_score: 是否將信心度分數融入 IoU 距離計算。
         gmc_method: 全域運動補償方法。
     """
 
-    tracker_type: Literal["bytetrack"] = "bytetrack"
     track_high_thresh: float = Field(default=0.5, ge=0.0, le=1.0)
     track_low_thresh: float = Field(default=0.1, ge=0.0, le=1.0)
     new_track_thresh: float = Field(default=0.6, ge=0.0, le=1.0)
     track_buffer: int = Field(default=30, ge=1)
     match_thresh: float = Field(default=0.8, ge=0.0, le=1.0)
-    gnum: int = 1
-    cnum: int = 1
     fuse_score: bool = True
     gmc_method: str = "none"
 

@@ -62,8 +62,8 @@ cameras:
 
 ```toml
 [tracker]
-tracker_type = "bytetrack"
-# ... ByteTrack 相關參數
+track_high_thresh = 0.5
+# ... 其餘 ByteTrack 參數
 
 [model]
 model_path = "yolo26m.pt"
