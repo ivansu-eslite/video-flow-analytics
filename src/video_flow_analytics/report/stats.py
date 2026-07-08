@@ -60,7 +60,9 @@ def rollup_by_period(
         metric: 要彙總的欄位名稱（`"entries"` 或 `"unique_visitors"`）。
 
     Returns:
-        依 `date`／`weekday`／`period`／`zone` 排序的彙總表，含 `value` 欄位。
+        依 `date`／`weekday`／`period`／`zone` 排序的彙總表。輸出欄位：date
+        （字串 YYYY-MM-DD）、weekday（中文）、period（字串 HH:MM，該期間
+        起始時間）、zone、value（Int64）。
     """
     rolled = (
         df.with_columns(

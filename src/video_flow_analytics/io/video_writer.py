@@ -11,7 +11,9 @@ from video_flow_analytics.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 每路 writer 待編碼影格緩衝上限；正常不會積壓，設上限只防病態情況吃光記憶體
+# 每路 writer 執行緒的待編碼影格緩衝上限。編碼（234 fps/路）遠快於單路的實際
+# 影格產出速率，正常情況 queue 不會積壓；設上限只為防止病態情況吃光記憶體，
+# 滿了就讓生產端（推理主緒）阻塞在 put 上、自然退回編碼速度。
 _WRITER_QUEUE_MAXSIZE = 60
 
 
@@ -39,6 +41,8 @@ class MultiStreamVideoWriter:
 
     mp4v 編碼是 CPU 重工，inline 執行會卡住 GPU（實測單日吞吐腰斬），故每路各起一個
     背景 writer 執行緒編碼，與下一批 GPU 推理重疊（cv2.VideoWriter.write 會釋放 GIL）。
+    影格以參考傳遞、不額外複製；FramePacket 逐格是獨立的 numpy 陣列，enqueue 後
+    主緒不再改動它，故 thread-safe。
 
     fail-loud：writer 執行緒例外會記錄下來，主緒在下次 write() 或 close_all() 重新拋出。
     """

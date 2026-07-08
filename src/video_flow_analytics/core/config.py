@@ -21,13 +21,14 @@ class TrackerConfig(BaseModel):
         new_track_thresh: 建立新軌跡所需的最低偵測信心度。
         track_buffer: 軌跡遺失後可保留等待重新關聯的幀數。
         match_thresh: 偵測框與既有軌跡配對的 IoU 門檻。
-        gnum: GMC（全域運動補償）分組數。
-        cnum: GMC 通道分組數。
+        gnum: 傳給 `BYTETracker` 的欄位；已於原始碼確認 `gnum` 未出現在目前安裝的
+            ultralytics 套件任何地方，改動它不會影響實際追蹤行為。
+        cnum: 同 `gnum`，傳入但目前未被 ultralytics 讀取。
         fuse_score: 是否將信心度分數融入 IoU 距離計算。
         gmc_method: 全域運動補償方法。
     """
 
-    tracker_type: str = "bytetrack"
+    tracker_type: Literal["bytetrack"] = "bytetrack"
     track_high_thresh: float = Field(default=0.5, ge=0.0, le=1.0)
     track_low_thresh: float = Field(default=0.1, ge=0.0, le=1.0)
     new_track_thresh: float = Field(default=0.6, ge=0.0, le=1.0)

@@ -37,11 +37,13 @@ class AnalysisResult:
     Attributes:
         date: 分析的日期。
         camera_ids: 已分析的攝影機清單，`stream_dirname` 格式，與 parquet 的
-            `camera_id` 一致。
+            `camera_id` 欄位保持一致；下游若要用這裡回傳的值去 join
+            `tracking_results.parquet`，格式不同會導致靜默地全數落空。
         tracking_results_path: 追蹤結果 parquet 的路徑（字串，非 `Path`
             物件；需要 `Path` 操作時呼叫端須自行包一層 `Path(...)`）。
         output_video_paths: 已輸出的標註影片路徑清單；`save_video=False` 時
-            為空清單。
+            為空清單，且只列出實際成功寫出的檔案（0 幀等未產生輸出的片段
+            會被略過，不在清單內）。
     """
 
     date: datetime.date

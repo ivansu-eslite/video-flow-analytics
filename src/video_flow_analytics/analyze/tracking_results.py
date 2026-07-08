@@ -62,7 +62,6 @@ class TrackingResultCollector:
             tracks: `MultiStreamByteTracker.update` 的輸出（列格式定義見該
                 函式的 Returns 說明）；空陣列時不新增任何列。
         """
-        # tracks 每列為 BYTETracker 輸出 [x1, y1, x2, y2, track_id, score, cls, idx]
         for track in tracks:
             x1, y1, x2, y2, track_id = track[:5]
             cols = self._columns
