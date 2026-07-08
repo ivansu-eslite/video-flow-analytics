@@ -18,7 +18,15 @@ _WRITER_QUEUE_MAXSIZE = 60
 
 
 def mirrored_output_path(output_root: Path, segment_relpath: str | Path) -> Path:
-    """輸出片段的實際路徑：鏡射輸入片段相對 bucket 的路徑，只把根換成 output_root。"""
+    """輸出片段的實際路徑：鏡射輸入片段相對 bucket 的路徑，只把根換成 output_root。
+
+    Args:
+        output_root: 輸出根目錄。
+        segment_relpath: 輸入片段相對 bucket 根的路徑。
+
+    Returns:
+        輸出片段的完整路徑。
+    """
     return output_root / segment_relpath
 
 
@@ -29,26 +37,23 @@ class _OpenSegment:
 
 
 class MultiStreamVideoWriter:
-    """為每一支輸入片段各自輸出一支標註影片。
+    """為每一支輸入片段各自輸出一支標註影片，路徑鏡射輸入（見 mirrored_output_path）。
 
-    輸出路徑鏡射輸入片段相對 bucket 的路徑，只是把根從 bucket 換成 output_root，
-    例如 test_cam001/2026/05/01/110000.000Z.mkv 會輸出到
-    outputs/test_cam001/2026/05/01/110000.000Z.mkv。
-    同一路的影格依片段順序抵達，偵測到 segment_relpath 改變時就關掉舊檔、開新檔。
+    mp4v 編碼是 CPU 重工，inline 執行會卡住 GPU（實測單日吞吐腰斬），故每路各起一個
+    背景 writer 執行緒編碼，與下一批 GPU 推理重疊（cv2.VideoWriter.write 會釋放 GIL）。
+    影格以參考傳遞、不額外複製；FramePacket 逐格是獨立的 numpy 陣列，enqueue 後
+    主緒不再改動它，故 thread-safe。
 
-    mp4v 編碼是 CPU 重工，若在推理主迴圈裡 inline 執行會卡住 GPU（實測讓單日
-    吞吐腰斬）。因此每一路各起一個背景 writer 執行緒負責實際 cv2 編碼：主緒的
-    write() 只把影格丟進該路的 queue 就返回，編碼與下一批 GPU 推理重疊進行
-    （cv2.VideoWriter.write 會釋放 GIL，故多路 writer 執行緒能真正並行）。影格以
-    參考傳遞、不額外複製；FramePacket 逐格是獨立的 numpy 陣列，enqueue 後主緒不再
-    改動它，故 thread-safe。
-
-    fail-loud：writer 執行緒中途例外（如開檔失敗）時會記錄下來，主緒在下一次
-    write() 或收尾的 close_all() 會重新拋出，讓推理進程以非零 exitcode 結束、
-    丟棄尚未改名的 .tmp parquet，與 reader 一致地「寧可 fail-loud 也不產生無效輸出」。
+    fail-loud：writer 執行緒例外會記錄下來，主緒在下次 write() 或 close_all() 重新拋出。
     """
 
     def __init__(self, output_root: Path):
+        """建立 writer，各路的背景編碼執行緒在該路第一次 `write()` 時才惰性啟動。
+
+        Args:
+            output_root: 標註影片的輸出根目錄；`settings.output.save_video`
+                為 False 時仍可建構，但 `write`/`close_*` 皆為 no-op。
+        """
         self.output_root = output_root
         self.enabled = settings.output.save_video
         # 每路一支 queue 與一條背景編碼執行緒（收到第一格時惰性建立）
@@ -63,6 +68,21 @@ class MultiStreamVideoWriter:
     def write(
         self, stream_id: int, segment_relpath: str, frame: np.ndarray, fps: float
     ) -> None:
+        """把一格已標註影格排入該路的背景編碼佇列（非同步，立即返回）。
+
+        該路第一次呼叫時會惰性建立佇列與背景編碼執行緒。
+
+        Args:
+            stream_id: 該路攝影機的編號。
+            segment_relpath: 影格所屬片段相對 bucket 根的路徑，供決定輸出檔名
+                與偵測換片段。
+            frame: 已畫上追蹤框的影格。
+            fps: 該片段的影格率，開新輸出檔時使用。
+
+        Raises:
+            BaseException: 若該路背景 writer 執行緒先前已失敗，重拋該例外
+                （fail-loud，中止整個推理）。
+        """
         if not self.enabled:
             return
         # 若某路 writer 執行緒已失敗，立刻在主緒重拋、中止整個推理（fail-loud）
@@ -133,14 +153,25 @@ class MultiStreamVideoWriter:
         logger.info("已輸出: %s", output_path)
 
     def close_stream(self, stream_id: int) -> None:
-        """某一路正常讀完：通知該路 writer 執行緒收尾並等它把緩衝的影格寫完。"""
+        """某一路正常讀完：通知該路 writer 執行緒收尾並等它把緩衝的影格寫完。
+
+        Args:
+            stream_id: 已讀完的攝影機編號。
+
+        Raises:
+            BaseException: 該路背景 writer 執行緒執行中發生的例外。
+        """
         if not self.enabled:
             return
         self._join_stream(stream_id)
         self._raise_if_failed()
 
     def close_all(self) -> None:
-        """全部串流正常跑完：等所有 writer 執行緒寫完；任一路失敗即重拋。"""
+        """全部串流正常跑完：等所有 writer 執行緒寫完；任一路失敗即重拋。
+
+        Raises:
+            BaseException: 任一路背景 writer 執行緒執行中發生的例外。
+        """
         if not self.enabled:
             return
         for stream_id in list(self._queues):

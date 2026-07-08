@@ -1,5 +1,6 @@
 import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
@@ -36,7 +37,7 @@ def _write_zone_counts(path: Path) -> None:
             "camera_id": ["cam001"],
             "zone": ["entrance"],
             "time_bucket": [
-                datetime.datetime(2026, 5, 1, 11, 0, tzinfo=datetime.timezone.utc)
+                datetime.datetime(2026, 5, 1, 11, 0, tzinfo=ZoneInfo("Asia/Taipei"))
             ],
             "unique_visitors": [1],
             "entries": [1],
@@ -44,7 +45,7 @@ def _write_zone_counts(path: Path) -> None:
         schema={
             "camera_id": pl.Utf8,
             "zone": pl.Utf8,
-            "time_bucket": pl.Datetime("us", "UTC"),
+            "time_bucket": pl.Datetime("us", "Asia/Taipei"),
             "unique_visitors": pl.Int64,
             "entries": pl.Int64,
         },

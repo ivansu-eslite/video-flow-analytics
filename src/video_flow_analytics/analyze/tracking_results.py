@@ -22,21 +22,25 @@ _SCHEMA = {
     "y2": pl.Float64,
 }
 
-# 每累積這麼多列就 flush 成一個 parquet row group 並清空記憶體緩衝，避免整天的
-# 追蹤明細（單日多鏡頭可能有數千萬列）常駐記憶體。以列數為門檻而非「逐段」，
-# 是因為多路串流交錯寫入、片段長度不一，列數門檻能給出穩定的記憶體上限。
+# 累積這麼多列就 flush 一個 row group，避免整天追蹤明細（數千萬列）常駐記憶體；
+# 用列數而非逐段門檻，因多路串流交錯寫入、片段長度不一
 _FLUSH_EVERY_ROWS = 200_000
 
 
 class TrackingResultCollector:
     """收集每格的追蹤結果，累積到門檻列數就 flush 成一個 row group 並清空緩衝。
 
-    flush 的內容先寫到 `{results_path}.tmp`；只有 save() 成功時才會把它原子性地
-    改名成正式檔名。中途例外時呼叫 discard() 清掉暫存檔，確保不會留下不完整的
-    tracking_results.parquet（fail-loud）。
+    flush 內容先寫到 `{results_path}.tmp`，只有 save() 成功才原子性改名成正式檔名；
+    中途例外改呼叫 discard() 清掉暫存檔，不留下不完整的 parquet（fail-loud）。
     """
 
     def __init__(self, results_path: Path):
+        """初始化空緩衝，尚未建立任何 parquet writer（惰性建立於首次 flush）。
+
+        Args:
+            results_path: 追蹤結果 parquet 的正式輸出路徑；`save()` 成功前
+                資料只會寫在同目錄的 `.tmp` 暫存檔。
+        """
         self._results_path = results_path
         self._tmp_path = results_path.with_name(results_path.name + ".tmp")
         self._columns: dict[str, list] = {name: [] for name in _SCHEMA}
@@ -50,7 +54,14 @@ class TrackingResultCollector:
         packet: FramePacket,
         tracks: np.ndarray,
     ) -> None:
-        # tracks 每列為 BYTETracker 輸出 [x1, y1, x2, y2, track_id, score, cls, idx]
+        """把某一格的追蹤結果加入緩衝，累積達門檻列數會自動 flush。
+
+        Args:
+            camera_id: 該影格所屬攝影機的 `stream_dirname`。
+            packet: 該影格的來源資訊（frame_index、timestamp）。
+            tracks: `MultiStreamByteTracker.update` 的輸出（列格式定義見該
+                函式的 Returns 說明）；空陣列時不新增任何列。
+        """
         for track in tracks:
             x1, y1, x2, y2, track_id = track[:5]
             cols = self._columns

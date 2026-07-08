@@ -27,9 +27,7 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_ROOT = Path("outputs")
 
-# 空輸出時仍寫出帶正確欄位 schema 的 parquet，讓下游讀取行為一致。
-# time_bucket 沿用 tracking_results.parquet 的 timestamp tz 標記（台北時間，
-# 非 UTC，見 io/video_reader.py 的 _RECORDING_TZ 註解）。
+# 空輸出也寫出正確 schema 的 parquet；time_bucket tz 沿用 timestamp（見 _RECORDING_TZ）
 _ZONE_COUNTS_SCHEMA = {
     "camera_id": pl.Utf8,
     "zone": pl.Utf8,
@@ -46,7 +44,28 @@ def map_zones_daily(
     entry_debounce_frames: int = 1,
     output_root: Path = OUTPUT_ROOT,
 ) -> Path:
-    """執行單日 zone mapping，回傳 zone_counts.parquet 路徑。"""
+    """讀取當日追蹤結果，依 `camera_registry.yaml` 的 zone 定義統計人流。
+
+    純 CPU 向量化運算，不需重跑 GPU 偵測；輸出前會先用
+    `validate_zone_cameras` fail-loud 檢查 camera 是否對得上當天資料，再對
+    每台攝影機呼叫 `parsed_zones()` 解析驗證 zone 幾何。
+
+    Args:
+        date: 要統計的日期，需已有對應的 `tracking_results.parquet`。
+        bucket_dir: 本機模擬 GCS bucket 的根目錄。
+        bucket_minutes: 人流統計的時段粒度（分鐘）。
+        entry_debounce_frames: 連續幾格都在區域內才算一次「進入」。
+        output_root: 輸出根目錄。
+
+    Returns:
+        `zone_counts.parquet` 的路徑。
+
+    Raises:
+        FileNotFoundError: 當日 `tracking_results.parquet` 不存在，或
+            `bucket_dir` 底下找不到 `camera_registry.yaml`。
+        ValueError: `camera_registry.yaml` 定義了 zone 的攝影機在當天追蹤
+            結果中查無資料，或任一 zone 定義不合法。
+    """
     output_dir = output_root / Path(bucket_dir).name / date.isoformat()
     results_path = output_dir / "tracking_results.parquet"
     if not results_path.exists():
@@ -61,9 +80,7 @@ def map_zones_daily(
     }
 
     df = pl.read_parquet(results_path)
-    # 先比對「哪些攝影機有登記 zone」對不對得上當天資料，通過後才解析 zone 幾何：
-    # 停用/改名攝影機的陳舊 zone 定義即使打錯字，也不該蓋過更根本的「camera 對不
-    # 上當天資料」錯誤訊息。
+    # 先驗證 camera 對得上當天資料再解析 zone，避免陳舊 zone 定義打錯字蓋過更根本錯誤
     validate_zone_cameras(set(zone_entries), set(df["camera_id"].unique()))
     zone_cameras: dict[str, list[Zone]] = {
         camera_id: entry.parsed_zones() for camera_id, entry in zone_entries.items()
@@ -102,8 +119,7 @@ def map_zones_daily(
     result.write_parquet(tmp_path)
     tmp_path.replace(counts_path)
 
-    # 快照當下套用的 camera_registry.yaml，讓這份 zone_counts 自帶當天的 zone 依據、
-    # 可回溯。
+    # 快照當下套用的 camera_registry.yaml，讓這份 zone_counts 自帶當天的 zone 依據可回溯
     shutil.copyfile(
         registry_path(bucket_path), output_dir / "camera_registry_used.yaml"
     )
@@ -118,7 +134,11 @@ def map_zones_daily(
 
 
 def run_zone_map() -> None:
-    """zone-map 子命令：從 config.toml 取參數後呼叫 map_zones_daily。"""
+    """`zone-map` 子命令的進入點：從 `config.toml` 取參數後呼叫 `map_zones_daily`。
+
+    Raises:
+        ValueError: `config.toml` 的 `[input].date` 未設定。
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

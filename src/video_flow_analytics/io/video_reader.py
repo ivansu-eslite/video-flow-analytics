@@ -20,8 +20,14 @@ _RECORDING_TZ = ZoneInfo("Asia/Taipei")
 
 @dataclass
 class SegmentInfo:
-    """一支影片片段。start 為檔名解析出的錄影起始時間（標記為台北時間 UTC+8，
-    見 `_RECORDING_TZ`），relpath 為相對 bucket 根的路徑（輸出影片會鏡射它）。"""
+    """一支影片片段。
+
+    Attributes:
+        path: 片段檔案的完整路徑。
+        start: 檔名解析出的錄影起始時間（標記為台北時間 UTC+8，見
+            `_RECORDING_TZ`）。
+        relpath: 相對 bucket 根的路徑（輸出影片會鏡射它）。
+    """
 
     path: Path
     start: datetime
@@ -30,10 +36,17 @@ class SegmentInfo:
 
 @dataclass
 class FramePacket:
-    """讀取進程送往推理進程的單格資料，timestamp 由片段起始時間 + 幀序推得。"""
+    """讀取進程送往推理進程的單格資料。
+
+    Attributes:
+        frame: 影格畫面（BGR）。
+        segment_relpath: 相對 bucket 根的路徑，輸出影片鏡射此路徑。
+        frame_index: 該影格在所屬片段內的序號（從 0 起算）。
+        timestamp: 由片段起始時間 + 幀序（`frame_index / fps`）推得的時間戳。
+        fps: 所屬片段的影格率，供逐片段開輸出檔用。
+    """
 
     frame: np.ndarray
-    # 相對 bucket 根的路徑，輸出影片鏡射此路徑；fps 供逐片段開輸出檔用
     segment_relpath: str
     frame_index: int
     timestamp: datetime
@@ -54,6 +67,15 @@ def probe_frame_shape(segment: SegmentInfo) -> tuple[int, int]:
     """讀出片段首格以取得 (height, width)，供父進程一次配置該路的環形緩衝。
 
     假設單一攝影機整天解析度固定，故只探測第一支片段的首格即可。
+
+    Args:
+        segment: 要探測的片段（通常是當天第一支片段）。
+
+    Returns:
+        `(height, width)`。
+
+    Raises:
+        ValueError: 片段無法開啟，或讀不到任何影格。
     """
     cap = cv2.VideoCapture(str(segment.path))
     if not cap.isOpened():
@@ -72,7 +94,20 @@ def probe_frame_shape(segment: SegmentInfo) -> tuple[int, int]:
 def discover_segments(
     bucket_dir: Path, stream_dirname: str, day: date, file_ext: str
 ) -> list[SegmentInfo]:
-    """列出某攝影機在指定日期的所有片段，依起始時間排序。"""
+    """列出某攝影機在指定日期的所有片段，依起始時間排序。
+
+    Args:
+        bucket_dir: bucket 根目錄。
+        stream_dirname: 攝影機目錄名（`<location>_<camera_id>`）。
+        day: 要列出的日期。
+        file_ext: 片段檔案副檔名（不含點號）。
+
+    Returns:
+        依起始時間排序的 `SegmentInfo` 清單；當天目錄不存在時回傳空清單。
+
+    Raises:
+        ValueError: 任一片段檔名不符合 `HHmmss.SSSZ` 命名格式。
+    """
     day_dir = bucket_dir / stream_dirname / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
     if not day_dir.is_dir():
         return []
@@ -91,10 +126,8 @@ def discover_segments(
 class DailyStreamVideoReader:
     """依時間序逐段讀取單一攝影機一整天的片段。
 
-    影格不再逐格 pickle 進 queue，而是 memcpy 進共享環形緩衝的某個 slot：先從
-    free_queue 領一個空 slot（無空 slot 時阻塞，形成對推理進程的天然背壓），寫入
-    後只把「slot 索引 + metadata」丟進 data_queue。推理進程讀出 slot 後會把索引還回
-    free_queue 供覆寫。
+    影格 memcpy 進共享環形緩衝的 slot、queue 只傳「slot 索引 + metadata」，避免逐格
+    pickle。無空 slot 時阻塞，形成對推理進程的天然背壓。
     """
 
     def __init__(
@@ -105,6 +138,15 @@ class DailyStreamVideoReader:
         free_queue: mp.Queue,
         ring: FrameRing,
     ):
+        """綁定該路要讀取的片段清單與 IPC 通道，尚未開始實際讀取。
+
+        Args:
+            stream_id: 該路攝影機的編號。
+            segments: 當天要依序讀取的片段清單（需已依起始時間排序）。
+            data_queue: 送往推理進程的資料佇列（存放 slot 索引與 metadata）。
+            free_queue: 供推理進程歸還已消費 slot 的佇列。
+            ring: 該路專用的共享記憶體環形緩衝。
+        """
         self.stream_id = stream_id
         self.segments = segments
         self.data_queue = data_queue
@@ -135,8 +177,15 @@ class DailyStreamVideoReader:
             cap.release()
 
     def run(self) -> None:
-        # free_queue 由 reader 自己在起跑時填滿（避免「父進程先 put 再 fork」在
-        # mp.Queue feeder 執行緒上的競態）；推理進程只負責歸還，不會早於此執行。
+        """依序讀完 `self.segments` 所有片段，並在結束或例外時發出結束訊號。
+
+        正常讀完送 `None`；中途例外送 `READER_FAILED` 並重新拋出例外，讓
+        推理進程能區分兩者、避免把中途崩潰誤判為正常結束繼續寫出結果。
+
+        Raises:
+            ValueError: 任一片段開檔或讀取 FPS 失敗（見 `_read_segment`）。
+        """
+        # free_queue 由 reader 自己起跑時填滿，避免「父進程先 put 再 fork」的競態
         for slot in range(self.ring.num_slots):
             self.free_queue.put(slot)
         failed = False
@@ -162,6 +211,18 @@ def run_video_reader(
     height: int,
     width: int,
 ) -> None:
+    """讀取子進程的進入點：建構 `FrameRing` 與 `DailyStreamVideoReader` 並執行。
+
+    Args:
+        stream_id: 該路攝影機的編號。
+        segments: 當天要依序讀取的片段清單。
+        data_queue: 送往推理進程的資料佇列。
+        free_queue: 供推理進程歸還已消費 slot 的佇列。
+        ring_buffer: `create_ring_buffer` 建立的共享記憶體。
+        num_slots: 環形緩衝的 slot 數。
+        height: 影格高度（pixel）。
+        width: 影格寬度（pixel）。
+    """
     ring = FrameRing(ring_buffer, num_slots, height, width)
     reader = DailyStreamVideoReader(stream_id, segments, data_queue, free_queue, ring)
     reader.run()

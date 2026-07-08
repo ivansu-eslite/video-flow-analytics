@@ -1,11 +1,4 @@
-"""單一 CLI 進入點，把三個階段收斂成同一支程式的三個子命令。
-
-- analyze：偵測/追蹤階段（重、GPU、多進程），輸出 tracking_results.parquet 與標註影片。
-- zone-map：zone 人流統計階段（輕、純運算），讀上一階段的 parquet 輸出 zone_counts。
-- report：Excel 人流報表階段（輕、純運算），彙總 zone_counts.parquet 成跨日累加報表。
-
-三個階段各對應一個獨立可呼叫的函式進入點，刻意維持各自獨立可跑：調 camera_registry.yaml
-內的 zone 定義後只重跑 zone-map，不必重跑昂貴的偵測階段；調報表參數後也只重跑 report。
+"""單一 CLI 進入點，把三個獨立可重跑的階段收斂成同一支程式的三個子命令。
 
 各分支才 lazy import 對應模組，讓 zone-map 和 report 不必載入 torch/ultralytics。
 """
@@ -14,6 +7,12 @@ import argparse
 
 
 def main() -> None:
+    """解析命令列參數，依子命令（`analyze`/`zone-map`/`report`）分派對應流程。
+
+    各分支才 lazy import 對應模組，讓 `zone-map` 和 `report` 不必載入
+    torch/ultralytics；三個子命令實際參數皆讀自 `config.toml`，本函式只負責
+    路由。
+    """
     parser = argparse.ArgumentParser(
         prog="video-flow-analytics",
         description="多路離線影片流分析：偵測追蹤與 zone 人流統計",

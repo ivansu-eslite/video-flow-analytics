@@ -18,6 +18,9 @@ bucket_name*/
 # 分析輸出（標註影片與追蹤結果）
 outputs/
 
+# 個人小工具（不進版控）
+cvat_zone_extraction/
+
 # 影片檔案
 *.mp4
 *.avi
