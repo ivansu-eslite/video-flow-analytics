@@ -35,7 +35,8 @@ class TrackingResultCollector:
     """
 
     def __init__(self, results_path: Path):
-        """
+        """初始化空緩衝，尚未建立任何 parquet writer（惰性建立於首次 flush）。
+
         Args:
             results_path: 追蹤結果 parquet 的正式輸出路徑；`save()` 成功前
                 資料只會寫在同目錄的 `.tmp` 暫存檔。
@@ -58,9 +59,8 @@ class TrackingResultCollector:
         Args:
             camera_id: 該影格所屬攝影機的 `stream_dirname`。
             packet: 該影格的來源資訊（frame_index、timestamp）。
-            tracks: `MultiStreamByteTracker.update` 的輸出，每列為
-                BYTETracker 輸出 `[x1, y1, x2, y2, track_id, score, cls, idx]`；
-                空陣列時不新增任何列。
+            tracks: `MultiStreamByteTracker.update` 的輸出（列格式定義見該
+                函式的 Returns 說明）；空陣列時不新增任何列。
         """
         # tracks 每列為 BYTETracker 輸出 [x1, y1, x2, y2, track_id, score, cls, idx]
         for track in tracks:

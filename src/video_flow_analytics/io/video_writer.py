@@ -44,7 +44,8 @@ class MultiStreamVideoWriter:
     """
 
     def __init__(self, output_root: Path):
-        """
+        """建立 writer，各路的背景編碼執行緒在該路第一次 `write()` 時才惰性啟動。
+
         Args:
             output_root: 標註影片的輸出根目錄；`settings.output.save_video`
                 為 False 時仍可建構，但 `write`/`close_*` 皆為 no-op。

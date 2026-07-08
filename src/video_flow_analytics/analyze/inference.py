@@ -33,7 +33,8 @@ class InferencePipeline:
         output_root: Path,
         results_path: Path,
     ):
-        """
+        """組裝推理迴圈所需的各個子系統（偵測、追蹤、寫檔、收集結果）。
+
         Args:
             stream_names: 各路攝影機的 `stream_dirname`，索引即 stream_id，
                 同時作為 `TrackingResultCollector` 記錄的 camera_id。

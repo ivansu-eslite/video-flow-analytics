@@ -138,7 +138,8 @@ class DailyStreamVideoReader:
         free_queue: mp.Queue,
         ring: FrameRing,
     ):
-        """
+        """綁定該路要讀取的片段清單與 IPC 通道，尚未開始實際讀取。
+
         Args:
             stream_id: 該路攝影機的編號。
             segments: 當天要依序讀取的片段清單（需已依起始時間排序）。

@@ -11,8 +11,9 @@ class TrackAnnotator:
 
         Args:
             frame: 要畫框的影格（BGR），會被直接修改（in-place）並回傳。
-            tracks: `MultiStreamByteTracker.update` 的輸出，每列至少為
-                `[x1, y1, x2, y2, track_id, ...]`；空陣列時原樣回傳 `frame`。
+            tracks: `MultiStreamByteTracker.update` 的輸出（列格式定義見該
+                函式的 Returns 說明，本函式只用到前 5 欄）；空陣列時原樣
+                回傳 `frame`。
 
         Returns:
             畫好框的影格（與傳入的 `frame` 為同一物件）。
