@@ -21,6 +21,10 @@ _FILL_POLL = 0.0005
 
 
 class InferencePipeline:
+    """推理進程主迴圈：非阻塞湊批 → YOLO 偵測 → 多路 ByteTrack →
+    收集結果 → 標註 → 寫檔。
+    """
+
     def __init__(
         self,
         stream_names: list[str],
@@ -29,6 +33,15 @@ class InferencePipeline:
         output_root: Path,
         results_path: Path,
     ):
+        """
+        Args:
+            stream_names: 各路攝影機的 `stream_dirname`，索引即 stream_id，
+                同時作為 `TrackingResultCollector` 記錄的 camera_id。
+            detector: 已載入模型的 YOLO 偵測器（跨批次重用）。
+            tracker: 多路 ByteTrack 狀態管理器（跨批次重用，維持軌跡延續）。
+            output_root: 標註影片輸出根目錄。
+            results_path: 追蹤結果 parquet 的目標路徑。
+        """
         self.stream_names = stream_names
         self.num_streams = len(stream_names)
         self.finished_streams = set()
@@ -107,6 +120,22 @@ class InferencePipeline:
         free_queues: list[mp.Queue],
         rings: list[FrameRing],
     ) -> None:
+        """執行推理主迴圈直到所有路都讀完，並負責結果的落盤/清理。
+
+        成功跑完會 `writer.close_all()` 並 `collector.save()`（原子性
+        rename 成正式 parquet）；任何例外都會先 `collector.discard()` 與
+        `writer.abort()` 清理不完整輸出，再重新拋出（fail-loud）。
+
+        Args:
+            data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
+            free_queues: 各路歸還環形緩衝 slot 用的佇列，索引為 stream_id。
+            rings: 各路的共享記憶體環形緩衝，索引為 stream_id。
+
+        Raises:
+            RuntimeError: 任一路讀取進程回報 `READER_FAILED`。
+            BaseException: writer 背景執行緒或其他子系統拋出的例外，會原樣
+                重新拋出。
+        """
         logger.info("模組化推理流程啟動...")
         try:
             while len(self.finished_streams) < self.num_streams:

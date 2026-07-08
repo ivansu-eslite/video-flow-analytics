@@ -32,12 +32,20 @@ OUTPUT_ROOT = Path("outputs")
 
 @dataclass
 class AnalysisResult:
-    """analyze_daily 的回傳結果。"""
+    """`analyze_daily` 的回傳結果。
+
+    Attributes:
+        date: 分析的日期。
+        camera_ids: 已分析的攝影機清單，`stream_dirname` 格式，與 parquet 的
+            `camera_id` 一致。
+        tracking_results_path: 追蹤結果 parquet 的路徑。
+        output_video_paths: 已輸出的標註影片路徑清單；`save_video=False` 時
+            為空清單。
+    """
 
     date: datetime.date
-    camera_ids: list[str]  # stream_dirname 格式，與 parquet 的 camera_id 一致
+    camera_ids: list[str]
     tracking_results_path: str
-    # save_video=False 時為空
     output_video_paths: list[str] = field(default_factory=list)
 
 
@@ -50,6 +58,20 @@ def run_inference_pipeline(
     output_root: Path,
     results_path: Path,
 ) -> None:
+    """推理子進程的進入點：建構偵測器/追蹤器/環形緩衝後啟動推理主迴圈。
+
+    以 `mp.Process(target=run_inference_pipeline, ...)` 於子進程執行，故
+    參數需為可 pickle 的型別（環形緩衝以 `mp.RawArray` 傳遞）。
+
+    Args:
+        data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
+        free_queues: 各路歸還環形緩衝 slot 用的佇列，索引為 stream_id。
+        ring_buffers: 各路 `create_ring_buffer` 建立的共享記憶體。
+        frame_shapes: 各路的 `(height, width)`，索引與 `ring_buffers` 對應。
+        stream_names: 各路攝影機的 `stream_dirname`。
+        output_root: 標註影片輸出根目錄。
+        results_path: 追蹤結果 parquet 的目標路徑。
+    """
     detector = YOLODetector()
     tracker = MultiStreamByteTracker(num_streams=len(stream_names))
     rings = [
@@ -84,7 +106,28 @@ def analyze_daily(
     bucket_dir: str,
     camera_ids: list[str] | None = None,
 ) -> AnalysisResult:
-    """以「一天」為單位執行多路追蹤分析。"""
+    """以「一天」為單位執行多路 YOLO 偵測 + ByteTrack 追蹤分析。
+
+    以參數傳入 `bucket_dir`（而非讀全域 `settings`），讓本函式可重複以不同
+    bucket 呼叫。內部會拆成 N 個讀取子進程 + 1 個推理子進程，逐段掃描指定
+    日期的影片、輸出追蹤明細 parquet 與（依設定）逐片段標註影片。
+
+    Args:
+        date: 要分析的日期。
+        bucket_dir: 本機模擬 GCS bucket 的根目錄。
+        camera_ids: 要分析的攝影機清單；`None` 或空清單代表 registry 內
+            全部攝影機。
+
+    Returns:
+        本次分析的結果摘要（見 `AnalysisResult`）。
+
+    Raises:
+        ValueError: `camera_registry.yaml` 沒有任何攝影機、`camera_ids`
+            指定了查無對應設備登錄的 ID，或任一攝影機在該日期沒有任何
+            影片片段。
+        RuntimeError: 任一子進程異常結束。
+        KeyboardInterrupt: 收到中斷訊號，會先優雅終止所有子進程再重新拋出。
+    """
     bucket_path = Path(bucket_dir)
     registry = load_registry(bucket_path)
     cameras = registry.resolve_cameras(camera_ids)
@@ -194,7 +237,11 @@ def analyze_daily(
 
 
 def run_analyze() -> None:
-    """analyze 子命令：從 config.toml 取參數後呼叫 analyze_daily。"""
+    """`analyze` 子命令的進入點：從 `config.toml` 取參數後呼叫 `analyze_daily`。
+
+    Raises:
+        ValueError: `config.toml` 的 `[input].date` 未設定。
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

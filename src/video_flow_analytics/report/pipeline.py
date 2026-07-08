@@ -196,7 +196,31 @@ def export_report_daily(
     bucket_minutes: int,
     output_root: Path = OUTPUT_ROOT,
 ) -> Path:
-    """執行單日 zone 人流報表彙總，回傳 report.xlsx 路徑（跨日累加更新）。"""
+    """執行單日 zone 人流報表彙總，寫入跨日累加更新的 `report.xlsx`。
+
+    純 CPU 運算，不需重跑偵測或 zone mapping；讀取的 registry 是產生
+    `zone_counts.parquet` 當時的 `camera_registry_used.yaml` 快照（而非
+    當下的 `camera_registry.yaml`），以避免同名 zone 被靜默合併。
+
+    Args:
+        date: 要彙總的日期，需已有對應的 `zone_counts.parquet`。
+        bucket_dir: 本機模擬 GCS bucket 的根目錄。
+        period_minutes: 報表人流彙總的時段粒度（分鐘），需為 `bucket_minutes`
+            的倍數。
+        metric: 「人流量」「尖峰人流」使用的統計量。
+        on_duplicate_date: 同一天資料已存在時的處理方式。
+        bucket_minutes: `zone_counts.parquet` 的時段粒度（分鐘）。
+        output_root: 輸出根目錄。
+
+    Returns:
+        `report.xlsx` 的路徑。
+
+    Raises:
+        ValueError: `period_minutes` 不是 `bucket_minutes` 的倍數、
+            `camera_registry_used.yaml` 中有跨攝影機重複的 zone 名稱，或
+            `on_duplicate_date="error"` 時發現日期已存在。
+        FileNotFoundError: 當日 `zone_counts.parquet` 不存在。
+    """
     hourly_df, peak_df = _build_report_frames(
         date, bucket_dir, period_minutes, metric, bucket_minutes, output_root
     )
@@ -216,7 +240,11 @@ def export_report_daily(
 
 
 def run_report() -> None:
-    """report 子命令：從 config.toml 取參數後呼叫 export_report_daily。"""
+    """`report` 子命令的進入點：從 `config.toml` 取參數後呼叫 `export_report_daily`。
+
+    Raises:
+        ValueError: `config.toml` 的 `[input].date` 未設定。
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

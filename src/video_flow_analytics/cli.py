@@ -7,6 +7,12 @@ import argparse
 
 
 def main() -> None:
+    """解析命令列參數，依子命令（`analyze`/`zone-map`/`report`）分派對應流程。
+
+    各分支才 lazy import 對應模組，讓 `zone-map` 和 `report` 不必載入
+    torch/ultralytics；三個子命令實際參數皆讀自 `config.toml`，本函式只負責
+    路由。
+    """
     parser = argparse.ArgumentParser(
         prog="video-flow-analytics",
         description="多路離線影片流分析：偵測追蹤與 zone 人流統計",

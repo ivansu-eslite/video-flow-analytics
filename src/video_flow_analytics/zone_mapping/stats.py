@@ -19,8 +19,16 @@ def points_in_polygon(
 ) -> np.ndarray:
     """向量化 ray casting：回傳長度為 N 的布林陣列，標記每個點是否落在多邊形內。
 
-    polygon shape 為 (M, 2)。對每條邊判斷「向右水平射線是否穿越該邊」，穿越次數
-    為奇數即在內部。邊界上的點結果依實作而定，對人流統計無實質影響。
+    對每條邊判斷「向右水平射線是否穿越該邊」，穿越次數為奇數即在內部。邊界上
+    的點結果依實作而定，對人流統計無實質影響。
+
+    Args:
+        xs: 待判定點的 x 座標，長度 N。
+        ys: 待判定點的 y 座標，長度 N。
+        polygon: 多邊形頂點座標，shape 為 `(M, 2)`。
+
+    Returns:
+        長度為 N 的布林陣列，`True` 代表該點落在多邊形內。
     """
     px = polygon[:, 0]
     py = polygon[:, 1]
@@ -46,6 +54,15 @@ def count_zone_visits(
     entry_debounce_frames 控制「連續幾格都在區域內才算一次進入」，用來過濾腳底點
     在區域邊界附近來回抖動造成的假進入；預設 1 = 不去抖（一格在內就算），數字越大
     越能濾掉抖動，代價是進入事件會延遲 (N-1) 格才被計入、歸戶到較晚的 time_bucket。
+
+    Args:
+        cam_sub: 單一攝影機的追蹤明細，需已含 `foot_x`／`foot_y`／
+            `time_bucket`／`track_id`／`timestamp` 欄位。
+        zone: 要套用的區域定義。
+        entry_debounce_frames: 連續幾格都在區域內才算一次「進入」。
+
+    Returns:
+        依 `time_bucket` 聚合的 `unique_visitors`／`entries` 統計表。
     """
     inside = points_in_polygon(
         cam_sub["foot_x"].to_numpy(),
@@ -99,6 +116,15 @@ def validate_zone_cameras(zone_camera_ids: set[str], data_cameras: set[str]) -> 
 
     攝影機改名或 key 打錯時，這裡會直接報錯中止，而不是靜默略過那台攝影機、
     默默算出漏掉區域的人流。
+
+    Args:
+        zone_camera_ids: `camera_registry.yaml` 中定義了 zone 的攝影機
+            `camera_id` 集合。
+        data_cameras: 當天 `tracking_results.parquet` 實際出現的 `camera_id`
+            集合。
+
+    Raises:
+        ValueError: `zone_camera_ids` 中有任一 ID 不在 `data_cameras` 內。
     """
     unknown = sorted(zone_camera_ids - data_cameras)
     if unknown:

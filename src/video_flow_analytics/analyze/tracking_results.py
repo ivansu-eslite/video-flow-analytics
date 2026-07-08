@@ -35,6 +35,11 @@ class TrackingResultCollector:
     """
 
     def __init__(self, results_path: Path):
+        """
+        Args:
+            results_path: 追蹤結果 parquet 的正式輸出路徑；`save()` 成功前
+                資料只會寫在同目錄的 `.tmp` 暫存檔。
+        """
         self._results_path = results_path
         self._tmp_path = results_path.with_name(results_path.name + ".tmp")
         self._columns: dict[str, list] = {name: [] for name in _SCHEMA}
@@ -48,6 +53,15 @@ class TrackingResultCollector:
         packet: FramePacket,
         tracks: np.ndarray,
     ) -> None:
+        """把某一格的追蹤結果加入緩衝，累積達門檻列數會自動 flush。
+
+        Args:
+            camera_id: 該影格所屬攝影機的 `stream_dirname`。
+            packet: 該影格的來源資訊（frame_index、timestamp）。
+            tracks: `MultiStreamByteTracker.update` 的輸出，每列為
+                BYTETracker 輸出 `[x1, y1, x2, y2, track_id, score, cls, idx]`；
+                空陣列時不新增任何列。
+        """
         # tracks 每列為 BYTETracker 輸出 [x1, y1, x2, y2, track_id, score, cls, idx]
         for track in tracks:
             x1, y1, x2, y2, track_id = track[:5]
