@@ -61,7 +61,8 @@ def map_zones_daily(
         `zone_counts.parquet` 的路徑。
 
     Raises:
-        FileNotFoundError: 當日 `tracking_results.parquet` 不存在。
+        FileNotFoundError: 當日 `tracking_results.parquet` 不存在，或
+            `bucket_dir` 底下找不到 `camera_registry.yaml`。
         ValueError: `camera_registry.yaml` 定義了 zone 的攝影機在當天追蹤
             結果中查無資料，或任一 zone 定義不合法。
     """

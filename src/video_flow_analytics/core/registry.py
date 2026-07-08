@@ -39,8 +39,11 @@ class CameraEntry(BaseModel):
     """單一攝影機的身份與 zone 定義。
 
     Attributes:
-        camera_id: 攝影機代號。
-        location: 攝影機所在位置名稱。
+        camera_id: 攝影機代號；在 `CameraRegistry` 內必須唯一（見
+            `CameraRegistry._unique_camera_identity`），重複會在載入
+            registry 時 fail-loud。
+        location: 攝影機所在位置名稱；與 `camera_id` 組成的 `stream_dirname`
+            同樣必須在 `CameraRegistry` 內唯一。
         ip: 攝影機 IP。
         zones: 原始 zone 定義（未經驗證的 dict 清單）。刻意用 `list[Any]`
             （非 `list[Zone]`）：也被較重的 `analyze_daily` 讀取，若在此

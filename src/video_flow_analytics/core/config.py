@@ -13,7 +13,9 @@ class TrackerConfig(BaseModel):
     """ByteTrack 多路追蹤器參數。
 
     Attributes:
-        tracker_type: 追蹤演算法名稱。
+        tracker_type: 傳給 ultralytics `BYTETracker` 的演算法名稱欄位；本專案
+            `analyze/tracker.py` 目前寫死只建構 `BYTETracker`，並未依此值切換
+            實作，改動此欄位不會改變實際使用的追蹤演算法。
         track_high_thresh: 高信心度偵測框的關聯門檻。
         track_low_thresh: 低信心度偵測框的關聯門檻。
         new_track_thresh: 建立新軌跡所需的最低偵測信心度。
@@ -133,6 +135,8 @@ def load_config() -> AppConfig:
     Returns:
         解析後的 `AppConfig`；`config.toml` 不存在時為預設值版本。
     """
+    # 本檔案位於 src/video_flow_analytics/core/config.py，即 repo 根目錄下第 3 層，
+    # 故 parents[3] 對應到 repo 根目錄；搬動此檔案的目錄深度時需同步調整這個數字。
     config_path = Path(__file__).resolve().parents[3] / "config.toml"
 
     if not config_path.exists():

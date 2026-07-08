@@ -38,7 +38,8 @@ class AnalysisResult:
         date: 分析的日期。
         camera_ids: 已分析的攝影機清單，`stream_dirname` 格式，與 parquet 的
             `camera_id` 一致。
-        tracking_results_path: 追蹤結果 parquet 的路徑。
+        tracking_results_path: 追蹤結果 parquet 的路徑（字串，非 `Path`
+            物件；需要 `Path` 操作時呼叫端須自行包一層 `Path(...)`）。
         output_video_paths: 已輸出的標註影片路徑清單；`save_video=False` 時
             為空清單。
     """
@@ -122,6 +123,7 @@ def analyze_daily(
         本次分析的結果摘要（見 `AnalysisResult`）。
 
     Raises:
+        FileNotFoundError: `bucket_dir` 底下找不到 `camera_registry.yaml`。
         ValueError: `camera_registry.yaml` 沒有任何攝影機、`camera_ids`
             指定了查無對應設備登錄的 ID，或任一攝影機在該日期沒有任何
             影片片段。

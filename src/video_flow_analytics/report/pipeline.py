@@ -219,7 +219,8 @@ def export_report_daily(
         ValueError: `period_minutes` 不是 `bucket_minutes` 的倍數、
             `camera_registry_used.yaml` 中有跨攝影機重複的 zone 名稱，或
             `on_duplicate_date="error"` 時發現日期已存在。
-        FileNotFoundError: 當日 `zone_counts.parquet` 不存在。
+        FileNotFoundError: 當日 `zone_counts.parquet` 不存在，或該日輸出
+            目錄下找不到 `camera_registry_used.yaml` 快照。
     """
     hourly_df, peak_df = _build_report_frames(
         date, bucket_dir, period_minutes, metric, bucket_minutes, output_root
