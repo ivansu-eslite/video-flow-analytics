@@ -116,7 +116,7 @@ uv run video-flow-analytics report
 
 - **輸入**：`bucket_dir/camera_registry.yaml` + 當日各攝影機影片片段
 - **輸出**：`tracking_results.parquet`、（依設定）逐片段標註影片，回傳 `AnalysisResult`（`date`／`camera_ids`／`tracking_results_path`／`output_video_paths`）
-- **備註**：GPU + 多進程，成本最高
+- **備註**：GPU + 多進程，運算成本最高
 
 ### `map_zones_daily(date, bucket_dir, bucket_minutes, entry_debounce_frames=1) -> Path`
 
@@ -143,13 +143,6 @@ uv run video-flow-analytics report
 uv run ruff check .     # lint（line-length=88, select=["E","F","I","W"]）
 uv run pytest           # 執行測試
 ```
-
-## 未來銜接 Airflow 時的考量（給 DevOps 參考）
-
-- **結論**：現有函式介面（顯式參數、檔案驅動相依、原子寫入冪等）本來就是 Airflow 友善的形狀，建議 Airflow 直接呼叫三個 `_daily()` 函式本身（PythonOperator/TaskFlow），**不要**透過 CLI／`run_xxx()`，因為那層綁定模組載入時期建立的全域 `settings` 單例與固定的 `config.toml` `[input].date`，無法對應每個 DAG run 不同的日期/bucket。
-- **待處理落差點（與執行環境無關，先修）**：`analyze_daily` 目前只攔截 `KeyboardInterrupt` 與一般 `Exception` 做子進程清理；Airflow 對逾時/手動失敗/DAG clear 送出的是 SIGTERM，預設不會進到這些 except 分支，可能讓讀取/推理子進程變孤兒、繼續佔用 GPU。建議之後導入前先補上 SIGTERM 的訊號處理再串接。
-- **待評估落差點（視未來選定的 executor 而定）**：`analyze_daily` 內部用 `mp.Process`（fork）。若 Airflow 用 CeleryExecutor 的 prefork worker，在已經 fork 過的 worker 行程裡再 fork 是已知容易出問題的組合；若用 KubernetesPodOperator 或每個 task 獨立行程/容器執行則無此疑慮。等決定 executor 時要重新檢視。
-- **設計上不需要改的地方**：`YOLODetector`/`MultiStreamByteTracker` 讀的 `settings.model`/`settings.tracker`（模型路徑、追蹤器門檻）目前是全域單例、非函式參數；這類「部署層級」調參設定通常不需要每個 DAG run 各自覆寫，目前把「每次執行會變的業務參數」（date/bucket_dir/camera_ids/bucket_minutes/period_minutes/metric/on_duplicate_date）都做成顯式函式參數、把「調參設定」留在 `config.toml` 全域單例，這條界線是對的，不需要為了 Airflow 而重構。
 
 ## 架構
 
