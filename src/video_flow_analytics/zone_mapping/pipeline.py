@@ -17,7 +17,11 @@ from pathlib import Path
 import polars as pl
 
 from video_flow_analytics.core.config import settings
-from video_flow_analytics.core.registry import Zone, load_registry, registry_path
+from video_flow_analytics.core.registry import (
+    load_registry,
+    parse_and_validate_zones,
+    registry_path,
+)
 from video_flow_analytics.zone_mapping.stats import (
     count_zone_visits,
     validate_zone_cameras,
@@ -84,9 +88,7 @@ def map_zones_daily(
     df = pl.read_parquet(results_path)
     # 先驗證 camera 對得上當天資料再解析 zone，避免陳舊 zone 定義打錯字蓋過更根本錯誤
     validate_zone_cameras(set(zone_entries), set(df["camera_id"].unique()))
-    zone_cameras: dict[str, list[Zone]] = {
-        camera_id: entry.parsed_zones() for camera_id, entry in zone_entries.items()
-    }
+    zone_cameras = parse_and_validate_zones(zone_entries)
 
     df = df.with_columns(
         ((pl.col("x1") + pl.col("x2")) / 2).alias("foot_x"),
