@@ -182,7 +182,10 @@ def parse_and_validate_zones(entries: dict[str, CameraEntry]) -> dict[str, list[
         )
     )
     if dupes:
-        raise ValueError(f"camera_registry.yaml 中有跨攝影機重複的 zone 名稱: {dupes}")
+        raise ValueError(
+            f"camera_registry.yaml 中有跨攝影機重複的 zone 名稱，zone 名稱須"
+            f"全域唯一（不只同一攝影機內唯一）: {dupes}"
+        )
     return zone_cameras
 
 
