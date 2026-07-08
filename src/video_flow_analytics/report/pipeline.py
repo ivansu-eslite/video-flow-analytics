@@ -18,28 +18,14 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from video_flow_analytics.core.config import settings
 from video_flow_analytics.core.registry import (
-    CameraRegistry,
-    _find_duplicates,
     load_registry_from_path,
+    parse_and_validate_zones,
 )
 from video_flow_analytics.report.stats import peak_per_day, rollup_by_period, to_taipei
 
 logger = logging.getLogger(__name__)
 
 OUTPUT_ROOT = Path("outputs")
-
-
-def _validate_unique_zone_names(registry: CameraRegistry) -> None:
-    """報表以 zone 名稱（不含 camera_id）分組，因此要求整份 registry 的 zone
-    名稱全域唯一；此驗證只在產報表時檢查，不影響 analyze_daily / zone_mapping。
-    """
-    names = [zone.name for cam in registry.cameras for zone in cam.parsed_zones()]
-    dupes = sorted(_find_duplicates(names))
-    if dupes:
-        raise ValueError(
-            "camera_registry.yaml 中有跨攝影機重複的 zone 名稱，報表需要 zone "
-            f"名稱全域唯一（不只同一攝影機內唯一）: {dupes}"
-        )
 
 
 def _build_report_frames(
@@ -67,7 +53,12 @@ def _build_report_frames(
 
     # 為何用快照而非當下 registry：見 export_report_daily 的 docstring 說明
     registry = load_registry_from_path(output_dir / "camera_registry_used.yaml")
-    _validate_unique_zone_names(registry)
+    zone_entries = {
+        entry.stream_dirname: entry
+        for entry in registry.cameras
+        if entry.participates_in_zone_mapping
+    }
+    parse_and_validate_zones(zone_entries)  # 跨攝影機 zone 名稱唯一性驗證
 
     df = to_taipei(pl.read_parquet(counts_path))
     hourly_df = rollup_by_period(df, period_minutes, metric)

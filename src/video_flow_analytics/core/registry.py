@@ -16,8 +16,9 @@ class Zone(BaseModel):
 
     Attributes:
         name: 區域名稱。`parsed_zones()` 只驗證同一攝影機內不可重複；跨攝影機
-            的全域唯一性是下游 report 模組彙總報表時的需求（`Zone` 本身與
-            `zone_mapping` 並不檢查），實際驗證邏輯見 `report` 模組。
+            也不可重複（原始需求來自 report 模組依 zone 名稱分組彙總、不含
+            camera_id），`zone_mapping` 與 `report` 皆會驗證，見
+            `parse_and_validate_zones`。
         polygon: 多邊形頂點清單，至少 3 個 `(x, y)` pixel 座標。
 
     Raises:
@@ -47,6 +48,9 @@ class CameraEntry(BaseModel):
         location: 攝影機所在位置名稱；與 `camera_id` 組成的 `stream_dirname`
             同樣必須在 `CameraRegistry` 內唯一。
         ip: 攝影機 IP。
+        participates_in_zone_mapping: 是否參與 zone mapping；`False` 時
+            `map_zones_daily` 直接跳過這台攝影機（即使 `zones` 有內容也不
+            處理）。正式訊號，取代舊版「`zones` 空清單代表不參與」的隱含推斷。
         zones: 原始 zone 定義（未經驗證的 dict 清單）。刻意用 `list[Any]`
             （非 `list[Zone]`）：也被較重的 `analyze_daily` 讀取，若在此
             驗證 zone 內容，打錯字會連帶讓不需要 zone 的路徑失敗；驗證延後到
@@ -58,6 +62,7 @@ class CameraEntry(BaseModel):
     camera_id: str
     location: str
     ip: str
+    participates_in_zone_mapping: bool = Field(default=True)
     zones: list[Any] = Field(default_factory=list)
 
     @property
@@ -149,6 +154,40 @@ class CameraRegistry(BaseModel):
                 f"camera_registry.yaml 中找不到這些 camera_id: {unknown}"
             )
         return [by_id[cid] for cid in camera_ids]
+
+
+def parse_and_validate_zones(entries: dict[str, CameraEntry]) -> dict[str, list[Zone]]:
+    """解析已篩選過攝影機的 zone 定義，並驗證跨攝影機 zone 名稱全域唯一。
+
+    zone_mapping 與 report 都依賴「zone 名稱跨攝影機也不可重複」這條規則
+    （report 依 zone 名稱分組彙總、不含 camera_id），此函式是這條規則唯一的
+    實作位置，避免兩邊各自檢查、行為不一致。
+
+    Args:
+        entries: 已依需求篩選過（例如 participates_in_zone_mapping）的
+            stream_dirname -> CameraEntry 對照表。
+
+    Returns:
+        stream_dirname -> 解析驗證後的 Zone 清單。
+
+    Raises:
+        ValueError: 任一攝影機的 zone 定義不合法、同一攝影機內 zone name
+            重複，或跨攝影機有重複的 zone 名稱。
+    """
+    zone_cameras = {
+        camera_id: entry.parsed_zones() for camera_id, entry in entries.items()
+    }
+    dupes = sorted(
+        _find_duplicates(
+            [zone.name for zones in zone_cameras.values() for zone in zones]
+        )
+    )
+    if dupes:
+        raise ValueError(
+            f"camera_registry.yaml 中有跨攝影機重複的 zone 名稱，zone 名稱須"
+            f"全域唯一（不只同一攝影機內唯一）: {dupes}"
+        )
+    return zone_cameras
 
 
 def registry_path(bucket_dir: Path) -> Path:

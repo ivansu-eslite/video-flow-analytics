@@ -60,8 +60,8 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
 
 ### Zone Mapping
 
-- **zone 定義**（`core/registry.py` → `CameraEntry.zones: list[Any]`）：與攝影機身份一起寫在 `camera_registry.yaml`（**不進版控**，人工維護），以 `CameraEntry.stream_dirname`（`<location>_<camera_id>`）對齊 parquet 的 `camera_id`。刻意不拆成獨立檔案，因為此專案沒有真的雲端同步流程會覆蓋這份人工維護的檔案。**`zones` 刻意留在未經驗證的原始形式，不在 `CameraEntry` 上驗證幾何**：`CameraEntry` 也被 `analyze_daily`（重、GPU 路徑）透過 `load_registry` 讀取，若在此驗證 zone 內容，zone 定義打錯字（如頂點數 <3、整段結構寫錯）會連帶讓不需要 zone 的 `analyze_daily` 也失敗。`CameraEntry.parsed_zones()` 才把原始資料解析、驗證成 `Zone` model（含同攝影機內 zone name 不可重複），只在 `zone_mapping` 真正需要 zone 幾何時呼叫。`CameraRegistry` 另外對 `camera_id` 與 `stream_dirname` 都做唯一性驗證（fail-loud，避免重複登錄的攝影機讓 `resolve_cameras`／zone mapping 的查詢字典靜默覆蓋其中一筆）。
-- **`map_zones_daily`**：讀 parquet → `load_registry` 取各 camera 的 `zones` → `validate_zone_cameras` fail-loud（先比對 camera 對不上當天資料，不必等 zone 幾何解析完才報錯）→ 通過後才對每台攝影機呼叫 `parsed_zones()` 解析驗證 → 逐 camera/zone 呼叫 `stats.py` 演算法 → 寫 `zone_counts.parquet`（`.tmp` + 原子 rename）→ 快照 `camera_registry.yaml` 成 `camera_registry_used.yaml`。
+- **zone 定義**（`core/registry.py` → `CameraEntry.zones: list[Any]`）：與攝影機身份一起寫在 `camera_registry.yaml`（**不進版控**，人工維護），以 `CameraEntry.stream_dirname`（`<location>_<camera_id>`）對齊 parquet 的 `camera_id`。刻意不拆成獨立檔案，因為此專案沒有真的雲端同步流程會覆蓋這份人工維護的檔案。**`zones` 刻意留在未經驗證的原始形式，不在 `CameraEntry` 上驗證幾何**：`CameraEntry` 也被 `analyze_daily`（重、GPU 路徑）透過 `load_registry` 讀取，若在此驗證 zone 內容，zone 定義打錯字（如頂點數 <3、整段結構寫錯）會連帶讓不需要 zone 的 `analyze_daily` 也失敗。`CameraEntry.parsed_zones()` 才把原始資料解析、驗證成 `Zone` model（含同攝影機內 zone name 不可重複），只在 `zone_mapping` 真正需要 zone 幾何時呼叫。`CameraRegistry` 另外對 `camera_id` 與 `stream_dirname` 都做唯一性驗證（fail-loud，避免重複登錄的攝影機讓 `resolve_cameras`／zone mapping 的查詢字典靜默覆蓋其中一筆）。**`CameraEntry.participates_in_zone_mapping: bool`（預設 `True`）**是該攝影機是否參與 zone mapping 的正式訊號；`False` 時 `map_zones_daily` 直接跳過，不受 `zones` 內容影響——取代舊版「`zones` 空清單代表不參與」的隱含推斷。
+- **`map_zones_daily`**：讀 parquet → `load_registry` 篩出 `participates_in_zone_mapping=True` 的攝影機 → `validate_zone_cameras` fail-loud（先比對 camera 對不上當天資料，不必等 zone 幾何解析完才報錯）→ 通過後才呼叫 `core/registry.py.parse_and_validate_zones` 逐台解析 zone 幾何、同時驗證跨攝影機 zone 名稱唯一（見下方 Report 段落，`report` 也呼叫同一函式）→ 逐 camera/zone 呼叫 `stats.py` 演算法 → 寫 `zone_counts.parquet`（`.tmp` + 原子 rename）→ 快照 `camera_registry.yaml` 成 `camera_registry_used.yaml`。
 - **`stats.py`**（純運算）：`points_in_polygon`（numpy 向量化 ray casting）判定腳底中心點 `((x1+x2)/2, y2)`；`count_zone_visits` 依 `time_bucket` 聚合 `unique_visitors`（不重複 track_id 數）與 `entries`（out→in 轉換次數，`entry_debounce_frames` 控制去抖，預設 1 = 不去抖）。
 
 ### Report（Excel 人流報表）
@@ -72,10 +72,12 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
   不會動這個分頁。
 - **zone 名稱全域唯一（新前提）**：報表的「區域」欄位以 zone 名稱分組、不含
   camera_id，因此要求整份 `camera_registry.yaml` 的 zone 名稱**跨攝影機也不可
-  重複**（原本 `parsed_zones()` 只驗證同一攝影機內不重複）。此驗證只加在
-  `report/pipeline.py._validate_unique_zone_names`，不影響 `analyze_daily` /
-  `zone_mapping` 既有路徑。未來若有 UI 維護 `camera_registry.yaml`，會在該處
-  即時擋下重複命名。**驗證對象是產生該日 `zone_counts.parquet` 當時的
+  重複**（原本 `parsed_zones()` 只驗證同一攝影機內不重複）。此驗證的唯一實作
+  是 `core/registry.py.parse_and_validate_zones`，`zone_mapping.map_zones_daily`
+  與 `report.export_report_daily` 都會呼叫它，因此**也會影響 `zone_mapping`**：
+  即使當天不會產生報表，`zone-map` 本身也會擋下跨攝影機重複的 zone 命名。
+  未來若有 UI 維護 `camera_registry.yaml`，會在該處即時擋下重複命名。**驗證對象
+  是產生該日 `zone_counts.parquet` 當時的
   `camera_registry_used.yaml` 快照，而非「當下」的 `camera_registry.yaml`**：
   若兩者之間改過 zone 名稱，用即時檔案驗證會通過，但 parquet 裡的 zone 名稱其實
   是舊定義，可能讓不同攝影機的人流被靜默合併。
