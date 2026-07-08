@@ -12,6 +12,12 @@
 
 只要調整 zone 幾何定義，只需重跑 `zone-map`；只要調整報表參數，只需重跑 `report`，不必重跑昂貴的 GPU 偵測。
 
+## 設計理念
+
+- **進入點刻意設計成函式呼叫**（`analyze_daily`／`map_zones_daily`／`export_report_daily`），CLI 只是從 `config.toml` 組參數後呼叫，兩者是分離的兩層——未來換掉觸發方式（例如 Airflow）時，只需要換呼叫這些函式的「外殼」，不需動 pipeline 本身。
+- **三階段之間不靠記憶體傳遞資料，只靠檔案（parquet／yaml 快照）交接**：下游階段靠檢查上游輸出檔案是否存在來驗證相依關係（例如 `map_zones_daily` 檢查 `tracking_results.parquet`），而非透過回傳值或記憶體物件。這代表任何 orchestrator 都能個別重跑其中一個階段，只要對應輸入檔案還在。
+- **所有輸出都走 `.tmp` 檔 + 原子 `rename`**（`tracking_results.parquet`／`zone_counts.parquet`／`report.xlsx` 皆同），加上 `report` 的 `on_duplicate_date="overwrite"` 預設值，讓「同一個階段對同一天重跑」天生冪等、不會產生半成品或重複資料。
+
 ## 環境需求
 
 - Python >= 3.12
@@ -103,6 +109,26 @@ uv run video-flow-analytics report
 ```
 
 三個子命令的參數皆讀取 `config.toml` 對應區塊；`analyze` 進入點另外可用 `analyze.pipeline.analyze_daily(date, bucket_dir, camera_ids=None)` 以函式呼叫、支援不同 bucket 重複呼叫。
+
+## 三階段函式介面（輸入／輸出）
+
+### `analyze_daily(date, bucket_dir, camera_ids=None) -> AnalysisResult`
+
+- **輸入**：`bucket_dir/camera_registry.yaml` + 當日各攝影機影片片段
+- **輸出**：`tracking_results.parquet`、（依設定）逐片段標註影片，回傳 `AnalysisResult`（`date`／`camera_ids`／`tracking_results_path`／`output_video_paths`）
+- **備註**：GPU + 多進程，運算成本最高
+
+### `map_zones_daily(date, bucket_dir, bucket_minutes, entry_debounce_frames=1) -> Path`
+
+- **輸入**：階段一輸出的 `tracking_results.parquet` + `camera_registry.yaml` 的 zone 定義
+- **輸出**：`zone_counts.parquet` + `camera_registry_used.yaml`（快照），回傳 parquet 路徑
+- **備註**：純 CPU 向量化運算
+
+### `export_report_daily(date, bucket_dir, period_minutes, metric, on_duplicate_date, bucket_minutes) -> Path`
+
+- **輸入**：階段二輸出的 `zone_counts.parquet` + 對應的 `camera_registry_used.yaml` 快照（不是即時的 `camera_registry.yaml`）
+- **輸出**：跨日累加更新的 `report.xlsx`，回傳其路徑
+- **備註**：純 CPU 運算
 
 ## 輸出
 
