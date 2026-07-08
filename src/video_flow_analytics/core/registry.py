@@ -16,8 +16,9 @@ class Zone(BaseModel):
 
     Attributes:
         name: 區域名稱。`parsed_zones()` 只驗證同一攝影機內不可重複；跨攝影機
-            的全域唯一性是下游 report 模組彙總報表時的需求（`Zone` 本身與
-            `zone_mapping` 並不檢查），實際驗證邏輯見 `report` 模組。
+            也不可重複（原始需求來自 report 模組依 zone 名稱分組彙總、不含
+            camera_id），`zone_mapping` 與 `report` 皆會驗證，見
+            `parse_and_validate_zones`。
         polygon: 多邊形頂點清單，至少 3 個 `(x, y)` pixel 座標。
 
     Raises:
