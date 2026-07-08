@@ -15,7 +15,10 @@ class Zone(BaseModel):
     polygon 為 pixel 座標的頂點清單，對應該攝影機整天固定的解析度。
 
     Attributes:
-        name: 區域名稱（見 report 模組需求，跨攝影機也必須全域唯一）。
+        name: 區域名稱。`parsed_zones()` 只驗證同一攝影機內不可重複；跨攝影機的
+            全域唯一性是 report 模組的需求，只在 `report/pipeline.py` 的
+            `_validate_unique_zone_names` 驗證，`Zone` 本身與 `zone_mapping`
+            並不檢查。
         polygon: 多邊形頂點清單，至少 3 個 `(x, y)` pixel 座標。
 
     Raises:

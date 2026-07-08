@@ -65,8 +65,7 @@ def _build_report_frames(
             "請先執行 map_zones_daily 產生當日 parquet。"
         )
 
-    # 驗證用產生 zone_counts.parquet 當時的 registry 快照，而非「當下」的 registry，
-    # 否則兩者間若改過 zone 名稱，可能讓不同攝影機的人流被靜默合併
+    # 為何用快照而非當下 registry：見 export_report_daily 的 docstring 說明
     registry = load_registry_from_path(output_dir / "camera_registry_used.yaml")
     _validate_unique_zone_names(registry)
 
