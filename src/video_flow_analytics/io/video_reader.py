@@ -1,6 +1,6 @@
 import multiprocessing as mp
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -13,9 +13,10 @@ from video_flow_analytics.io.frame_ring import FrameRing
 # 避免把中途崩潰誤判為該路已完整讀完而寫出截斷的結果。
 READER_FAILED = "__READER_FAILED__"
 
-# 攝影機錄影時鐘本身就是台北時間，並非真正的 UTC；即使檔名格式的 "Z" 尾綴
-# 看起來像 RFC 3339 的 UTC 標記，實際寫入的 wall-clock 值就是台北時間。
-_RECORDING_TZ = ZoneInfo("Asia/Taipei")
+# 檔名的 "Z" 尾綴依 RFC 3339 為真正的 UTC；解析後於來源（ingestion）即轉換成
+# 台北在地時間，讓下游 parquet / zone_counts / report 一律以台北 wall-clock 處理。
+_FILENAME_TZ = timezone.utc
+_LOCAL_TZ = ZoneInfo("Asia/Taipei")
 
 
 @dataclass
@@ -24,8 +25,8 @@ class SegmentInfo:
 
     Attributes:
         path: 片段檔案的完整路徑。
-        start: 檔名解析出的錄影起始時間（標記為台北時間 UTC+8，見
-            `_RECORDING_TZ`）。
+        start: 檔名解析出的錄影起始時間（檔名為 UTC，已轉換為台北時間 UTC+8，
+            見 `_FILENAME_TZ` / `_LOCAL_TZ`）。
         relpath: 相對 bucket 根的路徑（輸出影片會鏡射它）。
     """
 
@@ -54,13 +55,13 @@ class FramePacket:
 
 
 def _parse_segment_start(path: Path, day: date) -> datetime:
-    # 檔名格式 {HHmmss}.{SSS}Z.{ext}：格式沿用 RFC 3339 的 "Z" 尾綴排版，但實際
-    # 錄影時鐘是台北時間（見模組層級 _RECORDING_TZ 註解），不可標記成 timezone.utc。
+    # 檔名格式 {HHmmss}.{SSS}Z.{ext}：依 RFC 3339，"Z" 尾綴為真正的 UTC；先以 UTC
+    # 結合當日日期，再轉成台北在地時間（見模組層級 _FILENAME_TZ / _LOCAL_TZ 註解）。
     stem = path.stem
     if not stem.endswith("Z"):
         raise ValueError(f"片段檔名不符合 HHmmss.SSSZ 格式: {path}")
     t = datetime.strptime(stem.removesuffix("Z"), "%H%M%S.%f")
-    return datetime.combine(day, t.time(), tzinfo=_RECORDING_TZ)
+    return datetime.combine(day, t.time(), tzinfo=_FILENAME_TZ).astimezone(_LOCAL_TZ)
 
 
 def probe_frame_shape(segment: SegmentInfo) -> tuple[int, int]:

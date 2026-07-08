@@ -27,9 +27,9 @@ def to_taipei(df: pl.DataFrame, column: str = "time_bucket") -> pl.DataFrame:
     """新增 local_time 欄位：直接沿用 column 的 wall-clock 值，不做時區位移。
 
     `column`（來自 zone_counts.parquet 的 time_bucket）在 schema 上正確標記為
-    Asia/Taipei（見 io/video_reader.py 的 `_RECORDING_TZ`），本身就已經是台北
-    時間的 wall-clock 值，因此這裡不能再額外加 8 小時，否則會造成雙重位移；
-    只需要去掉 tz 標記、保留原本的 wall-clock 數值即可。
+    Asia/Taipei——檔名的 UTC 已於來源解析時轉換成台北（見 io/video_reader.py 的
+    `_LOCAL_TZ`），本身就已經是台北時間的 wall-clock 值，因此這裡不能再額外加 8
+    小時，否則會造成雙重位移；只需要去掉 tz 標記、保留原本的 wall-clock 數值即可。
 
     Args:
         df: 含 `column` 欄位的資料表。
