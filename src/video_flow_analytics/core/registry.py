@@ -47,6 +47,9 @@ class CameraEntry(BaseModel):
         location: 攝影機所在位置名稱；與 `camera_id` 組成的 `stream_dirname`
             同樣必須在 `CameraRegistry` 內唯一。
         ip: 攝影機 IP。
+        participates_in_zone_mapping: 是否參與 zone mapping；`False` 時
+            `map_zones_daily` 直接跳過這台攝影機（即使 `zones` 有內容也不
+            處理）。正式訊號，取代舊版「`zones` 空清單代表不參與」的隱含推斷。
         zones: 原始 zone 定義（未經驗證的 dict 清單）。刻意用 `list[Any]`
             （非 `list[Zone]`）：也被較重的 `analyze_daily` 讀取，若在此
             驗證 zone 內容，打錯字會連帶讓不需要 zone 的路徑失敗；驗證延後到
@@ -58,6 +61,7 @@ class CameraEntry(BaseModel):
     camera_id: str
     location: str
     ip: str
+    participates_in_zone_mapping: bool = Field(default=True)
     zones: list[Any] = Field(default_factory=list)
 
     @property

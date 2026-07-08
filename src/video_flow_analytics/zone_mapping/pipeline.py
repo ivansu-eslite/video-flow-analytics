@@ -76,7 +76,9 @@ def map_zones_daily(
     bucket_path = Path(bucket_dir)
     registry = load_registry(bucket_path)
     zone_entries = {
-        entry.stream_dirname: entry for entry in registry.cameras if entry.zones
+        entry.stream_dirname: entry
+        for entry in registry.cameras
+        if entry.participates_in_zone_mapping
     }
 
     df = pl.read_parquet(results_path)
