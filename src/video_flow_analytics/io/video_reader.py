@@ -9,7 +9,11 @@ import numpy as np
 
 from video_flow_analytics.io.frame_ring import FrameRing
 
-# 讀取進程中途例外時放入 queue 的錯誤訊號，讓推理進程與「正常讀完」的 None 區分開，
+# 讀取進程正常讀完整天片段時放入 queue 的結束訊號；與 READER_FAILED 對稱，讓推理進程
+# 能明確區分「正常讀完」與「中途例外」兩種結束，而非依賴裸 None。
+READER_DONE = "__READER_DONE__"
+
+# 讀取進程中途例外時放入 queue 的錯誤訊號，讓推理進程與 READER_DONE 區分開，
 # 避免把中途崩潰誤判為該路已完整讀完而寫出截斷的結果。
 READER_FAILED = "__READER_FAILED__"
 
@@ -180,7 +184,7 @@ class DailyStreamVideoReader:
     def run(self) -> None:
         """依序讀完 `self.segments` 所有片段，並在結束或例外時發出結束訊號。
 
-        正常讀完送 `None`；中途例外送 `READER_FAILED` 並重新拋出例外，讓
+        正常讀完送 `READER_DONE`；中途例外送 `READER_FAILED` 並重新拋出例外，讓
         推理進程能區分兩者、避免把中途崩潰誤判為正常結束繼續寫出結果。
 
         Raises:
@@ -197,9 +201,9 @@ class DailyStreamVideoReader:
             failed = True
             raise
         finally:
-            # None 是給推理引擎的「正常讀完」結束訊號；例外時改送 READER_FAILED，
+            # READER_DONE 是給推理引擎的「正常讀完」結束訊號；例外時改送 READER_FAILED，
             # 讓推理進程能區分並中止，而非把這一路當成正常結束繼續寫出結果
-            self.data_queue.put(READER_FAILED if failed else None)
+            self.data_queue.put(READER_FAILED if failed else READER_DONE)
 
 
 def run_video_reader(
