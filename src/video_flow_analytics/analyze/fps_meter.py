@@ -1,5 +1,5 @@
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -15,7 +15,6 @@ class FpsSummary:
     elapsed_seconds: float
 
 
-@dataclass
 class FpsMeter:
     """累計 analyze 推理迴圈的處理格數與各階段耗時，最後換算平均 FPS。
 
@@ -24,11 +23,10 @@ class FpsMeter:
     分母，因此逐路 FPS 相加即整體 FPS，語意為「該路對整體吞吐的貢獻」。
     """
 
-    _frames_per_camera: dict[str, int] = field(
-        default_factory=lambda: defaultdict(int)
-    )
-    _total_detect_seconds: float = 0.0
-    _total_track_seconds: float = 0.0
+    def __init__(self) -> None:
+        self._frames_per_camera: dict[str, int] = defaultdict(int)
+        self._total_detect_seconds = 0.0
+        self._total_track_seconds = 0.0
 
     def record(self, camera_id: str) -> None:
         """記錄某路攝影機完整處理了一格。"""

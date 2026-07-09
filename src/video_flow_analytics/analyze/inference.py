@@ -194,10 +194,9 @@ class InferencePipeline:
         summary = self.fps_meter.summary(elapsed_seconds)
         for camera_id, fps in summary.per_camera_fps.items():
             logger.info(
-                "FPS[%s]：%d 格 / %.1f 秒 = %.2f fps",
+                "FPS[%s]：%d 格 = %.2f fps",
                 camera_id,
                 summary.per_camera_frames[camera_id],
-                summary.elapsed_seconds,
                 fps,
             )
         logger.info(
