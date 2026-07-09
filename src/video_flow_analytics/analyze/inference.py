@@ -9,7 +9,7 @@ from video_flow_analytics.analyze.tracker import MultiStreamByteTracker
 from video_flow_analytics.analyze.tracking_results import TrackingResultCollector
 from video_flow_analytics.core.config import settings
 from video_flow_analytics.io.frame_ring import FrameRing
-from video_flow_analytics.io.video_reader import READER_FAILED, FramePacket
+from video_flow_analytics.io.video_reader import READER_DONE, READER_FAILED, FramePacket
 from video_flow_analytics.io.video_writer import MultiStreamVideoWriter
 from video_flow_analytics.visualization.visualizer import TrackAnnotator
 
@@ -61,8 +61,9 @@ class InferencePipeline:
         rings: list[FrameRing],
     ) -> tuple[list[FramePacket], list[int], list[int]]:
         # slot 讀出後立即歸還 free_queue；在途影格數受環形緩衝 slot 數上限，不爆記憶體。
-        # 讀到 None 只記進 newly_finished、不在此關閉 writer：本批已收但未寫出的同路影格
-        # 若此時 close_stream，會被 writer 背景緒搶先關檔、之後補寫時重開檔案而截斷。
+        # 讀到 READER_DONE 只記進 newly_finished、不在此關閉 writer：本批已收但未寫出的
+        # 同路影格若此時 close_stream，會被 writer 背景緒搶先關檔、之後補寫時重開檔案
+        # 而截斷。
         batch_packets: list[FramePacket] = []
         batch_stream_ids: list[int] = []
         newly_finished: list[int] = []
@@ -79,7 +80,7 @@ class InferencePipeline:
                     except Empty:
                         break
                     progressed = True
-                    if item is None:  # 該路正常讀完，close 延後（見上方說明）
+                    if item == READER_DONE:  # 該路正常讀完，close 延後（見上方說明）
                         self.finished_streams.add(stream_id)
                         newly_finished.append(stream_id)
                         break
@@ -145,7 +146,8 @@ class InferencePipeline:
                 )
                 if not batch_packets:
                     if newly_finished:
-                        # 沒有影格但有路剛讀完（例如空批同時收到 None），仍要關其 writer
+                        # 沒有影格但有路剛讀完（例如空批同時收到 READER_DONE），
+                        # 仍要關其 writer
                         for stream_id in newly_finished:
                             self.writer.close_stream(stream_id)
                         continue
