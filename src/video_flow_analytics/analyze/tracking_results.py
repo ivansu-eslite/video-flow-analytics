@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 _SCHEMA = {
     "camera_id": pl.Utf8,
     "frame_id": pl.Int64,
-    # 攝影機錄影時鐘本身就是台北時間，不是 UTC（見 io/video_reader.py 的
-    # _RECORDING_TZ 註解），schema 標記需與來源 tzinfo 一致。
+    # timestamp 為台北在地時間：檔名為 UTC，已在 io/video_reader.py 解析時轉換成
+    # 台北（見該檔 _FILENAME_TZ / _LOCAL_TZ），schema 標記需與來源 tzinfo 一致。
     "timestamp": pl.Datetime("us", "Asia/Taipei"),
     "track_id": pl.Int64,
     "x1": pl.Float64,

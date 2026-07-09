@@ -171,9 +171,10 @@ on_duplicate_date = "overwrite"  # "overwrite" / "append" / "error"
 <bucket_dir>/<location>_<camera_id>/{YYYY}/{MM}/{DD}/{HHmmss}.{SSS}Z.mkv
 ```
 
-> **時區備註（已知問題）**：檔名的 `Z` 尾綴排版沿用 RFC 3339，但實際錄影時鐘就是台北時間
-> （UTC+8），系統解析時明確標記為 `Asia/Taipei`，下游不再對它做任何 UTC→+8 位移。此時區
-> 處理方式為已知問題，**下一版本會調整**。
+> **時區處理**：檔名的 `Z` 尾綴依 RFC 3339 為真正的 UTC，系統在 `io/video_reader.py`
+> 解析時即把它轉換成台北在地時間（`Asia/Taipei`，UTC+8）；此後 `tracking_results.parquet`
+> 的 `timestamp`、`zone_counts.parquet` 的 `time_bucket` 皆為台北在地時間，下游不需要、
+> 也不應該再對它做任何 UTC→+8 位移。
 
 完整格式範例：
 

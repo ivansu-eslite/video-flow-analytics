@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_ROOT = Path("outputs")
 
-# 空輸出也寫出正確 schema 的 parquet；time_bucket tz 沿用 timestamp（見 _RECORDING_TZ）
+# 空輸出也寫出正確 schema 的 parquet；time_bucket tz 沿用 timestamp（台北在地時間，
+# 見 io/video_reader.py 的 _LOCAL_TZ）
 _ZONE_COUNTS_SCHEMA = {
     "camera_id": pl.Utf8,
     "zone": pl.Utf8,

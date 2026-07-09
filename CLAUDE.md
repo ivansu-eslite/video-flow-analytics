@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 專案概述
 
-多路離線影片流分析系統：以「一天」為單位，從本機模擬 GCS bucket 的目錄結構（`bucket_name/<location>_<camera_id>/{YYYY}/{MM}/{DD}/{HHmmss}.{SSS}Z.mkv`）讀取各攝影機的影片片段，用 YOLO（僅偵測 `person`）做偵測、ByteTrack 做多路追蹤。**檔名的 `Z` 尾綴排版沿用 RFC 3339，但實際時間並非真正的 UTC：攝影機錄影時鐘本身就是台北時間（UTC+8），`io/video_reader.py` 解析時明確標記為 `Asia/Taipei`**（見該檔 `_RECORDING_TZ`；**此時區處理為已知問題，下一版本會調整**）。主要輸出為追蹤明細 Parquet（`outputs/{bucket_name}/{date}/tracking_results.parquet`）；逐片段標註影片（路徑鏡射輸入、根目錄換成 `outputs/{bucket_name}/`）為開發／偵錯輔助，由 `output.save_video` 控制。攝影機清單與各攝影機的 zone 定義統一寫在 `bucket_dir/camera_registry.yaml`（不進版控）。
+多路離線影片流分析系統：以「一天」為單位，從本機模擬 GCS bucket 的目錄結構（`bucket_name/<location>_<camera_id>/{YYYY}/{MM}/{DD}/{HHmmss}.{SSS}Z.mkv`）讀取各攝影機的影片片段，用 YOLO（僅偵測 `person`）做偵測、ByteTrack 做多路追蹤。**檔名的 `Z` 尾綴依 RFC 3339 為真正的 UTC，`io/video_reader.py` 解析時即把它轉換成台北在地時間（`Asia/Taipei`，UTC+8）**（見該檔 `_FILENAME_TZ` / `_LOCAL_TZ`）；此後 `tracking_results.parquet` 的 `timestamp` 與 `zone_counts.parquet` 的 `time_bucket` 皆為台北在地時間，下游不需再位移。主要輸出為追蹤明細 Parquet（`outputs/{bucket_name}/{date}/tracking_results.parquet`）；逐片段標註影片（路徑鏡射輸入、根目錄換成 `outputs/{bucket_name}/`）為開發／偵錯輔助，由 `output.save_video` 控制。攝影機清單與各攝影機的 zone 定義統一寫在 `bucket_dir/camera_registry.yaml`（不進版控）。
 
 進入點是函式呼叫，CLI 只是從 `config.toml` 組參數再呼叫：
 - `analyze.pipeline.analyze_daily(date, bucket_dir, camera_ids=None) -> AnalysisResult`（YOLO 偵測 + ByteTrack 多路追蹤，輸出 `tracking_results.parquet`，另可選輸出偵錯用標註影片；GPU、多進程，執行成本高）
@@ -82,12 +82,13 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
   `camera_registry_used.yaml` 快照，而非「當下」的 `camera_registry.yaml`**：
   若兩者之間改過 zone 名稱，用即時檔案驗證會通過，但 parquet 裡的 zone 名稱其實
   是舊定義，可能讓不同攝影機的人流被靜默合併。
-- **時區**：攝影機錄影時鐘本身就是台北時間（UTC+8，見專案概述段落與
-  `io/video_reader.py` 的 `_RECORDING_TZ`），`tracking_results.parquet` 的
-  `timestamp` 與 `zone_counts.parquet` 的 `time_bucket` 皆正確標記為
-  `Asia/Taipei`，報表不需要、也不應該再對它們做任何 UTC→+8 的時區位移；報表
-  算出來的日期／小時會與 `zone_counts.parquet` 所在的日期資料夾一致，不會
-  跨曆日。
+- **時區**：檔名為真正的 UTC，已於 `io/video_reader.py` 解析時轉換成台北在地
+  時間（見專案概述段落與該檔 `_LOCAL_TZ`），`tracking_results.parquet` 的
+  `timestamp` 與 `zone_counts.parquet` 的 `time_bucket` 皆為台北在地時間，
+  報表不需要、也不應該再對它們做任何 UTC→+8 的時區位移。**因錄影時段固定為
+  台北 11:00–22:00（即 UTC 03:00–14:00），一個 UTC 日資料夾偏移後仍落在同一
+  台北曆日**，報表算出來的日期／小時會與 `zone_counts.parquet` 所在的日期資料夾
+  一致，不會跨曆日。
 - **`on_duplicate_date`**（`config.toml` 的 `[report]`）：重跑同一天時的處理
   方式，`overwrite`（預設）刪除既有相同日期的列後插入新列，`append` 直接加到
   尾端不檢查，`error` 發現重複日期就整個中止不寫入。
@@ -107,5 +108,5 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
 
 - `yolo26m.pt`、`bucket_name*/`、`outputs/` 皆在 `.gitignore`，不進版控（`camera_registry.yaml` 含 zone 定義，隨 `bucket_name*/` 一起不進版控）。
 - `tracking_results.parquet` 的 `timestamp`／`zone_counts.parquet` 的 `time_bucket`
-  皆標記為 `Asia/Taipei`（非 UTC，見專案概述段落），下游不需要、也不應該再對
-  它們做 UTC→台北 +8 的時區位移。
+  皆為台北在地時間（`Asia/Taipei`；檔名的 UTC 已於解析時轉換，見專案概述段落），
+  下游不需要、也不應該再對它們做 UTC→台北 +8 的時區位移。
