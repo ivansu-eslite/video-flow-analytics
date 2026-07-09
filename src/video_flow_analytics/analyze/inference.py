@@ -5,6 +5,7 @@ from pathlib import Path
 from queue import Empty
 
 from video_flow_analytics.analyze.detector import YOLODetector
+from video_flow_analytics.analyze.fps_meter import FpsMeter
 from video_flow_analytics.analyze.tracker import MultiStreamByteTracker
 from video_flow_analytics.analyze.tracking_results import TrackingResultCollector
 from video_flow_analytics.core.config import settings
@@ -51,6 +52,7 @@ class InferencePipeline:
         self.writer = MultiStreamVideoWriter(output_root=output_root)
         self.annotator = TrackAnnotator()
         self.collector = TrackingResultCollector(results_path)
+        self.fps_meter = FpsMeter()
         # 湊約兩倍 batch 讓 ultralytics 組成完整批
         self._target_batch = settings.model.batch * 2
 
@@ -139,6 +141,7 @@ class InferencePipeline:
                 重新拋出。
         """
         logger.info("模組化推理流程啟動...")
+        start = time.perf_counter()
         try:
             while len(self.finished_streams) < self.num_streams:
                 batch_packets, batch_stream_ids, newly_finished = self._collect_batch(
@@ -154,15 +157,22 @@ class InferencePipeline:
                     # 所有 queue 當下都沒有資料，短暫休眠避免忙等待耗盡 CPU
                     time.sleep(0.001)
                     continue
+                detect_start = time.perf_counter()
                 results = self.detector.predict([p.frame for p in batch_packets])
+                # predict 回傳時 boxes 已具體化到 CPU（隱含同步），此 wall time 已含
+                # GPU 實際耗時，不需額外 cuda.synchronize()
+                self.fps_meter.add_detection_time(time.perf_counter() - detect_start)
                 for idx, stream_id in enumerate(batch_stream_ids):
                     packet = batch_packets[idx]
+                    track_start = time.perf_counter()
                     tracks = self.tracker.update(stream_id, results[idx].boxes)
+                    self.fps_meter.add_tracking_time(time.perf_counter() - track_start)
                     self.collector.add(
                         camera_id=self.stream_names[stream_id],
                         packet=packet,
                         tracks=tracks,
                     )
+                    self.fps_meter.record(self.stream_names[stream_id])
                     annotated_frame = self.annotator.draw_bboxes(packet.frame, tracks)
                     self.writer.write(
                         stream_id, packet.segment_relpath, annotated_frame, packet.fps
@@ -170,9 +180,33 @@ class InferencePipeline:
                 # 本批已全部 write()，才可安全 close_stream（避免截斷，見上方說明）
                 for stream_id in newly_finished:
                     self.writer.close_stream(stream_id)
+            # 在 close_all/save 之前印，數字只反映純處理，且即使 save 失敗仍看得到
+            self._log_fps_summary(time.perf_counter() - start)
             self.writer.close_all()  # 會把 writer 背景緒的中途例外重拋到這裡
             self.collector.save()  # 僅全部串流（含編碼）跑完才原子性改名成正式檔名
         except BaseException:
             self.collector.discard()  # fail-loud：不留下不完整結果
             self.writer.abort()
             raise
+
+    def _log_fps_summary(self, elapsed_seconds: float) -> None:
+        """把處理 FPS 統計逐路、整體、階段各印一行。"""
+        summary = self.fps_meter.summary(elapsed_seconds)
+        for camera_id, fps in summary.per_camera_fps.items():
+            logger.info(
+                "FPS[%s]：%d 格 = %.2f fps",
+                camera_id,
+                summary.per_camera_frames[camera_id],
+                fps,
+            )
+        logger.info(
+            "FPS[整體]：%d 格 / %.1f 秒 = %.2f fps",
+            summary.total_frames,
+            summary.elapsed_seconds,
+            summary.overall_fps,
+        )
+        logger.info(
+            "FPS[階段]：Detection %.2f fps、Tracking %.2f fps",
+            summary.detection_fps,
+            summary.tracking_fps,
+        )
