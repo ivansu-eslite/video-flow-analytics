@@ -46,8 +46,10 @@ flowchart LR
   `tracking_results.parquet`）。因此任何排程器（orchestrator）都能個別重跑其中一個階段，
   只要對應的輸入檔還在。
 - **重跑冪等**：所有輸出都先寫入 `.tmp` 暫存檔、完成後再 `rename` 成正式檔名，藉由
-  `rename` 的原子性，確保過程中斷時不會在正式檔名下留下半成品。搭配 `report` 預設的
-  `on_duplicate_date = "overwrite"`，同一個階段對同一天重跑天生冪等。
+  `rename` 的原子性，確保過程中斷時不會在正式檔名下留下半成品。`report` 對同一天重跑
+  是否冪等，則取決於 `on_duplicate_date`：採 `overwrite` 會先刪除該日既有列再插入、
+  天生冪等；預設的 `append` 直接附加、不檢查，重跑同一天會產生重複列（非冪等），
+  需要冪等時請改用 `overwrite`。
 
 **進入點是函式呼叫，CLI 只是外殼。** 三個階段的核心分別是
 `analyze_daily` / `map_zones_daily` / `export_report_daily` 三個函式；CLI 子命令只是從
@@ -126,21 +128,21 @@ model_path = "yolo26m.pt"
 batch = 8
 
 [output]
-save_video = true          # 是否輸出標註影片（開發 / 偵錯輔助）
+save_video = false         # 是否輸出標註影片（開發 / 偵錯輔助）
 
 [input]
-bucket_dir = "bucket_name1"
+bucket_dir = "bucket_name"
 date = 2026-05-01
 camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 
 [zone]
-bucket_minutes = 15        # 事件統計時間粒度（分鐘）
+bucket_minutes = 60        # 事件統計時間粒度（分鐘）
 entry_debounce_frames = 1  # 進場去抖；1 = 不去抖
 
 [report]
 period_minutes = 60        # 報表彙總粒度；須為 zone.bucket_minutes 的倍數
 metric = "entries"         # "entries" 或 "unique_visitors"
-on_duplicate_date = "overwrite"  # "overwrite" / "append" / "error"
+on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 ```
 
 各區塊的主要欄位與約束：
@@ -150,15 +152,15 @@ on_duplicate_date = "overwrite"  # "overwrite" / "append" / "error"
 | `[tracker]` | ByteTrack 各項閾值 | 見範例 | `*_thresh` 皆介於 0–1，`track_buffer >= 1` |
 | `[model]` | `model_path` | `"yolo26m.pt"` | 權重檔路徑 |
 | | `batch` | `1` | YOLO 推理批次大小，`>= 1`（範例用 `8`） |
-| `[output]` | `save_video` | `true` | 是否輸出標註影片（開發 / 偵錯用途） |
+| `[output]` | `save_video` | `false` | 是否輸出標註影片（開發 / 偵錯用途） |
 | `[input]` | `bucket_dir` | — | 本機模擬 GCS bucket 的根目錄 |
 | | `date` | — | 分析日期 |
 | | `camera_ids` | `[]` | 要分析的攝影機；空清單 = 全部 |
-| `[zone]` | `bucket_minutes` | `15` | 事件統計時間粒度（分鐘），`>= 1` |
+| `[zone]` | `bucket_minutes` | `60` | 事件統計時間粒度（分鐘），`>= 1` |
 | | `entry_debounce_frames` | `1` | 連續在區域內幾格才算一次進場，`>= 1`；`1` = 不去抖 |
 | `[report]` | `period_minutes` | `60` | 報表彙總粒度，`>= 1`，且**須為 `zone.bucket_minutes` 的倍數** |
 | | `metric` | `"entries"` | `"entries"` 或 `"unique_visitors"` |
-| | `on_duplicate_date` | `"overwrite"` | 同日期重跑的處理：`"overwrite"` / `"append"` / `"error"` |
+| | `on_duplicate_date` | `"append"` | 同日期重跑的處理：`"overwrite"` / `"append"` / `"error"` |
 
 ### `camera_registry.yaml`（資料樣貌 ＋ 區域定義）
 
@@ -277,8 +279,8 @@ cameras:
 - **函式介面**：`export_report_daily(date, bucket_dir, period_minutes, metric, on_duplicate_date, bucket_minutes) -> Path`。
 - **運算特性**：純 CPU 運算，不需重跑偵測或區域統計。
 - **注意事項**：
-  - `on_duplicate_date` 決定同一天重跑的處理方式：`overwrite`（預設，先刪除既有相同日期
-    的列再插入）、`append`（直接附加、不檢查）、`error`（發現重複日期即中止）。
+  - `on_duplicate_date` 決定同一天重跑的處理方式：`overwrite`（先刪除既有相同日期
+    的列再插入）、`append`（預設，直接附加、不檢查）、`error`（發現重複日期即中止）。
   - **`metric = "unique_visitors"` 的彙總為近似值**：`unique_visitors` 是各 bucket 內的不重複
     人數，跨相鄰 bucket 停留的同一人會在彙總時被重複計入；`zone_counts.parquet` 未保留原始
     `track_id`，本階段無法在彙總時去重。`metric = "entries"` 本身即為可疊加的事件次數，

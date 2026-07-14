@@ -50,7 +50,7 @@ class OutputConfig(BaseModel):
         save_video: 是否輸出逐片段標註影片。
     """
 
-    save_video: bool = True
+    save_video: bool = False
 
 
 class ZoneConfig(BaseModel):
@@ -63,7 +63,7 @@ class ZoneConfig(BaseModel):
             邊界抖動；預設 1 = 不去抖。
     """
 
-    bucket_minutes: int = Field(default=15, ge=1)
+    bucket_minutes: int = Field(default=60, ge=1)
     entry_debounce_frames: int = Field(default=1, ge=1)
 
 
@@ -79,7 +79,7 @@ class ReportConfig(BaseModel):
 
     period_minutes: int = Field(default=60, ge=1)
     metric: Literal["entries", "unique_visitors"] = "entries"
-    on_duplicate_date: Literal["overwrite", "append", "error"] = "overwrite"
+    on_duplicate_date: Literal["overwrite", "append", "error"] = "append"
 
 
 class InputConfig(BaseModel):
