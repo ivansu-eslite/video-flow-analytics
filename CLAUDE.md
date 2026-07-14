@@ -90,7 +90,7 @@ uv run ruff check .                  # lint（line-length=88, select=["E","F","I
   台北曆日**，報表算出來的日期／小時會與 `zone_counts.parquet` 所在的日期資料夾
   一致，不會跨曆日。
 - **`on_duplicate_date`**（`config.toml` 的 `[report]`）：重跑同一天時的處理
-  方式，`overwrite`（預設）刪除既有相同日期的列後插入新列，`append` 直接加到
+  方式，`overwrite` 刪除既有相同日期的列後插入新列，`append`（預設）直接加到
   尾端不檢查，`error` 發現重複日期就整個中止不寫入。
 - **`metric='unique_visitors'` 的彙總是近似值**：`rollup_by_period` 對
   `unique_visitors` 一律用 `sum()` 把多個 `bucket_minutes` 彙總成
