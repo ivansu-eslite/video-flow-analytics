@@ -195,7 +195,8 @@ uv run --directory <pkg> pytest         # 執行測試
 ```
 
 此處用 `--directory`（切換 cwd 進套件資料夾）而非執行分析時的 `--project`，pytest 才會
-解析到該套件的 `tests/`。`zone-mapping` 目前尚無既有測試。
+解析到該套件的 `tests/`。三包各自都有測試（video-analyze 3 支、zone-mapping 1 支、
+flow-report 3 支）。
 
 此倉庫另附一份 [CLAUDE.md](CLAUDE.md)，是給 Claude Code 的工作指引，記錄跨套件、不易從
 單一套件程式碼看出的設計決策。

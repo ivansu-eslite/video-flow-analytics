@@ -30,7 +30,7 @@ uv run --project zone-mapping  zone-mapping    # zone 事件統計 → zone_coun
 uv run --project flow-report   flow-report     # 報表彙總 → report.xlsx
 
 uv run --directory <pkg> ruff check .          # lint；<pkg> = video-analyze / zone-mapping / flow-report
-uv run --directory <pkg> pytest                # 測試（zone-mapping 目前尚無既有測試）
+uv run --directory <pkg> pytest                # 測試（三包各有測試：3／1／3 支）
 ```
 
 **執行 cwd 約束**：`bucket_dir` 與 `OUTPUT_ROOT = Path("outputs")` 是**cwd 相對路徑**，
