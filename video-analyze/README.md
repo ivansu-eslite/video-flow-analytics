@@ -28,7 +28,8 @@
 | 套件 | 用途 |
 | --- | --- |
 | `opencv-python` | 影片片段讀取與標註影片輸出 |
-| `ultralytics` | YOLO 偵測（會一併帶入 PyTorch） |
+| `ultralytics` | YOLO 偵測 |
+| `torch` / `torchvision` | 推理後端（與 `ultralytics` 一併釘住版本） |
 | `lap` | ByteTrack 的線性指派求解 |
 | `numpy` | 影格與追蹤結果的陣列運算 |
 | `polars` / `pyarrow` | 追蹤明細 parquet 寫出 |
@@ -38,7 +39,8 @@
 依賴版本以 `==` 釘住並附 `uv.lock`，固定推理堆疊。
 
 **模型權重**：`config.toml` 的 `model_path`（預設 `yolo26m.pt`）指向的權重檔不進版控
-（`.gitignore` 排除所有 `*.pt`）；若本機找不到該檔，ultralytics 會自動下載對應權重。
+（`.gitignore` 排除所有 `*.pt`）；若本機找不到該檔，ultralytics 會**靜默地自動下載**對應
+權重、不會報錯。
 
 ## 安裝與執行
 
@@ -103,7 +105,7 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 | `[model]` | `model_path` | `"yolo26m.pt"` | 權重檔路徑 |
 | | `batch` | `1` | YOLO 推理批次大小，`>= 1`（範例用 `8`） |
 | `[output]` | `save_video` | `false` | 是否輸出標註影片（開發 / 偵錯用途） |
-| `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄 |
+| `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（範例用 `bucket_name1`） |
 | | `date` | — | 分析日期 |
 | | `camera_ids` | `[]` | 要分析的攝影機；空清單 = 全部 |
 
@@ -237,8 +239,9 @@ bucket 呼叫。
 
 ### fail-loud 錯誤處理
 
-- 檔名格式錯誤 → `discover_segments` 在主進程直接拋 `ValueError`；片段開檔 / 讀 FPS
-  失敗 → 讀取子進程拋錯、以非零 exitcode 結束。
+- 檔名格式錯誤 → `discover_segments` 在主進程直接拋 `ValueError`；各攝影機首段的開檔 /
+  讀影格失敗 → `probe_frame_shape` 同樣在主進程拋 `ValueError`（子進程尚未啟動）。
+- 其餘片段的開檔 / 讀 FPS 失敗 → 讀取子進程拋錯、以非零 exitcode 結束。
 - `analyze_daily` 以 0.5 秒輪詢所有子進程；任一非零結束 → 先終止所有子進程再拋
   `RuntimeError`；`KeyboardInterrupt` → 終止後以 exit code 130 收斂。
 - 追蹤明細 parquet 先寫 `.tmp`、全部串流結束後才 `rename` 成正式檔名（`rename` 具
