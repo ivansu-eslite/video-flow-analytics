@@ -180,20 +180,49 @@ cwd 影響，仍各自獨立。
 **做法**：用未改動的 monolith 對 `bucket_name1` **連跑兩次**，比對兩次的
 `tracking_results.parquet`。
 
-**已於 2026-07-15 執行，結論如下**（落在上述第 2 點「偵測數值本身可能變動」，但下游穩定）：
+**已於 2026-07-15 執行（兩輪），初步結論如下**（落在上述第 2 點「偵測數值本身可能
+變動」，但下游穩定）：
 
 - **`tracking_results.parquet` 不可重現**，三個層面都有差異：列數差 1 列
   （568,421 vs 568,422）、列順序約在第 47 萬列後開始分岔、1,228 列（0.22%）座標有差。
-- **差異 100% 集中在 `test_cam004`**，cam001-003 排序後 bit-identical。ffprobe 證實
-  cam001-003 為 1920×1080、cam004 為 2880×1620——正是上述第 2 點預測的混解析度
-  letterbox 機制。差異幅度為次像素等級（座標絕對差中位數 ~0.0007 px、最大 0.77 px），
-  符合「前處理 pad 尺寸隨批次組成變動造成 float 抖動」，非邏輯錯誤。
+- 差異集中在 `test_cam004`，cam001-003 排序後 bit-identical。ffprobe 證實
+  cam001-003 為 1920×1080、cam004 為 2880×1620——符合上述第 2 點預測的混解析度
+  letterbox 機制。差異幅度為次像素等級（座標絕對差中位數 ~0.0007 px、最大 0.77 px）。
 - **`zone_counts.parquet` 完全穩定**：拿兩輪 tracking 各跑一次 zone-map，輸出兩輪
-  **sha256 完全相同**（連 cam004 自己的 zone 都一致）——次像素抖動被 time bucket
-  聚合吸收。
+  **sha256 完全相同**（連 cam004 自己的 zone 都一致）——抖動被 time bucket 聚合吸收。
 
-**因此主驗收標的下移到 `zone_counts.parquet`（要求逐值/byte 級一致）**，
-`tracking_results.parquet` 降為輔助、用 1 px 容差比對（實測 max 0.77 px）。
+> **⚠️ 上面兩點「差異只集中在 cam004」「最大 0.77 px」已於任務 1 實作時被第三輪控制組
+> 推翻**（2026-07-15，見下方 0a 補測）。**0.77 px 是單一樣本的運氣，不是分布的上界**，
+> 據它訂的 1 px 容差 AC 連未改動的 monolith 自己都過不了。`zone_counts.parquet` 穩定
+> 這一點則不受影響，且被補測進一步強化。
+
+#### 0a 補測：第三輪控制組（任務 1 實作時實測，修正上方結論）
+
+任務 1 驗收時，video-analyze 對 golden 的 tracking 比對出現 8 列超出 1 px 容差
+（max 3.76 px），為了分辨「拆壞了」與「本來就會變」，**用未改動的 monolith 再跑第三輪**
+與同一份 golden 比對（同一台機器、同一份 `bucket_name1`、同一組參數）。結果：
+
+| 比對對象（皆 vs 同一份 golden） | 最大座標差 | 超出 1 px 列數 | 只在單邊的 key | 差異落在 |
+|---|---|---|---|---|
+| **未改動 monolith 第三輪**（控制組） | **1878 px** | **5,774** | **45,242** | **cam001** |
+| video-analyze（任務 1 產出） | 3.76 px | 8 | 1 | cam004 |
+
+修正後的結論：
+
+- **非決定性不限於混解析度 letterbox 的次像素抖動**。1878 px 代表同一
+  `(camera_id, timestamp, track_id)` 對到的是**完全不同的人**——**ByteTrack 的 track_id
+  指派本身就會在重跑間改變**（45,242 個 key 只在單邊 = 約 8% 的列 key 對不上）。
+- **它可以打到任何一台攝影機**，不是 cam004 專屬：控制組的爆炸性差異出現在
+  **cam001**（1920×1080，非混解析度的那台）。
+- **`tracking_results.parquet` 對「拆分是否改壞邏輯」沒有驗收力**：未改動的程式碼自己
+  重跑就能產生 1878 px 差異，任何固定容差都無法區分 regression 與固有雜訊。
+- **`zone_counts.parquet` 的穩定性得到比原本更強的驗證**：golden／video-analyze／
+  monolith 第三輪**三方 sha256 完全相同**。原本只驗到「輕微抖動被吸收」，補測證明
+  **連嚴重的 track_id churn 都會被 time bucket 聚合吸收**。
+
+**因此主驗收標的維持在 `zone_counts.parquet`（逐值/byte 級一致）——此結論不變且更穩固**；
+`tracking_results.parquet` 的**固定容差比對作廢**，改為**控制組相對條件**：拆分後對
+golden 的偏離，須 **不大於未改動 monolith 自身重跑對 golden 的偏離**。
 `zone_mapping/pipeline.py` 對 `zone_counts` 做了
 `.sort("camera_id","zone","time_bucket")`，本就穩定可逐值比對。任務 1 的 AC 據此定稿
 （見 [2026-07-15-split-video-analyze.md](2026-07-15-split-video-analyze.md) 的
@@ -269,10 +298,12 @@ golden；換機器或清掉 `outputs/` 後須依 0b 重跑 monolith 重新產生
       (b) 另用一份**含 `participates_in_zone_mapping` 的最小合成 yaml** 三包各自載入亦
       不報錯——現有 fixture 都沒有此欄位，不補這條會假性通過。
 - [ ] 三包輸出與 golden 基線一致（fixture 為 `bucket_name1`）。**比對方式依任務 0a 實測
-      結果定案**：`zone_counts.parquet`（任務 2）與 `report.xlsx`（任務 3）逐值/byte 級
-      一致；`tracking_results.parquet`（任務 1）因混解析度 letterbox 本就不可重現，主標的
-      下移到重跑 zone-map 後的 `zone_counts.parquet` 逐值一致，原始 tracking 僅依
-      `(camera_id, timestamp, track_id)` 排序後用 1 px 容差輔助比對（詳見 0a 段落與各細項計畫）。
+      結果定案（含 0a 補測的修正）**：`zone_counts.parquet`（任務 2）與 `report.xlsx`
+      （任務 3）逐值/byte 級一致；`tracking_results.parquet`（任務 1）本就不可重現
+      （track_id 指派逐輪改變，非僅混解析度 letterbox），主標的下移到重跑 zone-map 後的
+      `zone_counts.parquet` 逐值一致，原始 tracking 改用**控制組相對條件**輔助比對
+      （偏離不得大於未改動 monolith 自身重跑的偏離；**固定 px 容差已作廢**，詳見 0a 補測
+      與各細項計畫）。
 - [ ] 舊 monolith 已移除，根 README／CLAUDE.md 已更新（任務 4）。
 
 ## Risk
@@ -297,9 +328,12 @@ golden；換機器或清掉 `outputs/` 後須依 0b 重跑 monolith 重新產生
   意義的 diff，且平白跑掉數輪 GPU 推理。由上方 AC 明訂三包皆須設為 `bucket_name1`。
 - **輸出一致性假性 diff**：polars／openpyxl 版本需在三包 pin 一致，避免 parquet／xlsx
   細節差異造成非邏輯性的 diff。
-- **analyze 輸出可能本來就不可重現**（時序相依湊批 + `bucket_name1` 混解析度導致
-  letterbox 隨批次組成變動）：若不先探測就寫死「逐值一致」，AC 會恆為紅燈且無法分辨
-  「拆壞了」與「本來就會變」。由任務 0a 先探測、再定 AC 化解。
+- **analyze 輸出本來就不可重現**（時序相依湊批 + `bucket_name1` 混解析度導致 letterbox
+  隨批次組成變動，**且 ByteTrack track_id 指派逐輪改變**）：若不先探測就寫死「逐值
+  一致」，AC 會恆為紅燈且無法分辨「拆壞了」與「本來就會變」。由任務 0a 先探測、再定 AC
+  化解。**0a 補測另揭示：連「探測一次就定容差」也不夠**——單輪樣本量出的 0.77 px 上界
+  低估實際分布 3 個數量級（控制組實測 1878 px），故 tracking 的驗收改為控制組相對條件，
+  真正的驗收力放在 `zone_counts.parquet`。
 - **既有測試漏搬**：`CLAUDE.md` 曾寫「僅 report 有測試」（已於本次一併修正），實際有 4
   份。任務 4 會刪掉舊 `tests/`，漏搬即永久消失。由「合計通過數 ≥ 拆分前」的 AC 把關。
 - **成本／權限／模型準確率**：`N/A`——純結構重整，不動推理邏輯與模型權重。

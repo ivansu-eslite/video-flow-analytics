@@ -154,14 +154,18 @@ ruff 設定沿用（`line-length=88`、`select=["E","F","I","W"]`、`target-vers
       tracking_results.parquet` 路徑與 schema 不變。
 - [ ] 測試方式與驗收情境明確：對 **`bucket_name1`** 測試資料（5.6G，非 112G 的
       `bucket_name`）跑 analyze，與父計畫任務 0b 的 golden 比對通過。**比對方式依任務 0a
-      實測結果定案**（analyze 輸出本就不可重現：時序相依湊批 + 混解析度使 letterbox 隨
-      批次組成變動，差異集中在 2880×1620 的 cam004、屬次像素抖動，見父計畫 0a）：
+      實測結果定案（含 0a 補測的修正）**——analyze 輸出本就不可重現：時序相依湊批 +
+      混解析度 letterbox，**且 ByteTrack track_id 指派逐輪改變**，差異可打到任何一台
+      攝影機、幅度可達千 px 等級（見父計畫 0a 補測）：
       - **主標的**：拿本次 analyze 的 `tracking_results.parquet` 跑一次 zone-map，產出的
-        `zone_counts.parquet` 需與 golden **逐值一致**（0a 實測兩輪 sha256 相同，此為最強
-        訊號）。
-      - **輔助**：`tracking_results.parquet` 依 `(camera_id, timestamp, track_id)`
-        **排序後**，座標用 `abs_tol = 1.0` px 容差比對（實測 max 0.77 px）；列數容許
-        極小差異、不要求 key 集合完全相同（0a 實測列數差 1 列，推測約 1 個 key 只在單邊）。
+        `zone_counts.parquet` 需與 golden **逐值一致**（三方 sha256 相同，此為最強訊號；
+        補測證明它連嚴重 track_id churn 都能吸收）。
+      - **輔助（控制組相對條件）**：`tracking_results.parquet` 依
+        `(camera_id, timestamp, track_id)` **排序後**比對，本包對 golden 的偏離
+        （最大座標差／超出列數／只在單邊的 key 數）須**不大於未改動 monolith 自身重跑
+        對同一份 golden 的偏離**。**固定 px 容差已作廢**：0a 初測的 0.77 px 是單一樣本的
+        運氣，控制組實測未改動的 monolith 自己就能差到 1878 px，任何固定容差都無法區分
+        regression 與固有雜訊。
       - **陷阱**：join key 用 `timestamp` 不可用 `frame_id`——`frame_id` 是片段內幀序、
         跨片段重複，用它 join 會笛卡兒展開、配對到不同影格的框。
 - [ ] **既有 2 份測試已搬入且全過**：`uv run pytest` 涵蓋 `tests/analyze/test_fps_meter.py`
