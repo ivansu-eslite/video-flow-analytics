@@ -178,17 +178,30 @@ cwd 影響，仍各自獨立。
 所以「逐值一致」若照字面寫，會一直紅燈且**分不清是拆壞了還是本來就不可重現**。
 
 **做法**：用未改動的 monolith 對 `bucket_name1` **連跑兩次**，比對兩次的
-`tracking_results.parquet`，記錄結論：
+`tracking_results.parquet`。
 
-| 探測結果 | 任務 1 的 AC 應改成 |
-|---|---|
-| 完全一致 | 維持逐值一致 |
-| 僅列順序不同 | 依 `(camera_id, frame_id, track_id)` **排序後**逐值比對 |
-| 數值也有微小差異 | 座標改**容差比對**（定出 `abs_tol`），或把主驗收標的**下移到 `zone_counts.parquet`** |
+**已於 2026-07-15 執行，結論如下**（落在上述第 2 點「數值也有微小差異」，但下游穩定）：
 
-**`zone_counts.parquet` 是更穩的比對點**：`zone_mapping/pipeline.py` 對它做了
-`.sort("camera_id","zone","time_bucket")`，且經 time bucket 聚合後對微小座標抖動不敏感。
-若 0a 顯示 analyze 輸出不可重現，就以它作為「拆分未破壞行為」的主要證據。
+- **`tracking_results.parquet` 不可重現**，三個層面都有差異：列數差 1 列
+  （568,421 vs 568,422）、列順序約在第 47 萬列後開始分岔、1,228 列（0.22%）座標有差。
+- **差異 100% 集中在 `test_cam004`**，cam001-003 排序後 bit-identical。ffprobe 證實
+  cam001-003 為 1920×1080、cam004 為 2880×1620——正是上述第 2 點預測的混解析度
+  letterbox 機制。差異幅度為次像素等級（座標絕對差中位數 ~0.0007 px、最大 0.77 px），
+  符合「前處理 pad 尺寸隨批次組成變動造成 float 抖動」，非邏輯錯誤。
+- **`zone_counts.parquet` 完全穩定**：拿兩輪 tracking 各跑一次 zone-map，輸出兩輪
+  **sha256 完全相同**（連 cam004 自己的 zone 都一致）——次像素抖動被 time bucket
+  聚合吸收。
+
+**因此主驗收標的下移到 `zone_counts.parquet`（要求逐值/byte 級一致）**，
+`tracking_results.parquet` 降為輔助、用 1 px 容差比對（實測 max 0.77 px）。
+`zone_mapping/pipeline.py` 對 `zone_counts` 做了
+`.sort("camera_id","zone","time_bucket")`，本就穩定可逐值比對。任務 1 的 AC 據此定稿
+（見 [2026-07-15-split-video-analyze.md](2026-07-15-split-video-analyze.md) 的
+Acceptance Criteria）。
+
+> **比對 `tracking_results.parquet` 的 join key 用 `(camera_id, timestamp, track_id)`，
+> 不可用 `frame_id`**：`frame_id` 是**片段內**幀序（`packet.frame_index`），跨片段會
+> 重複，拿它 join 會笛卡兒展開、把不同影格的框配成一對，算出假的大幅座標差。
 
 任務 2／3 不受此影響：它們的輸入是 golden 檔案而非重跑推理，輸出路徑本身也有排序。
 
@@ -240,10 +253,11 @@ video-flow-analytics analyze` 等），golden 才會落在 repo 根的 `outputs/
       報錯（驗 `zones` 欄位相容）；
       (b) 另用一份**含 `participates_in_zone_mapping` 的最小合成 yaml** 三包各自載入亦
       不報錯——現有 fixture 都沒有此欄位，不補這條會假性通過。
-- [ ] 三包輸出與 golden 基線一致（fixture 為 `bucket_name1`）。**比對方式依任務 0a 的
-      可重現性探測結果決定**，不預設「逐值一致」——`zone_counts.parquet` 與
-      `report.xlsx` 的產生路徑有排序、可逐值比對；`tracking_results.parquet` 視 0a
-      結果採排序後比對或容差比對。
+- [ ] 三包輸出與 golden 基線一致（fixture 為 `bucket_name1`）。**比對方式依任務 0a 實測
+      結果定案**：`zone_counts.parquet`（任務 2）與 `report.xlsx`（任務 3）逐值/byte 級
+      一致；`tracking_results.parquet`（任務 1）因混解析度 letterbox 本就不可重現，主標的
+      下移到重跑 zone-map 後的 `zone_counts.parquet` 逐值一致，原始 tracking 僅依
+      `(camera_id, timestamp, track_id)` 排序後用 1 px 容差輔助比對（詳見 0a 段落與各細項計畫）。
 - [ ] 舊 monolith 已移除，根 README／CLAUDE.md 已更新（任務 4）。
 
 ## Risk
