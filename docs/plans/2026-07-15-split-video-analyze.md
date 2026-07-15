@@ -81,10 +81,21 @@ video-analyze/
 | `InputConfig` | `pipeline.py`：`settings.input.date`／`bucket_dir`／`camera_ids` |
 
 - 刪掉 `ZoneConfig`、`ReportConfig` 及 `AppConfig` 對應欄位。
+  - 本包**保留** `TrackerConfig`／`ModelConfig`，故 `load_config()` 的回退分支
+    `AppConfig(tracker=TrackerConfig(), model=ModelConfig())` 原樣可用，不必改（zone-map
+    ／report 兩包刪掉這兩個 model，回退分支會 `NameError`，是它們的專屬陷阱）。
 - **修路徑 hack**：`load_config()` 現用 `parents[3]` 定位 repo 根的 `config.toml`。本檔
   移到 `src/video_analyze/config.py` 後，改成 `parents[2]` 對到 `video-analyze/config.toml`，
   並同步更新該處說明註解的層數描述。
+  - 一併修 `load_config` docstring 的「讀取 **repo 根目錄**的 `config.toml`」——切片後對
+    到的是**套件根**（`video-analyze/config.toml`），照抄會是騙人的註解。
+- `config.toml` 的 `[input] bucket_dir` 設為 **`bucket_name1`**，不要沿用根
+  `config.toml`／`InputConfig` model 預設的 `bucket_name`（那是 112G 的 fixture，與
+  golden 不符，且 golden 對比要跑好幾輪 GPU 推理，對錯 fixture 代價很高，見父計畫任務 0）。
 - 保留模組載入時建立全域 `settings` 單例的既有慣例（不改成依賴注入）。
+- **`bucket_dir` 是 cwd 相對路徑**：本包一律以 `uv run --project video-analyze
+  video-analyze` 在 repo 根執行，勿 `cd video-analyze` 後再跑（見父計畫「硬約束：三包
+  一律從 repo 根目錄執行」）。此約束需寫進本包 README。
 
 ### 3. `registry.py` 切片（**精簡版**）
 
@@ -152,6 +163,12 @@ ruff 設定沿用（`line-length=88`、`select=["E","F","I","W"]`、`target-vers
 - [ ] 影響範圍已列出：僅新增 `video-analyze/`；舊 `src/` 不動（任務 4 才移除），與任務
       2／3 無檔案重疊。
 - [ ] `video-analyze/` 可獨立 `uv sync`，且不含 `openpyxl` 等非必要依賴。
+- [ ] **以 `uv run --project video-analyze video-analyze` 在 repo 根執行**，輸出落在 repo
+      根的 `outputs/bucket_name1/2026-05-01/`（與 golden 同一棵樹，也是下游 zone-map 讀
+      得到的位置）；README 已記載此 cwd 約束。
+- [ ] **`config.toml` 的 `[input] bucket_dir` 為 `bucket_name1`**，且 `[tracker]`／
+      `[model]`／`[output]` 各值與產生 golden 時的根 `config.toml` 一致（參數不同會直接
+      造成 golden diff，與拆分本身無關）。
 - [ ] 精簡 registry 的 `extra="forbid"` 相容性（**兩層，缺一不可**）：
       (a) 能載入真實 `bucket_name1/camera_registry.yaml`（驗 `zones`）；
       (b) 能載入一份**含 `participates_in_zone_mapping` 的最小合成 yaml**——現有 fixture
@@ -168,6 +185,14 @@ ruff 設定沿用（`line-length=88`、`select=["E","F","I","W"]`、`target-vers
 - **config 路徑層數**：`parents[3]` → `parents[2]` 若漏改，會靜默找不到 `config.toml`
   並**以預設值回退**（現行 `load_config` 只印警告不中止），造成用錯參數卻不易察覺。
   驗收時需確認 golden 一致即可涵蓋此風險。
+- **cwd 相對路徑**：`bucket_dir`／`OUTPUT_ROOT` 跟著 cwd 走，與 `config.toml` 的
+  `__file__` 定位是兩套機制，容易誤以為改完 `parents[N]` 路徑就都對了。若 `cd
+  video-analyze` 後執行，`bucket_name1` 對到不存在的 `video-analyze/bucket_name1`，且
+  產出會落在 `video-analyze/outputs/`，下游 zone-map 讀不到。由「一律從 repo 根以
+  `--project` 執行」的約束與對應 AC 把關。
+- **`config.toml` 沿用 `bucket_name`**：切片時從根 `config.toml` 複製會帶到 112G 的
+  fixture——本包是 GPU 重路徑，對錯 fixture 不只 golden 比不出來（路徑不同層，只會得到
+  「檔案不存在」），還會白跑數輪昂貴推理。由上方 AC 明訂。
 - **多進程／共享記憶體行為**：`io/frame_ring.py` 與 `pipeline.py` 的 fork 多進程、關檔
   順序等既有講究不在本次改動範圍，僅搬移不改邏輯，以 golden 對比確認未破壞。
 - **刪錯 `load_registry_from_path`**：它是 `load_registry` 的實作依賴，照「移除」字面

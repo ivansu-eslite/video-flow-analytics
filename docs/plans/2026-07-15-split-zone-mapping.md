@@ -56,9 +56,22 @@ zone-mapping/
 - `InputConfig` 可移除 `camera_ids`（zone-map 未使用）。
 - 刪掉 `TrackerConfig`、`ModelConfig`、`OutputConfig`、`ReportConfig` 及 `AppConfig`
   對應欄位。
+- **`load_config()` 的回退分支會跟著壞，必須一起改**（與 `load_registry_from_path` 同型
+  的陷阱）：現況 `core/config.py` 的
+  `return AppConfig(tracker=TrackerConfig(), model=ModelConfig())` 以名稱引用了上面剛
+  刪掉的兩個 model。照「刪掉」字面做完就會在 `config.toml` 不存在時 `NameError`，而
+  `settings = load_config()` 是模組載入時執行的，整包 import 直接炸。改成 `AppConfig()`
+  （切片後 `tracker`／`model` 欄位已不存在，其餘欄位皆有 `default_factory`）。
+  - 同時修 `load_config` docstring 的「僅 tracker/model 用預設值」——切片後不再成立。
 - **修路徑 hack**：`load_config()` 的 `parents[3]` 改成 `parents[2]`，對到
   `zone-mapping/config.toml`，並同步更新說明註解的層數描述。
+- `config.toml` 的 `[input] bucket_dir` 設為 **`bucket_name1`**，不要沿用根
+  `config.toml`／`InputConfig` model 預設的 `bucket_name`（那是 112G 的 fixture，與
+  golden 不符，見父計畫任務 0）。
 - 保留全域 `settings` 單例的既有慣例。
+- **`bucket_dir` 是 cwd 相對路徑**：本包一律以 `uv run --project zone-mapping
+  zone-mapping` 在 repo 根執行，勿 `cd zone-mapping` 後再跑（見父計畫「硬約束：三包一律
+  從 repo 根目錄執行」）。此約束需寫進本包 README。
 
 ### 3. `registry.py` 切片（**完整版**）
 
@@ -87,7 +100,11 @@ zone-map 需要 zone 幾何，`core/registry.py` **全數保留**：`Zone`、`Ca
 | 位置 | 現有說法 | 改成 |
 |---|---|---|
 | `registry.py` 的 `zones` 欄位 docstring | 「也被較重的 `analyze_daily` 讀取，若在此驗證…」 | 本包沒有 `analyze_daily`，該理由不成立。改寫為新理由（見下） |
+| `registry.py` 的 `parsed_zones()` docstring | 「避免拖累 analyze_daily」 | 同上，本包無 `analyze_daily`；改為描述驗證順序的理由 |
 | `registry.py` 的 `Zone.name` docstring | 「`zone_mapping` 與 `report` 皆會驗證」 | 兩包各自只看得到自己，改為描述本包行為 |
+| `config.py` 的 `InputConfig` docstring | 「`analyze_daily` 輸入參數」／「正式呼叫端可直接以參數呼叫 `analyze_daily`」 | 本包無 `analyze_daily`。改為描述 `map_zones_daily` 的輸入 |
+| `config.py` 的 `AppConfig` docstring | 「input: `analyze_daily` 輸入參數」 | 同上 |
+| `config.py` 的 `load_config` docstring | 「讀取 **repo 根目錄**的 `config.toml`」 | 切片後對到的是**套件根**（`zone-mapping/config.toml`），非 repo 根 |
 | `pipeline.py` 的 `_ZONE_COUNTS_SCHEMA` 註解 | 「見 `io/video_reader.py` 的 `_LOCAL_TZ`」 | 本包無 `io/`。改為「上游 `tracking_results.parquet` 的 `timestamp` 已是台北在地時間，見 README 的檔案契約」 |
 
 **`list[Any]` 在本包仍要保留，但理由變了**（務必寫進 docstring，否則未來讀者會發現舊
@@ -126,6 +143,14 @@ ruff 設定沿用（`line-length=88`、`select=["E","F","I","W"]`、`target-vers
 - [ ] 影響範圍已列出：僅新增 `zone-mapping/`；舊 `src/` 不動（任務 4 才移除），與任務
       1／3 無檔案重疊。
 - [ ] `zone-mapping/` 可獨立 `uv sync`，且**不含** torch／ultralytics／opencv／openpyxl。
+- [ ] **以 `uv run --project zone-mapping zone-mapping` 在 repo 根執行**，輸出落在 repo
+      根的 `outputs/bucket_name1/2026-05-01/`（與 golden 同一棵樹）；README 已記載此
+      cwd 約束。
+- [ ] **`config.toml` 的 `[input] bucket_dir` 為 `bucket_name1`**，且 `[zone]
+      bucket_minutes`／`entry_debounce_frames` 與產生 golden 時的根 `config.toml` 一致。
+- [ ] **`config.toml` 不存在時不會炸**：暫時移開 `zone-mapping/config.toml` 後
+      `python -c "import zone_mapping.pipeline"` 仍可載入（只印警告、走 `AppConfig()`
+      回退），確認回退分支未殘留已刪除的 `TrackerConfig`／`ModelConfig` 引用。
 - [ ] 完整 registry 能載入真實 `bucket_name1/camera_registry.yaml`（5 個 zone、名稱跨
       攝影機唯一），且跨攝影機重複 zone 名稱仍會 fail-loud（`parse_and_validate_zones`
       行為不變）。
@@ -138,6 +163,17 @@ ruff 設定沿用（`line-length=88`、`select=["E","F","I","W"]`、`target-vers
 - **config 路徑層數**：`parents[3]` → `parents[2]` 若漏改，`load_config` 只印警告並**以
   預設值回退**（`bucket_minutes=60`／`entry_debounce_frames=1`），會靜默用錯粒度。以
   golden 一致性驗收涵蓋。
+- **`load_config()` 回退分支引用已刪除的 model**：`AppConfig(tracker=TrackerConfig(),
+  model=ModelConfig())` 未一併改成 `AppConfig()` 的話，`config.toml` 一旦不存在就
+  `NameError`，且因 `settings = load_config()` 在模組載入時執行，是整包 import 失敗而非
+  單一功能壞掉。ruff 的 F821 可攔（`select` 含 `F`），另有上方「config.toml 不存在時不
+  會炸」的 AC 直接驗。
+- **cwd 相對路徑**：`bucket_dir`／`OUTPUT_ROOT` 跟著 cwd 走而非跟著檔案走。若 `cd
+  zone-mapping` 後執行，會去 `zone-mapping/outputs/` 找上游 parquet 而 `FileNotFoundError`。
+  由「一律從 repo 根以 `--project` 執行」的約束與對應 AC 把關。
+- **`config.toml` 沿用 `bucket_name`**：切片時從根 `config.toml` 複製會帶到 112G 的
+  fixture，與 golden 的 `bucket_name1` 路徑不同層，比對只得到「檔案不存在」。由上方
+  AC 明訂。
 - **`InputConfig` 移除 `camera_ids`**：確認 `run_zone_map` 確實未使用（現況 `grep
   settings.` 僅見 `input.date`／`input.bucket_dir`）；若誤刪需回補。
 - **資料品質**：zone 幾何為人工維護，本次不改驗證邏輯，既有 fail-loud 行為需原樣保留。
