@@ -1,0 +1,18 @@
+[input]
+# bucket_dir／outputs 皆為 cwd 相對路徑：一律以
+# `uv run --project flow-report flow-report` 在 repo 根執行（見 README）。
+bucket_dir = "bucket_name1" # 本機模擬 GCS bucket 的根目錄
+date = 2026-05-01           # 開發時指定的彙總日期；正式呼叫端可直接以參數呼叫 export_report_daily
+
+[zone]
+# 上游 zone_counts.parquet 的時段粒度，須與 zone-mapping/config.toml 的同名欄位一致；
+# report.period_minutes 必須是它的倍數。
+bucket_minutes = 60
+
+[report]
+period_minutes = 60              # 報表人流彙總的時段粒度（分鐘），需為 zone.bucket_minutes 的倍數
+# "entries" 或 "unique_visitors"；unique_visitors 是跨 bucket 加總的近似值，
+# 同一人跨相鄰 bucket 停留時會被重複計入，詳見 README 的「已知限制」
+metric = "entries"
+# 同一天資料已存在時："overwrite" / "append"（預設）/ "error"
+on_duplicate_date = "append"
