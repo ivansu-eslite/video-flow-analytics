@@ -161,7 +161,7 @@ ruff 設定沿用（`line-length=88`、`select=["E","F","I","W"]`、`target-vers
         訊號）。
       - **輔助**：`tracking_results.parquet` 依 `(camera_id, timestamp, track_id)`
         **排序後**，座標用 `abs_tol = 1.0` px 容差比對（實測 max 0.77 px）；列數容許
-        極小差異、不要求 key 集合完全相同（0a 實測有 1 個 key 只在單邊）。
+        極小差異、不要求 key 集合完全相同（0a 實測列數差 1 列，推測約 1 個 key 只在單邊）。
       - **陷阱**：join key 用 `timestamp` 不可用 `frame_id`——`frame_id` 是片段內幀序、
         跨片段重複，用它 join 會笛卡兒展開、配對到不同影格的框。
 - [ ] **既有 2 份測試已搬入且全過**：`uv run pytest` 涵蓋 `tests/analyze/test_fps_meter.py`
