@@ -179,7 +179,9 @@ ruff 設定沿用（`line-length=88`、`select=["E","F","I","W"]`、`target-vers
 - [ ] 精簡 registry 的 `extra="forbid"` 相容性（**兩層，缺一不可**）：
       (a) 能載入真實 `bucket_name1/camera_registry.yaml`（驗 `zones`）；
       (b) 能載入一份**含 `participates_in_zone_mapping` 的最小合成 yaml**——現有 fixture
-      都沒有此欄位，只做 (a) 會假性通過。
+      都沒有此欄位，只做 (a) 會假性通過。**這份合成 fixture 由本任務建立**（三包中最先
+      實作者），置於本包 `tests/`；任務 2／3 沿用同一份內容各自放進自己的 `tests/`
+      （見父計畫 0c）。
 - [ ] `uv run ruff check .` 乾淨。
 
 ## Risk

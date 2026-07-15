@@ -225,6 +225,21 @@ video-flow-analytics analyze` 等），golden 才會落在 repo 根的 `outputs/
 > `bucket_name`），會對到 112G 的那份、且產出路徑 `outputs/bucket_name/...` 與 golden
 > 的 `outputs/bucket_name1/...` 根本不同層，比對只會得到「檔案不存在」。
 
+#### 0c. golden 持久化位置與合成 fixture 歸屬（開工前定義，避免三包各自解讀）
+
+**golden 不進版控、原地留在 repo 根 `outputs/bucket_name1/`**：0b 的三份產物體積大
+（parquet + xlsx）且由 GPU 推理產生，落在 `.gitignore` 的 `outputs/` 底下，不 commit。
+三包任務刻意在**同一棵工作樹、同一台機器**依序實作與驗收，各自比對上述固定路徑下的
+golden；換機器或清掉 `outputs/` 後須依 0b 重跑 monolith 重新產生（golden 的產法可重跑，
+非一次性快照）。
+
+**(b) 條款的合成 yaml fixture 由任務 1（`video-analyze`，三包中最先實作者）建立**：內容為
+一份**含 `participates_in_zone_mapping` 的最小 registry**（現有兩份真實 fixture 都缺此
+欄位），置於該包 `tests/`。任務 2／3 是各自獨立的套件與 `tests/`、不共享檔案系統路徑，
+故**沿用同一份內容、各自複製一份**進自己的 `tests/`，確保三包在 `extra="forbid"` 下對
+同一份欄位結構都不報錯；三份內容須一致，任一支的 registry 模型欄位漂移都會在該包自己的
+(b) 測試爆出來。
+
 ### 任務 4：收尾（三個 PR 都合併後）
 
 - 刪除 `src/video_flow_analytics/`、根目錄舊 `pyproject.toml`／`config.toml`／`uv.lock`、
