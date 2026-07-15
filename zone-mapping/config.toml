@@ -1,0 +1,9 @@
+[input]
+# bucket_dir／outputs 皆為 cwd 相對路徑：一律以
+# `uv run --project zone-mapping zone-mapping` 在 repo 根執行（見 README）。
+bucket_dir = "bucket_name1" # 本機模擬 GCS bucket 的根目錄
+date = 2026-05-01           # 開發時指定的分析日期；正式呼叫端可直接以參數呼叫 map_zones_daily
+
+[zone]
+bucket_minutes = 60       # 人流統計的時段粒度（分鐘）
+entry_debounce_frames = 1 # 連續幾格都在區域內才算一次進入；1 = 不去抖，調高可濾掉邊界抖動
