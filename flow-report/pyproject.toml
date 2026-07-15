@@ -1,0 +1,40 @@
+[project]
+name = "flow-report"
+version = "0.1.0"
+description = "Zone traffic Excel report for BI tools (CPU-only)"
+readme = "README.md"
+requires-python = ">=3.12"
+# 版本 pin 成與 golden 產生時（root uv.lock）相同：影響輸出格式的 polars/pyarrow 與
+# 決定 xlsx 內容的 openpyxl 逐一對齊，讓 golden 比對只反映「拆分是否改動邏輯」，排除
+# 函式庫版本漂移這個變數。刻意不含 torch/ultralytics/opencv——依賴面收斂是拆包的主要
+# 成果；numpy 亦不需要，本包無向量化幾何運算。
+dependencies = [
+    "openpyxl==3.1.5",
+    "polars==1.42.0",
+    "pyarrow==24.0.0",
+    "pydantic==2.13.4",
+    "pyyaml==6.0.3",
+]
+
+[project.scripts]
+flow-report = "flow_report.pipeline:run_report"
+
+[build-system]
+requires = ["uv_build>=0.11.14,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.20",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
