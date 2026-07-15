@@ -1,0 +1,44 @@
+[project]
+name = "video-analyze"
+version = "0.1.0"
+description = "YOLO + ByteTrack multi-stream detection and tracking (GPU, multiprocess)"
+readme = "README.md"
+requires-python = ">=3.12"
+# 版本 pin 成與 golden 產生時（root uv.lock）相同：影響偵測數值的推理堆疊
+# （torch/torchvision/ultralytics/numpy/opencv）與輸出格式（polars/pyarrow）逐一
+# 對齊，讓 golden 比對只反映「拆分是否改動邏輯」，排除函式庫版本漂移這個變數。
+dependencies = [
+    "opencv-python==4.13.0.92",
+    "pydantic==2.13.4",
+    "ultralytics==8.4.75",
+    "torch==2.12.1",
+    "torchvision==0.27.1",
+    "numpy==2.5.0",
+    "pyyaml==6.0.3",
+    "polars==1.42.0",
+    "pyarrow==24.0.0",
+    "lap==0.5.13",
+]
+
+[project.scripts]
+video-analyze = "video_analyze.pipeline:run_analyze"
+
+[build-system]
+requires = ["uv_build>=0.11.14,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.20",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
