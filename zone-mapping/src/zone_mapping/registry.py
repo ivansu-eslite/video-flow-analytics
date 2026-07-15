@@ -207,8 +207,9 @@ def registry_path(bucket_dir: Path) -> Path:
 def load_registry_from_path(path: Path) -> CameraRegistry:
     """讀指定路徑的 registry yaml。
 
-    用於讀取 `camera_registry_used.yaml` 這類快照檔（而非當下的
-    `camera_registry.yaml`）。
+    本包只用它讀 `bucket_dir` 下當下的 `camera_registry.yaml`（見
+    `load_registry`）；獨立成一個吃路徑的函式是為了與 `flow-report` 共用同一份
+    registry.py——該包用它讀 `camera_registry_used.yaml` 快照。
 
     Args:
         path: registry yaml 檔案路徑。
