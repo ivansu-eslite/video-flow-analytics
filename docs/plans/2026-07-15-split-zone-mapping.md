@@ -73,13 +73,27 @@ zone-map 需要 zone 幾何，`core/registry.py` **全數保留**：`Zone`、`Ca
 > （見父計畫「共用程式碼分析」）。刻意接受：兩者未來可能各奔不同平台。**不要**為了消重
 > 而做跨資料夾 import。
 
-保留現有的關鍵設計與其註解，勿在搬移時順手「優化」：
+保留現有的關鍵**設計**，勿在搬移時順手「優化」：
 
 - `CameraEntry.zones` 維持 `list[Any]`（刻意不在此驗證幾何）；驗證延後到 `parsed_zones()`。
 - `parse_and_validate_zones` 是「zone 名稱跨攝影機全域唯一」這條規則的**唯一實作位置**，
   `flow-report` 也有一份相同實作；改動時兩邊需同步。
 - `CameraRegistry._unique_camera_identity` 對 `camera_id` 與 `stream_dirname` 的唯一性
   驗證（fail-loud，避免查詢字典靜默覆蓋）。
+
+**但「不可改動的是行為，不是說明文字」**：現有註解／docstring 帶有跨模組引用，拆包後
+會指向本包不存在的東西，**必須改寫**（否則留下騙人的註解）：
+
+| 位置 | 現有說法 | 改成 |
+|---|---|---|
+| `registry.py` 的 `zones` 欄位 docstring | 「也被較重的 `analyze_daily` 讀取，若在此驗證…」 | 本包沒有 `analyze_daily`，該理由不成立。改寫為新理由（見下） |
+| `registry.py` 的 `Zone.name` docstring | 「`zone_mapping` 與 `report` 皆會驗證」 | 兩包各自只看得到自己，改為描述本包行為 |
+| `pipeline.py` 的 `_ZONE_COUNTS_SCHEMA` 註解 | 「見 `io/video_reader.py` 的 `_LOCAL_TZ`」 | 本包無 `io/`。改為「上游 `tracking_results.parquet` 的 `timestamp` 已是台北在地時間，見 README 的檔案契約」 |
+
+**`list[Any]` 在本包仍要保留，但理由變了**（務必寫進 docstring，否則未來讀者會發現舊
+理由不成立而誤刪這個設計）：不再是「別拖累 analyze」，而是 `pipeline.py` 刻意的驗證
+順序——先 `validate_zone_cameras` 再 `parse_and_validate_zones`，讓「camera 對不上當天
+資料」這個更根本的錯誤先報，而不是被 zone 定義的打字錯誤蓋過。
 
 ### 4. import 改寫
 
@@ -127,6 +141,9 @@ ruff 設定沿用（`line-length=88`、`select=["E","F","I","W"]`、`target-vers
 - **`InputConfig` 移除 `camera_ids`**：確認 `run_zone_map` 確實未使用（現況 `grep
   settings.` 僅見 `input.date`／`input.bucket_dir`）；若誤刪需回補。
 - **資料品質**：zone 幾何為人工維護，本次不改驗證邏輯，既有 fail-loud 行為需原樣保留。
+- **留下騙人的註解**：搬移後若照抄跨模組引用（`analyze_daily`、`io/video_reader.py`），
+  註解會指向本包不存在的東西。尤以 `zones: list[Any]` 為甚——舊理由（別拖累 analyze）
+  在本包不成立，未來讀者可能因此誤刪這個刻意設計。見上方改寫對照表。
 - **權限／安全／成本／模型準確率**：`N/A`——純 CPU 結構重整，不涉外部資源。
 
 ## Related Links
