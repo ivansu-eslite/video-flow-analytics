@@ -19,9 +19,10 @@ class CameraEntry(BaseModel):
         location: 攝影機所在位置名稱；與 `camera_id` 組成的 `stream_dirname`
             同樣必須在 `CameraRegistry` 內唯一。
         ip: 攝影機 IP。
-        participates_in_zone_mapping: 是否參與 zone mapping；`False` 時
-            `map_zones_daily` 直接跳過這台攝影機（即使 `zones` 有內容也不
-            處理）。正式訊號，取代舊版「`zones` 空清單代表不參與」的隱含推斷。
+        participates_in_zone_mapping: 是否參與 zone mapping；`False` 代表下游
+            應跳過這台攝影機（即使 `zones` 有內容也不處理）。analyze 不使用此
+            欄位，語義由 zone-mapping 那包實作（見該包 `map_zones_daily`），
+            此處僅為相容 registry 格式而保留。
         zones: 原始 zone 定義（未經驗證的 dict 清單）。analyze 不使用 zone
             幾何，此處僅為相容 `camera_registry.yaml` 的欄位而保留並忽略
             （`CameraEntry` 用 `extra="forbid"`，缺這個欄位會載入失敗）。

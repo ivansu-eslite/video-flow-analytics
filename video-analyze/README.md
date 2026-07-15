@@ -13,18 +13,24 @@ CLI 進入點 `video-analyze` 從 `config.toml` 的 `[input]` 組參數再呼叫
 
 ## 執行方式（cwd 硬約束）
 
-`bucket_dir` 與輸出根目錄 `OUTPUT_ROOT = outputs/` 都是 **cwd 相對路徑**（非
-`__file__` 相對）。本套件一律**在 repo 根目錄執行**，以 `--project` 指定套件，
-`uv run` 不改變 cwd：
+下列三者都是 **cwd 相對路徑**（非 `__file__` 相對）：
+
+| 路徑 | 來源 | 違反 cwd 約束時 |
+|---|---|---|
+| `settings.input.bucket_dir` | `config.toml` `[input]` | fail-loud（找不到片段／registry） |
+| `OUTPUT_ROOT = outputs/` | `pipeline.py` 常數 | 產出落在錯的樹，下游讀不到 |
+| `settings.model.model_path` | `config.toml` `[model]` | **不 fail-loud**：ultralytics 找不到權重會**靜默從網路下載**一份，權重可能與預期不同卻無任何錯誤訊息 |
+
+故本套件一律**在 repo 根目錄執行**，以 `--project` 指定套件（`uv run` 不改變 cwd）：
 
 ```bash
 uv run --project video-analyze video-analyze
 ```
 
 **切勿 `cd video-analyze` 後再跑**：那樣 cwd 會變成 `video-analyze/`，`bucket_name1`
-會對到不存在的 `video-analyze/bucket_name1`，且輸出落在 `video-analyze/outputs/`，
-下游 zone-map 讀不到。套件自己的 `config.toml` 因是 `__file__` 定位（`parents[2]`），
-不受 cwd 影響。
+會對到不存在的 `video-analyze/bucket_name1`，輸出落在 `video-analyze/outputs/`，
+下游 zone-map 讀不到，且 `yolo26m.pt` 會被靜默重新下載。套件自己的 `config.toml`
+因是 `__file__` 定位（`parents[2]`），不受 cwd 影響。
 
 ## 檔案契約
 
@@ -45,5 +51,12 @@ uv run --project video-analyze video-analyze
 ## 測試
 
 ```bash
-uv run --project video-analyze pytest
+uv run --directory video-analyze pytest
 ```
+
+**測試的 cwd 要求與跑 analyze 相反**：這裡要用 `--directory`（會 chdir 進
+`video-analyze/`），**不能**用跑 analyze 那個 `--project`。因為 `--project` 不改變
+cwd，pytest 的 rootdir 會解析到 repo 根、讀到根 `pyproject.toml` 的
+`testpaths = ["tests"]`，於是去收集舊 monolith 的 `tests/` 而 collection error。
+測試本身不碰 `bucket_dir`／`outputs/`，故不受 cwd 約束影響。
+（等價寫法：`uv run --project video-analyze pytest video-analyze/tests`。）
