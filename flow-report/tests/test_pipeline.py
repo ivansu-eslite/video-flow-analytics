@@ -1,5 +1,6 @@
 import datetime
 from pathlib import Path
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 import openpyxl
@@ -241,3 +242,17 @@ def test_write_report_overwrite_sorts_mixed_date_types_without_crashing(tmp_path
     ]
     assert dates == ["2026-04-01", "2026-05-01"]
     result.close()
+
+
+def test_write_report_closes_workbook_after_save(tmp_path):
+    """_write_report 開啟的 Workbook 用畢須 close，避免底層檔案控制代碼不釋放。"""
+    path = tmp_path / "report.xlsx"
+    hourly = _make_hourly_df([("2026-05-01", "星期五", "09:00", "checkout", 10)])
+    peak = _make_peak_df([("2026-05-01", "星期五", "checkout", "09:00", 10, "無")])
+
+    with mock.patch(
+        "openpyxl.workbook.workbook.Workbook.close", autospec=True
+    ) as mock_close:
+        _write_report(path, hourly, peak, on_duplicate_date="append")
+
+    assert mock_close.called

@@ -188,36 +188,42 @@ def _write_report(
         _init_sheet(wb, SHEET_PEAK, _PEAK_HEADERS)
         _init_sheet(wb, SHEET_EVENTS, _EVENTS_HEADERS)
 
-    hourly_ws = wb[SHEET_HOURLY]
-    peak_ws = wb[SHEET_PEAK]
+    try:
+        hourly_ws = wb[SHEET_HOURLY]
+        peak_ws = wb[SHEET_PEAK]
 
-    if on_duplicate_date == "error":
-        conflict = new_dates & (_existing_dates(hourly_ws) | _existing_dates(peak_ws))
-        if conflict:
-            raise ValueError(
-                f"報表中已存在這些日期的資料，未寫入任何內容：{sorted(conflict)}"
-                "（可改用 on_duplicate_date='overwrite' 或 'append'）"
+        if on_duplicate_date == "error":
+            conflict = new_dates & (
+                _existing_dates(hourly_ws) | _existing_dates(peak_ws)
+            )
+            if conflict:
+                raise ValueError(
+                    f"報表中已存在這些日期的資料，未寫入任何內容：{sorted(conflict)}"
+                    "（可改用 on_duplicate_date='overwrite' 或 'append'）"
+                )
+
+        if on_duplicate_date == "overwrite":
+            _remove_rows_for_dates(hourly_ws, new_dates)
+            _remove_rows_for_dates(peak_ws, new_dates)
+
+        _append_rows(hourly_ws, hourly_new)
+        _append_rows(peak_ws, peak_new)
+
+        if on_duplicate_date == "overwrite":
+            _sort_rows(
+                hourly_ws,
+                key_columns=_sort_key_columns(_HOURLY_HEADERS, _HOURLY_SORT_COLUMNS),
+            )
+            _sort_rows(
+                peak_ws,
+                key_columns=_sort_key_columns(_PEAK_HEADERS, _PEAK_SORT_COLUMNS),
             )
 
-    if on_duplicate_date == "overwrite":
-        _remove_rows_for_dates(hourly_ws, new_dates)
-        _remove_rows_for_dates(peak_ws, new_dates)
-
-    _append_rows(hourly_ws, hourly_new)
-    _append_rows(peak_ws, peak_new)
-
-    if on_duplicate_date == "overwrite":
-        _sort_rows(
-            hourly_ws,
-            key_columns=_sort_key_columns(_HOURLY_HEADERS, _HOURLY_SORT_COLUMNS),
-        )
-        _sort_rows(
-            peak_ws, key_columns=_sort_key_columns(_PEAK_HEADERS, _PEAK_SORT_COLUMNS)
-        )
-
-    tmp_path = path.with_name(path.name + ".tmp")
-    wb.save(tmp_path)
-    tmp_path.replace(path)
+        tmp_path = path.with_name(path.name + ".tmp")
+        wb.save(tmp_path)
+        tmp_path.replace(path)
+    finally:
+        wb.close()
 
 
 def export_report_daily(
