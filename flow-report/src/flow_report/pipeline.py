@@ -135,11 +135,23 @@ def _append_rows(ws: Worksheet, df: pl.DataFrame) -> None:
         ws.append(row)
 
 
+def _sort_key(value: object) -> object:
+    """排序鍵正規化：日期型別的儲格轉字串，其餘型別原樣保留。
+
+    key_columns 可能包含非日期欄（如區域名稱），只正規化日期型別可避免混入
+    `datetime.date`／`str` 時排序互相比較拋 `TypeError`，同時不影響其他欄位
+    的原生型別比較。
+    """
+    if isinstance(value, datetime.date):  # datetime.datetime 亦為其子類
+        return _cell_date_str(value)
+    return value
+
+
 def _sort_rows(ws: Worksheet, key_columns: tuple[int, ...]) -> None:
     if ws.max_row < 2:
         return
     rows = [[cell.value for cell in row] for row in ws.iter_rows(min_row=2)]
-    rows.sort(key=lambda r: tuple(r[i] for i in key_columns))
+    rows.sort(key=lambda r: tuple(_sort_key(r[i]) for i in key_columns))
     ws.delete_rows(2, ws.max_row - 1)
     for row in rows:
         ws.append(row)

@@ -175,3 +175,36 @@ def test_write_report_overwrite_removes_date_typed_existing_rows(tmp_path):
     assert len(hourly_rows) == 1
     assert hourly_rows[0][4] == 20
     result.close()
+
+
+def test_write_report_overwrite_sorts_mixed_date_types_without_crashing(tmp_path):
+    """未被本次 overwrite 觸及的既有列可能仍是 datetime.date 型別（Excel 存檔
+    造成），與本次新寫入的 str 型別日期混雜時，_sort_rows 排序不應因型別不同
+    而 TypeError。"""
+    path = tmp_path / "report.xlsx"
+    hourly_1 = _make_hourly_df([("2026-04-01", "星期三", "09:00", "checkout", 3)])
+    peak_1 = _make_peak_df([("2026-04-01", "星期三", "checkout", "09:00", 3, "無")])
+    _write_report(path, hourly_1, peak_1, on_duplicate_date="append")
+
+    wb = openpyxl.load_workbook(path)
+    for sheet_name in (SHEET_HOURLY, SHEET_PEAK):
+        wb[sheet_name].cell(row=2, column=1).value = datetime.date(2026, 4, 1)
+    wb.save(path)
+    wb.close()
+
+    # overwrite 目標是 2026-05-01，2026-04-01 不受影響、維持 date 型別
+    hourly_2 = _make_hourly_df([("2026-05-01", "星期五", "10:00", "checkout", 20)])
+    peak_2 = _make_peak_df([("2026-05-01", "星期五", "checkout", "10:00", 20, "無")])
+    _write_report(path, hourly_2, peak_2, on_duplicate_date="overwrite")
+
+    result = openpyxl.load_workbook(path)
+    hourly_rows = [
+        tuple(row)
+        for row in result[SHEET_HOURLY].iter_rows(min_row=2, values_only=True)
+    ]
+    dates = [
+        d.strftime("%Y-%m-%d") if isinstance(d, datetime.date) else d
+        for d, *_ in hourly_rows
+    ]
+    assert dates == ["2026-04-01", "2026-05-01"]
+    result.close()
