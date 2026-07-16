@@ -58,9 +58,23 @@ def _build_report_frames(
         for entry in registry.cameras
         if entry.participates_in_zone_mapping
     }
-    parse_and_validate_zones(zone_entries)  # 跨攝影機 zone 名稱唯一性驗證
+    # parse_and_validate_zones 順便驗證跨攝影機 zone 名稱唯一性
+    zone_cameras = parse_and_validate_zones(zone_entries)
 
     df = to_taipei(pl.read_parquet(counts_path))
+    valid_pairs = {
+        (camera_id, zone.name)
+        for camera_id, zones in zone_cameras.items()
+        for zone in zones
+    }
+    actual_pairs = set(zip(df["camera_id"].to_list(), df["zone"].to_list()))
+    unknown_pairs = actual_pairs - valid_pairs
+    if unknown_pairs:
+        raise ValueError(
+            f"{counts_path} 出現不在 camera_registry_used.yaml 快照內的 "
+            f"(camera, zone) 組合: {sorted(unknown_pairs)}"
+        )
+
     hourly_df = rollup_by_period(df, period_minutes, metric)
     peak_df = peak_per_day(hourly_df)
     return hourly_df, peak_df
@@ -101,13 +115,30 @@ def _init_sheet(wb: Workbook, name: str, headers: list[str]) -> Worksheet:
     return ws
 
 
+def _cell_date_str(value: object) -> str | None:
+    """把日期欄的儲格值正規化成 `YYYY-MM-DD` 字串。
+
+    本階段以字串寫入日期，但 Excel／BI 工具存檔時可能把該欄轉成日期型別的儲格，
+    讀回時即為 `datetime.date`／`datetime.datetime`。日期欄同時是比對與排序的鍵，
+    型別混雜會讓比對永遠不成立、排序直接拋 `TypeError`，故一律正規化後再使用。
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime.date):  # datetime.datetime 亦為其子類
+        return value.strftime("%Y-%m-%d")
+    return str(value)
+
+
 def _existing_dates(ws: Worksheet) -> set[str]:
-    return {row[0].value for row in ws.iter_rows(min_row=2) if row[0].value is not None}
+    dates = (_cell_date_str(row[0].value) for row in ws.iter_rows(min_row=2))
+    return {date for date in dates if date is not None}
 
 
 def _remove_rows_for_dates(ws: Worksheet, dates: set[str]) -> None:
     rows_to_delete = [
-        row[0].row for row in ws.iter_rows(min_row=2) if row[0].value in dates
+        row[0].row
+        for row in ws.iter_rows(min_row=2)
+        if _cell_date_str(row[0].value) in dates
     ]
     for row_idx in reversed(rows_to_delete):
         ws.delete_rows(row_idx)
@@ -118,11 +149,23 @@ def _append_rows(ws: Worksheet, df: pl.DataFrame) -> None:
         ws.append(row)
 
 
+def _sort_key(value: object) -> object:
+    """排序鍵正規化：日期型別的儲格轉字串，其餘型別原樣保留。
+
+    key_columns 可能包含非日期欄（如區域名稱），只正規化日期型別可避免混入
+    `datetime.date`／`str` 時排序互相比較拋 `TypeError`，同時不影響其他欄位
+    的原生型別比較。
+    """
+    if isinstance(value, datetime.date):  # datetime.datetime 亦為其子類
+        return _cell_date_str(value)
+    return value
+
+
 def _sort_rows(ws: Worksheet, key_columns: tuple[int, ...]) -> None:
     if ws.max_row < 2:
         return
     rows = [[cell.value for cell in row] for row in ws.iter_rows(min_row=2)]
-    rows.sort(key=lambda r: tuple(r[i] for i in key_columns))
+    rows.sort(key=lambda r: tuple(_sort_key(r[i]) for i in key_columns))
     ws.delete_rows(2, ws.max_row - 1)
     for row in rows:
         ws.append(row)
@@ -145,36 +188,42 @@ def _write_report(
         _init_sheet(wb, SHEET_PEAK, _PEAK_HEADERS)
         _init_sheet(wb, SHEET_EVENTS, _EVENTS_HEADERS)
 
-    hourly_ws = wb[SHEET_HOURLY]
-    peak_ws = wb[SHEET_PEAK]
+    try:
+        hourly_ws = wb[SHEET_HOURLY]
+        peak_ws = wb[SHEET_PEAK]
 
-    if on_duplicate_date == "error":
-        conflict = new_dates & (_existing_dates(hourly_ws) | _existing_dates(peak_ws))
-        if conflict:
-            raise ValueError(
-                f"報表中已存在這些日期的資料，未寫入任何內容：{sorted(conflict)}"
-                "（可改用 on_duplicate_date='overwrite' 或 'append'）"
+        if on_duplicate_date == "error":
+            conflict = new_dates & (
+                _existing_dates(hourly_ws) | _existing_dates(peak_ws)
+            )
+            if conflict:
+                raise ValueError(
+                    f"報表中已存在這些日期的資料，未寫入任何內容：{sorted(conflict)}"
+                    "（可改用 on_duplicate_date='overwrite' 或 'append'）"
+                )
+
+        if on_duplicate_date == "overwrite":
+            _remove_rows_for_dates(hourly_ws, new_dates)
+            _remove_rows_for_dates(peak_ws, new_dates)
+
+        _append_rows(hourly_ws, hourly_new)
+        _append_rows(peak_ws, peak_new)
+
+        if on_duplicate_date == "overwrite":
+            _sort_rows(
+                hourly_ws,
+                key_columns=_sort_key_columns(_HOURLY_HEADERS, _HOURLY_SORT_COLUMNS),
+            )
+            _sort_rows(
+                peak_ws,
+                key_columns=_sort_key_columns(_PEAK_HEADERS, _PEAK_SORT_COLUMNS),
             )
 
-    if on_duplicate_date == "overwrite":
-        _remove_rows_for_dates(hourly_ws, new_dates)
-        _remove_rows_for_dates(peak_ws, new_dates)
-
-    _append_rows(hourly_ws, hourly_new)
-    _append_rows(peak_ws, peak_new)
-
-    if on_duplicate_date == "overwrite":
-        _sort_rows(
-            hourly_ws,
-            key_columns=_sort_key_columns(_HOURLY_HEADERS, _HOURLY_SORT_COLUMNS),
-        )
-        _sort_rows(
-            peak_ws, key_columns=_sort_key_columns(_PEAK_HEADERS, _PEAK_SORT_COLUMNS)
-        )
-
-    tmp_path = path.with_name(path.name + ".tmp")
-    wb.save(tmp_path)
-    tmp_path.replace(path)
+        tmp_path = path.with_name(path.name + ".tmp")
+        wb.save(tmp_path)
+        tmp_path.replace(path)
+    finally:
+        wb.close()
 
 
 def export_report_daily(
@@ -207,7 +256,8 @@ def export_report_daily(
 
     Raises:
         ValueError: `period_minutes` 不是 `bucket_minutes` 的倍數、
-            `camera_registry_used.yaml` 中有跨攝影機重複的 zone 名稱，或
+            `camera_registry_used.yaml` 中有跨攝影機重複的 zone 名稱、
+            `zone_counts.parquet` 出現不在該快照內的 (camera, zone) 組合，或
             `on_duplicate_date="error"` 時發現日期已存在。
         FileNotFoundError: 當日 `zone_counts.parquet` 不存在，或該日輸出
             目錄下找不到 `camera_registry_used.yaml` 快照。

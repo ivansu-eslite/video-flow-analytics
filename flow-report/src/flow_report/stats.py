@@ -115,7 +115,9 @@ def peak_per_day(rollup_df: pl.DataFrame) -> pl.DataFrame:
         ["date", "zone", "value", "period"],
         descending=[False, False, True, False],
     )
-    peaks = sorted_df.group_by(["date", "zone"], maintain_order=True).first()
+    # maintain_order=True 不可省略：unique() 預設不保證輸出列順序，而本函式的結果
+    # 會直接寫入 report.xlsx，列序需在重跑間穩定（見同檔的重跑列序回歸測試）。
+    peaks = sorted_df.unique(subset=["date", "zone"], keep="first", maintain_order=True)
     reminders = [
         meal_time_reminder(int(period.split(":")[0]))
         for period in peaks["period"].to_list()

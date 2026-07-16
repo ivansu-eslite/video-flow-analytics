@@ -1,12 +1,19 @@
 import datetime
 from pathlib import Path
+from unittest import mock
 from zoneinfo import ZoneInfo
 
+import openpyxl
 import polars as pl
 import pytest
 import yaml
 
-from flow_report.pipeline import _build_report_frames
+from flow_report.pipeline import (
+    SHEET_HOURLY,
+    SHEET_PEAK,
+    _build_report_frames,
+    _write_report,
+)
 
 
 def _write_registry(path: Path, zones_by_camera: dict[str, list[str]]) -> None:
@@ -31,11 +38,13 @@ def _write_registry(path: Path, zones_by_camera: dict[str, list[str]]) -> None:
     )
 
 
-def _write_zone_counts(path: Path) -> None:
+def _write_zone_counts(
+    path: Path, camera_id: str = "loc_cam001", zone: str = "entrance"
+) -> None:
     df = pl.DataFrame(
         {
-            "camera_id": ["cam001"],
-            "zone": ["entrance"],
+            "camera_id": [camera_id],
+            "zone": [zone],
             "time_bucket": [
                 datetime.datetime(2026, 5, 1, 11, 0, tzinfo=ZoneInfo("Asia/Taipei"))
             ],
@@ -114,3 +123,136 @@ def test_build_report_frames_ignores_live_registry_duplicates(tmp_path):
     )
     assert hourly_df.height == 1
     assert peak_df.height == 1
+
+
+def test_build_report_frames_rejects_unknown_camera_zone_pair(tmp_path):
+    """zone_counts.parquet 出現不在 camera_registry_used.yaml 快照內的
+    (camera, zone) 組合時應 fail-loud，而非靜默讀入未經驗證的資料。"""
+    bucket_dir = tmp_path / "bucket_test"
+    bucket_dir.mkdir()
+    _write_registry(bucket_dir / "camera_registry.yaml", {"cam001": ["entrance"]})
+
+    output_dir = tmp_path / "outputs" / "bucket_test" / "2026-05-01"
+    output_dir.mkdir(parents=True)
+    # parquet 裡的 zone 是 "checkout"，但快照的 cam001 只定義了 "entrance"
+    _write_zone_counts(output_dir / "zone_counts.parquet", zone="checkout")
+    _write_registry(
+        output_dir / "camera_registry_used.yaml", {"cam001": ["entrance"]}
+    )
+
+    with pytest.raises(ValueError, match="不在.*快照"):
+        _build_report_frames(
+            date=datetime.date(2026, 5, 1),
+            bucket_dir=str(bucket_dir),
+            period_minutes=60,
+            metric="entries",
+            bucket_minutes=15,
+            output_root=tmp_path / "outputs",
+        )
+
+
+def _make_hourly_df(rows):
+    return pl.DataFrame(
+        rows,
+        schema={
+            "date": pl.Utf8,
+            "weekday": pl.Utf8,
+            "period": pl.Utf8,
+            "zone": pl.Utf8,
+            "value": pl.Int64,
+        },
+        orient="row",
+    )
+
+
+def _make_peak_df(rows):
+    return pl.DataFrame(
+        rows,
+        schema={
+            "date": pl.Utf8,
+            "weekday": pl.Utf8,
+            "zone": pl.Utf8,
+            "peak_period": pl.Utf8,
+            "peak_value": pl.Int64,
+            "reminder": pl.Utf8,
+        },
+        orient="row",
+    )
+
+
+def test_write_report_overwrite_removes_date_typed_existing_rows(tmp_path):
+    """Excel／BI 工具開啟存檔後，日期欄的儲格可能被轉成 datetime.date 型別；
+    overwrite 模式下 _existing_dates／_remove_rows_for_dates 仍須能辨識出目標
+    日期並正確刪除舊列，不因型別不同（date vs str）而比對永遠不成立。"""
+    path = tmp_path / "report.xlsx"
+    hourly_1 = _make_hourly_df([("2026-05-01", "星期五", "09:00", "checkout", 10)])
+    peak_1 = _make_peak_df([("2026-05-01", "星期五", "checkout", "09:00", 10, "無")])
+    _write_report(path, hourly_1, peak_1, on_duplicate_date="append")
+
+    # 模擬用 Excel 開啟存檔後，日期欄的儲格被轉成 datetime.date 型別
+    wb = openpyxl.load_workbook(path)
+    for sheet_name in (SHEET_HOURLY, SHEET_PEAK):
+        wb[sheet_name].cell(row=2, column=1).value = datetime.date(2026, 5, 1)
+    wb.save(path)
+    wb.close()
+
+    hourly_2 = _make_hourly_df([("2026-05-01", "星期五", "10:00", "checkout", 20)])
+    peak_2 = _make_peak_df([("2026-05-01", "星期五", "checkout", "10:00", 20, "無")])
+    _write_report(path, hourly_2, peak_2, on_duplicate_date="overwrite")
+
+    result = openpyxl.load_workbook(path)
+    hourly_rows = [
+        tuple(row)
+        for row in result[SHEET_HOURLY].iter_rows(min_row=2, values_only=True)
+    ]
+    # 舊列（09:00／10）已被覆蓋刪除，不是附加成第二列
+    assert len(hourly_rows) == 1
+    assert hourly_rows[0][4] == 20
+    result.close()
+
+
+def test_write_report_overwrite_sorts_mixed_date_types_without_crashing(tmp_path):
+    """未被本次 overwrite 觸及的既有列可能仍是 datetime.date 型別（Excel 存檔
+    造成），與本次新寫入的 str 型別日期混雜時，_sort_rows 排序不應因型別不同
+    而 TypeError。"""
+    path = tmp_path / "report.xlsx"
+    hourly_1 = _make_hourly_df([("2026-04-01", "星期三", "09:00", "checkout", 3)])
+    peak_1 = _make_peak_df([("2026-04-01", "星期三", "checkout", "09:00", 3, "無")])
+    _write_report(path, hourly_1, peak_1, on_duplicate_date="append")
+
+    wb = openpyxl.load_workbook(path)
+    for sheet_name in (SHEET_HOURLY, SHEET_PEAK):
+        wb[sheet_name].cell(row=2, column=1).value = datetime.date(2026, 4, 1)
+    wb.save(path)
+    wb.close()
+
+    # overwrite 目標是 2026-05-01，2026-04-01 不受影響、維持 date 型別
+    hourly_2 = _make_hourly_df([("2026-05-01", "星期五", "10:00", "checkout", 20)])
+    peak_2 = _make_peak_df([("2026-05-01", "星期五", "checkout", "10:00", 20, "無")])
+    _write_report(path, hourly_2, peak_2, on_duplicate_date="overwrite")
+
+    result = openpyxl.load_workbook(path)
+    hourly_rows = [
+        tuple(row)
+        for row in result[SHEET_HOURLY].iter_rows(min_row=2, values_only=True)
+    ]
+    dates = [
+        d.strftime("%Y-%m-%d") if isinstance(d, datetime.date) else d
+        for d, *_ in hourly_rows
+    ]
+    assert dates == ["2026-04-01", "2026-05-01"]
+    result.close()
+
+
+def test_write_report_closes_workbook_after_save(tmp_path):
+    """_write_report 開啟的 Workbook 用畢須 close，避免底層檔案控制代碼不釋放。"""
+    path = tmp_path / "report.xlsx"
+    hourly = _make_hourly_df([("2026-05-01", "星期五", "09:00", "checkout", 10)])
+    peak = _make_peak_df([("2026-05-01", "星期五", "checkout", "09:00", 10, "無")])
+
+    with mock.patch(
+        "openpyxl.workbook.workbook.Workbook.close", autospec=True
+    ) as mock_close:
+        _write_report(path, hourly, peak, on_duplicate_date="append")
+
+    assert mock_close.called
