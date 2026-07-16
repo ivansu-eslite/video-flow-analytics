@@ -1,3 +1,4 @@
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -6,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _find_duplicates(items: list[str]) -> set[str]:
-    return {item for item in items if items.count(item) > 1}
+    return {item for item, count in Counter(items).items() if count > 1}
 
 
 class CameraEntry(BaseModel):
