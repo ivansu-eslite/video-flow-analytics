@@ -101,13 +101,30 @@ def _init_sheet(wb: Workbook, name: str, headers: list[str]) -> Worksheet:
     return ws
 
 
+def _cell_date_str(value: object) -> str | None:
+    """把日期欄的儲格值正規化成 `YYYY-MM-DD` 字串。
+
+    本階段以字串寫入日期，但 Excel／BI 工具存檔時可能把該欄轉成日期型別的儲格，
+    讀回時即為 `datetime.date`／`datetime.datetime`。日期欄同時是比對與排序的鍵，
+    型別混雜會讓比對永遠不成立、排序直接拋 `TypeError`，故一律正規化後再使用。
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime.date):  # datetime.datetime 亦為其子類
+        return value.strftime("%Y-%m-%d")
+    return str(value)
+
+
 def _existing_dates(ws: Worksheet) -> set[str]:
-    return {row[0].value for row in ws.iter_rows(min_row=2) if row[0].value is not None}
+    dates = (_cell_date_str(row[0].value) for row in ws.iter_rows(min_row=2))
+    return {date for date in dates if date is not None}
 
 
 def _remove_rows_for_dates(ws: Worksheet, dates: set[str]) -> None:
     rows_to_delete = [
-        row[0].row for row in ws.iter_rows(min_row=2) if row[0].value in dates
+        row[0].row
+        for row in ws.iter_rows(min_row=2)
+        if _cell_date_str(row[0].value) in dates
     ]
     for row_idx in reversed(rows_to_delete):
         ws.delete_rows(row_idx)

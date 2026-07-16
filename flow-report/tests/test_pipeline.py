@@ -2,11 +2,12 @@ import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import openpyxl
 import polars as pl
 import pytest
 import yaml
 
-from flow_report.pipeline import _build_report_frames
+from flow_report.pipeline import SHEET_HOURLY, SHEET_PEAK, _build_report_frames, _write_report
 
 
 def _write_registry(path: Path, zones_by_camera: dict[str, list[str]]) -> None:
@@ -114,3 +115,63 @@ def test_build_report_frames_ignores_live_registry_duplicates(tmp_path):
     )
     assert hourly_df.height == 1
     assert peak_df.height == 1
+
+
+def _make_hourly_df(rows):
+    return pl.DataFrame(
+        rows,
+        schema={
+            "date": pl.Utf8,
+            "weekday": pl.Utf8,
+            "period": pl.Utf8,
+            "zone": pl.Utf8,
+            "value": pl.Int64,
+        },
+        orient="row",
+    )
+
+
+def _make_peak_df(rows):
+    return pl.DataFrame(
+        rows,
+        schema={
+            "date": pl.Utf8,
+            "weekday": pl.Utf8,
+            "zone": pl.Utf8,
+            "peak_period": pl.Utf8,
+            "peak_value": pl.Int64,
+            "reminder": pl.Utf8,
+        },
+        orient="row",
+    )
+
+
+def test_write_report_overwrite_removes_date_typed_existing_rows(tmp_path):
+    """Excel／BI 工具開啟存檔後，日期欄的儲格可能被轉成 datetime.date 型別；
+    overwrite 模式下 _existing_dates／_remove_rows_for_dates 仍須能辨識出目標
+    日期並正確刪除舊列，不因型別不同（date vs str）而比對永遠不成立。"""
+    path = tmp_path / "report.xlsx"
+    hourly_1 = _make_hourly_df([("2026-05-01", "星期五", "09:00", "checkout", 10)])
+    peak_1 = _make_peak_df([("2026-05-01", "星期五", "checkout", "09:00", 10, "無")])
+    _write_report(path, hourly_1, peak_1, on_duplicate_date="append")
+
+    # 模擬用 Excel 開啟存檔後，日期欄的儲格被轉成 datetime.date 型別
+    wb = openpyxl.load_workbook(path)
+    for sheet_name in (SHEET_HOURLY, SHEET_PEAK):
+        wb[sheet_name].cell(row=2, column=1).value = datetime.date(2026, 5, 1)
+    wb.save(path)
+    wb.close()
+
+    hourly_2 = _make_hourly_df([("2026-05-01", "星期五", "10:00", "checkout", 20)])
+    peak_2 = _make_peak_df([("2026-05-01", "星期五", "checkout", "10:00", 20, "無")])
+    _write_report(path, hourly_2, peak_2, on_duplicate_date="overwrite")
+
+    result = openpyxl.load_workbook(path)
+    hourly_rows = [
+        tuple(row)
+        for row in result[SHEET_HOURLY].iter_rows(min_row=2, values_only=True)
+    ]
+    # 舊列（09:00／10）已被覆蓋刪除，不是附加成第二列
+    assert len(hourly_rows) == 1
+    assert hourly_rows[0][4] == 20
+    result.close()
