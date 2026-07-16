@@ -150,3 +150,20 @@ def test_peak_per_day_ties_pick_earlier_period():
     )
     result = peak_per_day(df)
     assert result.row(0, named=True)["peak_period"] == "09:00"
+
+
+def test_peak_per_day_rerun_produces_identical_row_order():
+    # 同輸入重跑兩次，輸出（含列序）須逐值一致：peak_per_day 的結果會直接寫入
+    # report.xlsx，若列序不穩定，同一天資料在不同次執行間會產生無意義的 diff。
+    df = _make_rollup(
+        [
+            ("2026-05-01", "星期五", "18:00", "checkout", 776),
+            ("2026-05-01", "星期五", "19:00", "checkout", 1246),
+            ("2026-05-01", "星期五", "11:00", "entrance", 282),
+            ("2026-05-02", "星期六", "09:00", "entrance", 50),
+            ("2026-05-02", "星期六", "15:00", "entrance", 50),
+        ]
+    )
+    first = peak_per_day(df)
+    second = peak_per_day(df)
+    assert first.equals(second)
