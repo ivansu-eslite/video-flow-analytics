@@ -115,6 +115,9 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 - **`polygon` 至少需要 3 個頂點**，座標為該攝影機固定解析度下的像素座標。
 - **`participates_in_zone_mapping = false`** 的攝影機不列入上述 zone 名稱唯一性驗證，
   其 `zones` 內容不影響本階段。
+- **`zone_counts.parquet` 內的 `(camera, zone)` 組合須全部存在於快照定義內**：出現快照
+  沒有的組合視為資料與定義不一致，直接報錯。正常流程下不會觸發——上游 `zone-mapping`
+  已先用同一份快照過濾出參與 zone mapping 的攝影機才產生 parquet。
 
 **驗證對象是快照、不是當下的 `camera_registry.yaml`**：兩者之間若改過區域命名，拿當下的
 檔案驗證會通過，但 parquet 裡其實是舊定義，不同攝影機的人流會被靜默合併。
