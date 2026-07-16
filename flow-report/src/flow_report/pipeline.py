@@ -58,9 +58,23 @@ def _build_report_frames(
         for entry in registry.cameras
         if entry.participates_in_zone_mapping
     }
-    parse_and_validate_zones(zone_entries)  # 跨攝影機 zone 名稱唯一性驗證
+    # parse_and_validate_zones 順便驗證跨攝影機 zone 名稱唯一性
+    zone_cameras = parse_and_validate_zones(zone_entries)
 
     df = to_taipei(pl.read_parquet(counts_path))
+    valid_pairs = {
+        (camera_id, zone.name)
+        for camera_id, zones in zone_cameras.items()
+        for zone in zones
+    }
+    actual_pairs = set(zip(df["camera_id"].to_list(), df["zone"].to_list()))
+    unknown_pairs = actual_pairs - valid_pairs
+    if unknown_pairs:
+        raise ValueError(
+            f"{counts_path} 出現不在 camera_registry_used.yaml 快照內的 "
+            f"(camera, zone) 組合: {sorted(unknown_pairs)}"
+        )
+
     hourly_df = rollup_by_period(df, period_minutes, metric)
     peak_df = peak_per_day(hourly_df)
     return hourly_df, peak_df
@@ -236,7 +250,8 @@ def export_report_daily(
 
     Raises:
         ValueError: `period_minutes` 不是 `bucket_minutes` 的倍數、
-            `camera_registry_used.yaml` 中有跨攝影機重複的 zone 名稱，或
+            `camera_registry_used.yaml` 中有跨攝影機重複的 zone 名稱、
+            `zone_counts.parquet` 出現不在該快照內的 (camera, zone) 組合，或
             `on_duplicate_date="error"` 時發現日期已存在。
         FileNotFoundError: 當日 `zone_counts.parquet` 不存在，或該日輸出
             目錄下找不到 `camera_registry_used.yaml` 快照。

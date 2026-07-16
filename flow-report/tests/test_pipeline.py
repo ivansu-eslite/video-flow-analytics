@@ -7,7 +7,12 @@ import polars as pl
 import pytest
 import yaml
 
-from flow_report.pipeline import SHEET_HOURLY, SHEET_PEAK, _build_report_frames, _write_report
+from flow_report.pipeline import (
+    SHEET_HOURLY,
+    SHEET_PEAK,
+    _build_report_frames,
+    _write_report,
+)
 
 
 def _write_registry(path: Path, zones_by_camera: dict[str, list[str]]) -> None:
@@ -32,11 +37,13 @@ def _write_registry(path: Path, zones_by_camera: dict[str, list[str]]) -> None:
     )
 
 
-def _write_zone_counts(path: Path) -> None:
+def _write_zone_counts(
+    path: Path, camera_id: str = "loc_cam001", zone: str = "entrance"
+) -> None:
     df = pl.DataFrame(
         {
-            "camera_id": ["cam001"],
-            "zone": ["entrance"],
+            "camera_id": [camera_id],
+            "zone": [zone],
             "time_bucket": [
                 datetime.datetime(2026, 5, 1, 11, 0, tzinfo=ZoneInfo("Asia/Taipei"))
             ],
@@ -115,6 +122,32 @@ def test_build_report_frames_ignores_live_registry_duplicates(tmp_path):
     )
     assert hourly_df.height == 1
     assert peak_df.height == 1
+
+
+def test_build_report_frames_rejects_unknown_camera_zone_pair(tmp_path):
+    """zone_counts.parquet 出現不在 camera_registry_used.yaml 快照內的
+    (camera, zone) 組合時應 fail-loud，而非靜默讀入未經驗證的資料。"""
+    bucket_dir = tmp_path / "bucket_test"
+    bucket_dir.mkdir()
+    _write_registry(bucket_dir / "camera_registry.yaml", {"cam001": ["entrance"]})
+
+    output_dir = tmp_path / "outputs" / "bucket_test" / "2026-05-01"
+    output_dir.mkdir(parents=True)
+    # parquet 裡的 zone 是 "checkout"，但快照的 cam001 只定義了 "entrance"
+    _write_zone_counts(output_dir / "zone_counts.parquet", zone="checkout")
+    _write_registry(
+        output_dir / "camera_registry_used.yaml", {"cam001": ["entrance"]}
+    )
+
+    with pytest.raises(ValueError, match="不在.*快照"):
+        _build_report_frames(
+            date=datetime.date(2026, 5, 1),
+            bucket_dir=str(bucket_dir),
+            period_minutes=60,
+            metric="entries",
+            bucket_minutes=15,
+            output_root=tmp_path / "outputs",
+        )
 
 
 def _make_hourly_df(rows):
