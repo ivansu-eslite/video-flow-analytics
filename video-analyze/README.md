@@ -1,7 +1,8 @@
 # video-analyze
 
 多路離線影片的偵測與追蹤：以「一天」為單位，讀取多路攝影機的錄影片段，用 YOLO
-（僅偵測 `person`）搭配 ByteTrack 做多路追蹤，產出每格的追蹤明細。
+（CrowdHuman 微調權重，僅偵測 `fbody` 完整人體）搭配 ByteTrack 做多路追蹤，產出每格的
+追蹤明細。
 
 ## 套件概述
 
@@ -38,9 +39,14 @@
 
 依賴版本以 `==` 釘住並附 `uv.lock`，固定推理堆疊。
 
-**模型權重**：`config.toml` 的 `model_path`（預設 `yolo26m.pt`）指向的權重檔不進版控
-（`.gitignore` 排除所有 `*.pt`）；若本機找不到該檔，ultralytics 會**靜默地自動下載**對應
-權重、不會報錯。
+**模型權重**：`config.toml` 的 `model_path`（預設
+`20260714-153811_yolo26m_baseline.pt`，CrowdHuman 微調權重）指向的權重檔不進版控
+（`.gitignore` 排除所有 `*.pt`），需自行放置於 repo 根目錄；若本機找不到該檔，
+ultralytics 會**靜默地自動下載** COCO 版權重。此時 `classes` 過濾會對到錯誤的類別定義
+（如 CrowdHuman 的 `2=fbody` 對到 COCO 的 `2=car`）——`YOLODetector` 載入後會驗證
+`classes` 是否存在於已載入模型的類別定義，不符時直接拋 `ValueError`，故不會靜默產出
+錯誤資料，但仍建議確保權重檔存在以避免此 fail-loud 中斷。此權重 best epoch 驗證指標：
+mAP50≈0.806、recall≈0.72、precision≈0.847。
 
 ## 安裝與執行
 
@@ -85,8 +91,9 @@ fuse_score = true
 gmc_method = "none"
 
 [model]
-model_path = "yolo26m.pt"
+model_path = "20260714-153811_yolo26m_baseline.pt"
 batch = 8
+classes = [2]              # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
 
 [output]
 save_video = false         # 是否輸出標註影片（開發 / 偵錯輔助）
@@ -102,8 +109,9 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 | 區塊 | 欄位 | 預設 | 約束 / 說明 |
 | --- | --- | --- | --- |
 | `[tracker]` | ByteTrack 各項閾值 | 見範例 | `*_thresh` 皆介於 0–1，`track_buffer >= 1` |
-| `[model]` | `model_path` | `"yolo26m.pt"` | 權重檔路徑 |
+| `[model]` | `model_path` | `"20260714-153811_yolo26m_baseline.pt"` | 權重檔路徑（CrowdHuman 微調權重） |
 | | `batch` | `1` | YOLO 推理湊批目標，`>= 1`（範例用 `8`）；實際單次推理批次為此值的 2 倍 |
+| | `classes` | `[2]` | 要保留的偵測類別 id；權重類別為 `0=head, 1=vbody, 2=fbody`；至少 1 個元素。載入時會驗證此清單與已載入權重的 `model.names` 相符，不符（如指定的權重檔遺失、fallback 下載到別的模型）直接拋錯 |
 | `[output]` | `save_video` | `false` | 是否輸出標註影片（開發 / 偵錯用途） |
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（範例用 `bucket_name1`） |
 | | `date` | — | 分析日期 |
