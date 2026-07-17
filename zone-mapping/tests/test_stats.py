@@ -2,9 +2,10 @@ import datetime
 from zoneinfo import ZoneInfo
 
 import polars as pl
+import pytest
 
 from zone_mapping.registry import Zone
-from zone_mapping.stats import count_zone_visits
+from zone_mapping.stats import count_zone_visits, validate_zone_cameras
 
 _ZONE = Zone(name="zone_a", polygon=[(0, 0), (10, 0), (10, 10), (0, 10)])
 _INSIDE = (5.0, 5.0)
@@ -52,3 +53,10 @@ def test_count_zone_visits_debounce_one_matches_pre_fix_behavior():
     cam_sub = _make_cam_sub([False, True, True, False, True])
     result = count_zone_visits(cam_sub, _ZONE, entry_debounce_frames=1)
     assert _entries_total(result) == 2
+
+
+def test_validate_zone_cameras_reports_value_error_when_data_cameras_has_none():
+    # camera_id 為 nullable Utf8，data_cameras 含 None 時排序不應炸成
+    # TypeError，蓋掉本該報出的診斷訊息
+    with pytest.raises(ValueError, match="cam_missing"):
+        validate_zone_cameras({"cam_missing"}, {"cam001", None})

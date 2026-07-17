@@ -133,5 +133,5 @@ def validate_zone_cameras(zone_camera_ids: set[str], data_cameras: set[str]) -> 
         raise ValueError(
             "camera_registry.yaml 定義了這些 camera 的 zone，"
             f"但當天 tracking_results 沒有對應資料（camera 改名或 key 打錯？）: "
-            f"{unknown}。當天實際的 camera_id: {sorted(data_cameras)}"
+            f"{unknown}。當天實際的 camera_id: {sorted(map(str, data_cameras))}"
         )
