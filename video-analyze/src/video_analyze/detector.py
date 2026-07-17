@@ -65,9 +65,11 @@ def _validate_classes(model: YOLO) -> None:
 
     僅檢查 id 是否存在，不驗證 id 對應的語義名稱是否符合預期——若整顆權重被換成
     另一個「id 剛好也存在但語義不同」的模型（如 COCO 的 `2=car` 對到 CrowdHuman
-    的 `2=fbody`），此檢查仍會通過。這類「載入到錯的權重」風險改由
-    `YOLODetector.__init__` 載入前的檔案存在性檢查阻擋；此函式防的是 `classes`
-    設定本身打錯（如超出實際載入模型類別範圍的 id）。
+    的 `2=fbody`），此檢查仍會通過。`YOLODetector.__init__` 載入前的檔案存在性
+    檢查只擋下「`model_path` 指定的檔案不存在、ultralytics 轉而 fallback 下載到
+    別的模型」這條路徑；若有人手動把別的權重放到同一個 `model_path`，兩道檢查
+    皆無法偵測，仍是殘留風險。此函式實際防的是 `classes` 設定本身打錯（如超出
+    實際載入模型類別範圍的 id）。
 
     Args:
         model: 已載入權重的 `ultralytics.YOLO` 實例。
