@@ -103,7 +103,7 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 | --- | --- | --- | --- |
 | `[tracker]` | ByteTrack 各項閾值 | 見範例 | `*_thresh` 皆介於 0–1，`track_buffer >= 1` |
 | `[model]` | `model_path` | `"yolo26m.pt"` | 權重檔路徑 |
-| | `batch` | `1` | YOLO 推理批次大小，`>= 1`（範例用 `8`） |
+| | `batch` | `1` | YOLO 推理湊批目標，`>= 1`（範例用 `8`）；實際單次推理批次為此值的 2 倍 |
 | `[output]` | `save_video` | `false` | 是否輸出標註影片（開發 / 偵錯用途） |
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（範例用 `bucket_name1`） |
 | | `date` | — | 分析日期 |

@@ -9,7 +9,7 @@ gmc_method = "none"
 
 [model]
 model_path = "yolo26m.pt"
-batch = 8                 # YOLO 單次批次推理的影格數上限
+batch = 8                 # 湊批目標，實際單次推理批次為此值的 2 倍
 
 [output]
 save_video = false # 設為 true 會儲存影片；設為 false 則只跑推理不存檔
