@@ -63,9 +63,11 @@ def _log_model_metadata(model: YOLO) -> None:
 def _validate_classes(model: YOLO) -> None:
     """驗證 `settings.model.classes` 指定的類別 id 皆存在於已載入模型的類別定義。
 
-    避免權重與 `classes` 設定不一致卻靜默通過——常見於指定的權重檔案遺失、
-    ultralytics 轉而 fallback 下載到別的預設模型（如 COCO 版），此時類別 id
-    雖然存在，語義卻已經不同（如 CrowdHuman 的 `2=fbody` 對到 COCO 的 `2=car`）。
+    僅檢查 id 是否存在，不驗證 id 對應的語義名稱是否符合預期——若整顆權重被換成
+    另一個「id 剛好也存在但語義不同」的模型（如 COCO 的 `2=car` 對到 CrowdHuman
+    的 `2=fbody`），此檢查仍會通過。這類「載入到錯的權重」風險改由
+    `YOLODetector.__init__` 載入前的檔案存在性檢查阻擋；此函式防的是 `classes`
+    設定本身打錯（如超出實際載入模型類別範圍的 id）。
 
     Args:
         model: 已載入權重的 `ultralytics.YOLO` 實例。
@@ -80,8 +82,7 @@ def _validate_classes(model: YOLO) -> None:
     if missing:
         raise ValueError(
             f"settings.model.classes 指定的類別 id {missing} 不存在於已載入模型的"
-            f"類別定義 {names}；權重可能與預期不符（例如指定的權重檔案遺失，"
-            "ultralytics 已 fallback 下載到不同的預設模型）。"
+            f"類別定義 {names}；請確認 classes 設定是否對應到實際載入的權重。"
         )
 
 
@@ -91,7 +92,24 @@ class YOLODetector:
     def __init__(self):
         """載入 `settings.model.model_path` 指定的權重；有 CUDA 就用 GPU，
         否則 fallback CPU（並記錄警告，因為 CPU 推論明顯變慢）。
+
+        `model_path` 指定的檔案不存在時直接 fail loud，不讓 ultralytics 自行決定
+        fallback 下載哪個替代權重——若 `model_path` 剛好是 ultralytics 認得的官方
+        權重名稱（如 `yolo26m.pt`），它會靜默下載該權重並讓後續 `classes` 過濾對到
+        錯誤的類別語義（`_validate_classes` 只驗證 id 存在，無法擋下這種「id 存在
+        但語義不同」的情況）。
+
+        Raises:
+            FileNotFoundError: `model_path` 指定的權重檔不存在。
         """
+        model_path = settings.model.model_path
+        if not Path(model_path).is_file():
+            raise FileNotFoundError(
+                f"找不到權重檔 {model_path}；為避免 ultralytics 靜默 fallback 下載到"
+                "不同的模型（造成 classes 過濾對到錯誤的類別語義），請確認權重檔已"
+                "放置於此路徑，而非依賴自動下載。"
+            )
+
         if torch.cuda.is_available():
             device = "cuda"
         else:
@@ -99,7 +117,7 @@ class YOLODetector:
                 "未偵測到可用的 CUDA 裝置，改用 CPU 執行（推論速度會明顯變慢）。"
             )
             device = "cpu"
-        self.model = YOLO(settings.model.model_path).to(device)
+        self.model = YOLO(model_path).to(device)
         _log_model_metadata(self.model)
         _validate_classes(self.model)
 

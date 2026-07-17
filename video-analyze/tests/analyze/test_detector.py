@@ -4,6 +4,7 @@ import pytest
 
 from video_analyze.config import settings
 from video_analyze.detector import (
+    YOLODetector,
     _basename,
     _log_model_metadata,
     _validate_classes,
@@ -124,3 +125,12 @@ def test_validate_classes_skips_when_model_names_unavailable(monkeypatch):
     model = _FakeModel(names=None)
 
     _validate_classes(model)  # names 缺失時無法驗證，略過而非拋例外
+
+
+def test_yolo_detector_raises_when_model_path_missing(monkeypatch, tmp_path):
+    # 檔案不存在時必須直接 fail loud，不可讓 ultralytics 自行 fallback 下載到
+    # 別的模型（那樣 _validate_classes 也擋不住，見同函式的說明）。
+    monkeypatch.setattr(settings.model, "model_path", str(tmp_path / "missing.pt"))
+
+    with pytest.raises(FileNotFoundError):
+        YOLODetector()
