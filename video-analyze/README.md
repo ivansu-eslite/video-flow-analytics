@@ -188,7 +188,7 @@ bucket 呼叫。
 | 路徑 | 內容 |
 | --- | --- |
 | `outputs/{bucket_name}/{date}/tracking_results.parquet` | 追蹤明細 |
-| `outputs/{bucket_name}/{date}/…`（鏡射輸入路徑） | 逐片段標註影片，`save_video = true` 時才產出（開發 / 偵錯輔助） |
+| `outputs/{bucket_name}/{stream_dirname}/{YYYY}/{MM}/{DD}/…`（鏡射輸入路徑） | 逐片段標註影片，`save_video = true` 時才產出（開發 / 偵錯輔助） |
 
 `tracking_results.parquet` 的欄位：
 
