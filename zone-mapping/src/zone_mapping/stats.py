@@ -87,6 +87,8 @@ def count_zone_visits(
             window_size=entry_debounce_frames, min_samples=entry_debounce_frames
         )
         .over("track_id")
+        # 前 N-1 格湊不滿窗格 = 未確認；留 null 會經 shift 汙染 _prev_confirmed
+        .fill_null(0)
         == entry_debounce_frames
     )
     entries = (
