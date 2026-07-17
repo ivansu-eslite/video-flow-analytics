@@ -8,8 +8,9 @@ fuse_score = true
 gmc_method = "none"
 
 [model]
-model_path = "yolo26m.pt"
+model_path = "20260714-153811_yolo26m_baseline.pt"
 batch = 8                 # 湊批目標，實際單次推理批次為此值的 2 倍
+classes = [2]              # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
 
 [output]
 save_video = false # 設為 true 會儲存影片；設為 false 則只跑推理不存檔

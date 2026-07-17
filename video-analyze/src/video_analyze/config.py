@@ -36,10 +36,12 @@ class ModelConfig(BaseModel):
     Attributes:
         model_path: 模型權重檔路徑。
         batch: 推理批次大小。
+        classes: 要保留的偵測類別 id 清單，對應權重的類別定義。
     """
 
-    model_path: str = "yolo26m.pt"
+    model_path: str = "20260714-153811_yolo26m_baseline.pt"
     batch: int = Field(default=1, ge=1)
+    classes: list[int] = Field(default_factory=lambda: [2])
 
 
 class OutputConfig(BaseModel):
