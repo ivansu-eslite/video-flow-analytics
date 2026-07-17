@@ -4,7 +4,6 @@
 #
 # 三包（video-analyze／zone-mapping／flow-report）各自複製一份「內容相同」的此檔進
 # 自己的 tests/；任一支的 registry 模型欄位漂移都會在該包自己的相容性測試爆出來。
-# 見父計畫 docs/plans/2026-07-15-split-three-packages.md 的 0c 條款。
 bucket_name: synthetic_bucket
 storage:
   file_ext: mkv

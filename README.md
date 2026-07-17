@@ -15,10 +15,8 @@
 | [`zone-mapping/`](zone-mapping/README.md) | 把追蹤明細對映到區域幾何，轉成每時段每區域事件統計 | 純 CPU 向量化 | `map_zones_daily` | [README](zone-mapping/README.md) |
 | [`flow-report/`](flow-report/README.md) | 跨期間彙總分析，持續寫入單一 Excel 報表供 BI 工具接手 | 純 CPU | `export_report_daily` | [README](flow-report/README.md) |
 
-本 repo 原為單一套件 `src/video_flow_analytics/`，2026-07 拆成上述三包；拆分背景、共用碼
-處理方式與設計取捨見
-[docs/plans/2026-07-15-split-three-packages.md](docs/plans/2026-07-15-split-three-packages.md)
-（issue #18）。**各套件的完整實作細節（模組結構、多進程 pipeline、fail-loud 處理、
+本 repo 原為單一套件 `src/video_flow_analytics/`，2026-07 拆成上述三包（issue #18）。
+**各套件的完整實作細節（模組結構、多進程 pipeline、fail-loud 處理、
 演算法、`config.toml` 完整欄位、函式介面）以各自 README 為準**；本檔只提供跨套件的總覽
 與共用的資料格式。
 

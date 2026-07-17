@@ -9,10 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 CPU 向量化）、`flow-report/`（彙總成跨日累加的 Excel，純 CPU）。每包各帶自己的
 `pyproject.toml`／`config.toml`／`uv.lock`／`src/`／`tests/`，彼此無跨資料夾 import。
 
-本 repo 原為單一套件 `src/video_flow_analytics/`，2026-07 拆成上述三包，拆分背景、共用碼
-處理方式與設計取捨見
-[docs/plans/2026-07-15-split-three-packages.md](docs/plans/2026-07-15-split-three-packages.md)
-（issue #18）；**各套件的完整實作細節（模組結構、多進程 pipeline、fail-loud 處理、
+本 repo 原為單一套件 `src/video_flow_analytics/`，2026-07 拆成上述三包（issue #18）；
+**各套件的完整實作細節（模組結構、多進程 pipeline、fail-loud 處理、
 演算法、`config.toml` 完整欄位、函式介面）以各自 README 為準**，本檔只記錄跨套件、不易
 從單一套件程式碼本身看出的設計決策：
 
@@ -86,7 +84,11 @@ uv run --directory <pkg> pytest                # 測試（三包各有測試：3
 會改變**（同一輸入重跑兩次即可能有數千列 key 對不上、座標差可達數百 px）。因此
 `tracking_results.parquet` 逐值比對對「邏輯是否正確」沒有驗收力；`zone_counts.parquet`
 經 `time_bucket` 聚合後穩定（同輸入重跑可逐值/byte 級一致），是更可靠的驗收與回歸比對
-標的。詳細實測見上方拆分計畫文件的「0a 先探測可重現性」一節。
+標的。若需驗證 `video-analyze` 的推理邏輯未被改壞，不可用固定容差比對
+`tracking_results.parquet`——未改動的程式碼自身重跑就可能差上千 px；改用**控制組相對
+條件**：改動後對 golden 的偏離，須不大於未改動程式碼自身重跑對同一份 golden 的偏離。
+比對時 join key 用 `(camera_id, timestamp, track_id)`，不可用 `frame_id`（片段內幀序、
+跨片段重複，會笛卡兒展開而算出假的大幅座標差）。
 
 ## 其他注意事項
 
