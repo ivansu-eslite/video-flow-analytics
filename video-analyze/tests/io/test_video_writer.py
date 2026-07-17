@@ -37,3 +37,31 @@ def test_stream_worker_closes_each_segment_only_once_when_second_open_fails(tmp_
     writer._stream_worker(q)
 
     assert close_calls == ["seg1.mkv"]
+
+
+def test_stream_worker_closes_each_segment_only_once_when_close_itself_fails(tmp_path):
+    # _close(current) 本身拋錯時（例如 release 遇到 I/O 問題），current 仍須歸零；
+    # 否則收尾時會對同一支已失敗關閉的片段再呼叫一次 _close。
+    writer = MultiStreamVideoWriter(output_root=Path(tmp_path))
+    close_calls = []
+
+    def failing_close(segment):
+        close_calls.append(segment.relpath)
+        raise OSError("模擬 release 時的 I/O 錯誤")
+
+    writer._close = failing_close
+
+    class _FakeWriter:
+        def write(self, frame):
+            pass
+
+    writer._open_writer = lambda segment_relpath, frame, fps: _FakeWriter()
+
+    q: queue.Queue = queue.Queue()
+    q.put(("seg1.mkv", _FRAME, 30.0))
+    q.put(("seg2.mkv", _FRAME, 30.0))
+    q.put(None)  # 收尾訊號
+
+    writer._stream_worker(q)
+
+    assert close_calls == ["seg1.mkv"]

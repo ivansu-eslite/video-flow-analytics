@@ -113,8 +113,10 @@ class MultiStreamVideoWriter:
             try:
                 if current is None or current.relpath != segment_relpath:
                     if current is not None:
-                        self._close(current)
-                        current = None
+                        try:
+                            self._close(current)
+                        finally:
+                            current = None
                     current = _OpenSegment(
                         relpath=segment_relpath,
                         writer=self._open_writer(segment_relpath, frame, fps),
