@@ -14,7 +14,12 @@ logger = logging.getLogger(__name__)
 def _basename(value: object) -> object:
     """把（可能是）訓練機器上的絕對路徑只留檔名，避免外洩訓練環境路徑。
 
-    非字串或空字串原樣回傳。
+    Args:
+        value: 待處理的值，通常來自 ckpt 的 `train_args`。
+
+    Returns:
+        `value` 為非空字串時回傳其檔名（`Path(value).name`）；
+        非字串或空字串原樣回傳。
     """
     if not isinstance(value, str) or not value:
         return value
@@ -27,6 +32,9 @@ def _log_model_metadata(model: YOLO) -> None:
 
     以 `getattr`／`.get` 防護讀取，缺欄位只記拿得到的部分；任何例外都只
     `warning`，不讓模型載入失敗。
+
+    Args:
+        model: 已載入權重的 `ultralytics.YOLO` 實例。
     """
     try:
         names = getattr(model, "names", None)
@@ -52,6 +60,31 @@ def _log_model_metadata(model: YOLO) -> None:
         logger.warning("記錄模型 metadata 時發生例外，略過。", exc_info=True)
 
 
+def _validate_classes(model: YOLO) -> None:
+    """驗證 `settings.model.classes` 指定的類別 id 皆存在於已載入模型的類別定義。
+
+    避免權重與 `classes` 設定不一致卻靜默通過——常見於指定的權重檔案遺失、
+    ultralytics 轉而 fallback 下載到別的預設模型（如 COCO 版），此時類別 id
+    雖然存在，語義卻已經不同（如 CrowdHuman 的 `2=fbody` 對到 COCO 的 `2=car`）。
+
+    Args:
+        model: 已載入權重的 `ultralytics.YOLO` 實例。
+
+    Raises:
+        ValueError: `settings.model.classes` 內有不存在於 `model.names` 的類別 id。
+    """
+    names = getattr(model, "names", None)
+    if not names:
+        return
+    missing = [c for c in settings.model.classes if c not in names]
+    if missing:
+        raise ValueError(
+            f"settings.model.classes 指定的類別 id {missing} 不存在於已載入模型的"
+            f"類別定義 {names}；權重可能與預期不符（例如指定的權重檔案遺失，"
+            "ultralytics 已 fallback 下載到不同的預設模型）。"
+        )
+
+
 class YOLODetector:
     """YOLO 偵測器包裝層，隔離強耦合"""
 
@@ -68,6 +101,7 @@ class YOLODetector:
             device = "cpu"
         self.model = YOLO(settings.model.model_path).to(device)
         _log_model_metadata(self.model)
+        _validate_classes(self.model)
 
     def predict(self, batch_frames: list[np.ndarray]) -> list[Results]:
         """對一批影格執行物件偵測，僅保留 `settings.model.classes` 指定的類別

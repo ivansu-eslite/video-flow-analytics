@@ -1,10 +1,17 @@
 import logging
 
-from video_analyze.detector import _basename, _log_model_metadata
+import pytest
+
+from video_analyze.config import settings
+from video_analyze.detector import (
+    _basename,
+    _log_model_metadata,
+    _validate_classes,
+)
 
 
 class _FakeModel:
-    """只帶 `_log_model_metadata` 會用到的屬性，不真載權重。"""
+    """只帶 `_log_model_metadata`／`_validate_classes` 會用到的屬性，不真載權重。"""
 
     def __init__(self, names=None, ckpt=None):
         self.names = names
@@ -81,3 +88,39 @@ def test_log_model_metadata_missing_names_attr_does_not_raise(caplog):
         _log_model_metadata(_NoNamesModel())
 
     assert "8.4.90" in caplog.text
+
+
+def test_log_model_metadata_exception_during_read_warns_without_raising(caplog):
+    class _RaisingNamesModel:
+        ckpt = {"version": "8.4.90"}
+
+        @property
+        def names(self):
+            raise RuntimeError("boom")
+
+    with caplog.at_level(logging.WARNING):
+        _log_model_metadata(_RaisingNamesModel())  # 不拋例外，只 warning
+
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+
+def test_validate_classes_passes_when_all_ids_present(monkeypatch):
+    monkeypatch.setattr(settings.model, "classes", [2])
+    model = _FakeModel(names={0: "head", 1: "vbody", 2: "fbody"})
+
+    _validate_classes(model)  # 不應拋例外
+
+
+def test_validate_classes_raises_when_id_missing_from_model_names(monkeypatch):
+    monkeypatch.setattr(settings.model, "classes", [2, 5])
+    model = _FakeModel(names={0: "head", 1: "vbody", 2: "fbody"})
+
+    with pytest.raises(ValueError, match=r"\[5\]"):
+        _validate_classes(model)
+
+
+def test_validate_classes_skips_when_model_names_unavailable(monkeypatch):
+    monkeypatch.setattr(settings.model, "classes", [2])
+    model = _FakeModel(names=None)
+
+    _validate_classes(model)  # names 缺失時無法驗證，略過而非拋例外

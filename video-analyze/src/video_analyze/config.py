@@ -41,7 +41,7 @@ class ModelConfig(BaseModel):
 
     model_path: str = "20260714-153811_yolo26m_baseline.pt"
     batch: int = Field(default=1, ge=1)
-    classes: list[int] = Field(default_factory=lambda: [2])
+    classes: list[int] = Field(default_factory=lambda: [2], min_length=1)
 
 
 class OutputConfig(BaseModel):

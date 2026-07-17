@@ -1,10 +1,18 @@
 import tomllib
 
+import pytest
+from pydantic import ValidationError
+
 from video_analyze.config import AppConfig, ModelConfig, TrackerConfig
 
 
 def test_model_config_classes_defaults_to_fbody():
     assert ModelConfig().classes == [2]
+
+
+def test_model_config_classes_rejects_empty_list():
+    with pytest.raises(ValidationError):
+        ModelConfig(classes=[])
 
 
 def test_model_config_classes_overridable_from_toml():
