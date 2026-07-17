@@ -84,7 +84,7 @@ def count_zone_visits(
         pl.col("in_zone")
         .cast(pl.Int8)
         .rolling_sum(
-            window_size=entry_debounce_frames, min_periods=entry_debounce_frames
+            window_size=entry_debounce_frames, min_samples=entry_debounce_frames
         )
         .over("track_id")
         == entry_debounce_frames
