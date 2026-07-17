@@ -41,6 +41,5 @@ class YOLODetector:
         return self.model.predict(
             batch_frames,
             verbose=False,
-            batch=settings.model.batch,
             classes=[0],  # COCO：0 = person，僅偵測人
         )
