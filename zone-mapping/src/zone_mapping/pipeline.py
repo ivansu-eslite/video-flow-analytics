@@ -85,7 +85,10 @@ def map_zones_daily(
 
     df = pl.read_parquet(results_path)
     # 先驗證 camera 對得上當天資料再解析 zone，避免陳舊 zone 定義打錯字蓋過更根本錯誤
-    validate_zone_cameras(set(zone_entries), set(df["camera_id"].unique()))
+    validate_zone_cameras(
+        {k for k, e in zone_entries.items() if e.zones},
+        set(df["camera_id"].unique()),
+    )
     zone_cameras = parse_and_validate_zones(zone_entries)
 
     df = df.with_columns(
