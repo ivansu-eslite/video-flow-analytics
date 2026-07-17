@@ -146,7 +146,8 @@ class CameraRegistry(BaseModel):
             過濾後的 `CameraEntry` 清單，順序依 `camera_ids` 指定順序。
 
         Raises:
-            ValueError: `camera_ids` 中有查無對應設備登錄的 ID。
+            ValueError: `camera_ids` 中有查無對應設備登錄的 ID，或有重複的
+                camera_id。
         """
         if not camera_ids:
             return list(self.cameras)
@@ -156,6 +157,9 @@ class CameraRegistry(BaseModel):
             raise ValueError(
                 f"camera_registry.yaml 中找不到這些 camera_id: {unknown}"
             )
+        dupes = _find_duplicates(camera_ids)
+        if dupes:
+            raise ValueError(f"camera_ids 有重複的 camera_id: {sorted(dupes)}")
         return [by_id[cid] for cid in camera_ids]
 
 

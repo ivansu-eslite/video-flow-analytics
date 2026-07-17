@@ -84,9 +84,11 @@ def count_zone_visits(
         pl.col("in_zone")
         .cast(pl.Int8)
         .rolling_sum(
-            window_size=entry_debounce_frames, min_periods=entry_debounce_frames
+            window_size=entry_debounce_frames, min_samples=entry_debounce_frames
         )
         .over("track_id")
+        # 前 N-1 格湊不滿窗格 = 未確認；留 null 會經 shift 汙染 _prev_confirmed
+        .fill_null(0)
         == entry_debounce_frames
     )
     entries = (
@@ -131,5 +133,5 @@ def validate_zone_cameras(zone_camera_ids: set[str], data_cameras: set[str]) -> 
         raise ValueError(
             "camera_registry.yaml 定義了這些 camera 的 zone，"
             f"但當天 tracking_results 沒有對應資料（camera 改名或 key 打錯？）: "
-            f"{unknown}。當天實際的 camera_id: {sorted(data_cameras)}"
+            f"{unknown}。當天實際的 camera_id: {sorted(map(str, data_cameras))}"
         )
