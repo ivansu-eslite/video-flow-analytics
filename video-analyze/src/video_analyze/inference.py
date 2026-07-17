@@ -53,7 +53,10 @@ class InferencePipeline:
         self.annotator = TrackAnnotator()
         self.collector = TrackingResultCollector(results_path)
         self.fps_meter = FpsMeter()
-        # 湊約兩倍 batch 讓 ultralytics 組成完整批
+        # ultralytics 對 in-memory list source 一次 forward 整個 list（batch=
+        # 只對檔案來源的 LoadImagesAndVideos 有效），故單次 forward 實際批次為
+        # settings.model.batch 的 2 倍；此處湊批目標維持現狀（見 detector.py
+        # 移除 no-op 的 batch= kwarg 說明），未量測前不改行為
         self._target_batch = settings.model.batch * 2
 
     def _collect_batch(

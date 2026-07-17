@@ -32,3 +32,12 @@ def test_parse_segment_start_rejects_non_z_suffix():
         _parse_segment_start(
             Path("loc_cam/2026/07/08/030000.000.mkv"), datetime.date(2026, 7, 8)
         )
+
+
+def test_parse_segment_start_rejects_when_taipei_day_crosses_dir_day():
+    # 16:00Z 之後轉台北時間會跨到目錄日期（UTC 曆日）的隔天，
+    # 與輸出目錄日期分岔，須 fail-loud 而非靜默寫到錯誤的日期目錄。
+    with pytest.raises(ValueError, match="跨到"):
+        _parse_segment_start(
+            Path("loc_cam/2026/07/08/160000.000Z.mkv"), datetime.date(2026, 7, 8)
+        )

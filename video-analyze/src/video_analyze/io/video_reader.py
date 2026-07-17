@@ -59,13 +59,37 @@ class FramePacket:
 
 
 def _parse_segment_start(path: Path, day: date) -> datetime:
+    """解析片段檔名為台北在地時間的起始時間。
+
+    Args:
+        path: 片段檔案路徑，檔名須為 `{HHmmss}.{SSS}Z.{ext}`。
+        day: 該片段所在目錄的 `{YYYY}/{MM}/{DD}` 日期，語義為 **UTC 曆日**
+            （與轉換後 `start` 的台北曆日不同語義，見下方 Raises）。
+
+    Returns:
+        轉換為台北在地時間（`Asia/Taipei`）的起始時間。
+
+    Raises:
+        ValueError: 檔名不符合 `HHmmss.SSSZ` 格式；或轉換後的台北曆日與
+            `day`（UTC 曆日）不同——`day` 來自目錄結構、為 UTC 曆日，`start`
+            為台北時間，UTC 16:00 之後兩者會分岔到不同曆日，此時代表片段
+            落在錯誤的輸出日期目錄下，須 fail-loud 而非靜默寫錯天。
+    """
     # 檔名格式 {HHmmss}.{SSS}Z.{ext}：依 RFC 3339，"Z" 尾綴為真正的 UTC；先以 UTC
     # 結合當日日期，再轉成台北在地時間（見模組層級 _FILENAME_TZ / _LOCAL_TZ 註解）。
     stem = path.stem
     if not stem.endswith("Z"):
         raise ValueError(f"片段檔名不符合 HHmmss.SSSZ 格式: {path}")
     t = datetime.strptime(stem.removesuffix("Z"), "%H%M%S.%f")
-    return datetime.combine(day, t.time(), tzinfo=_FILENAME_TZ).astimezone(_LOCAL_TZ)
+    start = datetime.combine(day, t.time(), tzinfo=_FILENAME_TZ).astimezone(_LOCAL_TZ)
+    if start.date() != day:
+        raise ValueError(
+            f"片段 {path} 的錄影時間轉換台北時區後跨到 {start.date()}，與目錄"
+            f"日期 {day}（UTC 曆日）不同：目錄結構以 UTC 曆日分層，但輸出的"
+            f"timestamp 為台北在地時間，兩者語義不同——UTC 16:00 之後的片段"
+            f"會落在錯誤的輸出日期目錄下，須避免此片段時間範圍。"
+        )
+    return start
 
 
 def probe_frame_shape(segment: SegmentInfo) -> tuple[int, int]:
