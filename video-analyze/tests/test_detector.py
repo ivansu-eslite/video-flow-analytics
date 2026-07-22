@@ -1,9 +1,7 @@
-import logging
-
 import pytest
 
-from video_analyze.config import settings
-from video_analyze.detector import (
+from video_analyze.models.config import settings
+from video_analyze.services.detector import (
     YOLODetector,
     _basename,
     _log_model_metadata,
@@ -34,7 +32,7 @@ def test_basename_returns_empty_string_unchanged():
     assert _basename("") == ""
 
 
-def test_log_model_metadata_with_full_ckpt(caplog):
+def test_log_model_metadata_with_full_ckpt(capsys):
     model = _FakeModel(
         names={0: "head", 1: "vbody", 2: "fbody"},
         ckpt={
@@ -48,50 +46,46 @@ def test_log_model_metadata_with_full_ckpt(caplog):
         },
     )
 
-    with caplog.at_level(logging.INFO):
-        _log_model_metadata(model)
+    _log_model_metadata(model)
 
-    text = caplog.text
-    assert "fbody" in text
-    assert "best.pt" in text
-    assert "data.yaml" in text
-    assert "8.4.90" in text
-    assert "2026-07-14" in text
-    assert "0.806" in text
+    out = capsys.readouterr().out
+    assert "fbody" in out
+    assert "best.pt" in out
+    assert "data.yaml" in out
+    assert "8.4.90" in out
+    assert "2026-07-14" in out
+    assert "0.806" in out
 
 
-def test_log_model_metadata_missing_train_args_logs_available_fields(caplog):
+def test_log_model_metadata_missing_train_args_logs_available_fields(capsys):
     model = _FakeModel(
         names={2: "fbody"},
         ckpt={"version": "8.4.90"},
     )
 
-    with caplog.at_level(logging.INFO):
-        _log_model_metadata(model)
+    _log_model_metadata(model)
 
-    assert "8.4.90" in caplog.text
+    assert "8.4.90" in capsys.readouterr().out
 
 
-def test_log_model_metadata_non_dict_ckpt_warns_without_raising(caplog):
+def test_log_model_metadata_non_dict_ckpt_warns_without_raising(capsys):
     model = _FakeModel(names={2: "fbody"}, ckpt=None)
 
-    with caplog.at_level(logging.WARNING):
-        _log_model_metadata(model)
+    _log_model_metadata(model)
 
-    assert any(record.levelno == logging.WARNING for record in caplog.records)
+    assert '"severity": "WARNING"' in capsys.readouterr().out
 
 
-def test_log_model_metadata_missing_names_attr_does_not_raise(caplog):
+def test_log_model_metadata_missing_names_attr_does_not_raise(capsys):
     class _NoNamesModel:
         ckpt = {"version": "8.4.90"}
 
-    with caplog.at_level(logging.INFO):
-        _log_model_metadata(_NoNamesModel())
+    _log_model_metadata(_NoNamesModel())
 
-    assert "8.4.90" in caplog.text
+    assert "8.4.90" in capsys.readouterr().out
 
 
-def test_log_model_metadata_exception_during_read_warns_without_raising(caplog):
+def test_log_model_metadata_exception_during_read_warns_without_raising(capsys):
     class _RaisingNamesModel:
         ckpt = {"version": "8.4.90"}
 
@@ -99,10 +93,9 @@ def test_log_model_metadata_exception_during_read_warns_without_raising(caplog):
         def names(self):
             raise RuntimeError("boom")
 
-    with caplog.at_level(logging.WARNING):
-        _log_model_metadata(_RaisingNamesModel())  # 不拋例外，只 warning
+    _log_model_metadata(_RaisingNamesModel())  # 不拋例外，只 warning
 
-    assert any(record.levelno == logging.WARNING for record in caplog.records)
+    assert '"severity": "WARNING"' in capsys.readouterr().out
 
 
 def test_validate_classes_passes_when_all_ids_present(monkeypatch):
