@@ -39,8 +39,8 @@ uv run --directory libs/vfa-registry ruff check .
 `.venv` 與 `uv.lock`，`uv sync --project <pkg>` 會順帶把 lib 以 editable 裝進該包的環境。
 
 **執行 cwd 約束**：`bucket_dir` 與 `OUTPUT_ROOT = Path("outputs")` 是**cwd 相對路徑**，
-與各套件 `config.toml` 的檔案定位（`video-analyze`／`zone-mapping` 用 `__file__`、
-`flow-report` 重構後用 `find_project_root`）是兩套機制。三包一律以 `--project`／
+與各套件 `config.toml` 的檔案定位（三包 DDD 重構後皆用 `find_project_root` 往上找
+`pyproject.toml`）是兩套機制。三包一律以 `--project`／
 `--directory` 指定套件、**在 repo 根目錄執行**（`uv run` 不改變 cwd）；若改在套件資料夾
 內執行，`bucket_dir` 會對到不存在的路徑，`outputs/` 也會裂成三棵互不相通的樹，讓階段間
 的檔案契約失效。
@@ -51,15 +51,15 @@ uv run --directory libs/vfa-registry ruff check .
 
 - **`registry.py`、`structured_logging.py` → 抽成 `libs/` 共用 lib（issue #48）。**
   `libs/vfa-registry`（`camera_registry.yaml` 的 Pydantic 模型與 zone 驗證，三包都吃）與
-  `libs/vfa-observability`（`StructuredLogger`，目前 `zone-mapping`／`flow-report` 吃，
-  `video-analyze` 仍用 stdlib `logging`）。三包在自己的 `pyproject.toml` 以
+  `libs/vfa-observability`（`StructuredLogger`，三包都吃——`video-analyze` 於 issue #50
+  一併改用）。三包在自己的 `pyproject.toml` 以
   `[tool.uv.sources]` 的 **path 依賴（editable）** 引用，**不建 root uv workspace**。
 - **`config.py`：仍刻意各包分開**，各包只保留自己 `run_*` 實際讀到的區塊（`video-analyze`
   保留 `tracker`/`model`/`output`/`input`；`zone-mapping` 保留 `input`/`zone`；`flow-report`
   保留 `input`/`zone.bucket_minutes`/`report`）。`flow-report`（issue #42）與 `zone-mapping`
-  （issue #46）已 DDD 重構，兩者的 config 都移至 `models/config.py` 並改用 pydantic-settings
-  （`config.toml`＋環境變數覆寫）、以 `find_project_root` 定位設定檔；`video-analyze` 仍是
-  扁平 `config.py`＋`__file__` 定位。
+  （issue #46）與 `video-analyze`（issue #50）皆已 DDD 重構，三者的 config 都移至
+  `models/config.py` 並改用 pydantic-settings（`config.toml`＋環境變數覆寫）、以
+  `find_project_root` 定位設定檔。
 
 **為何改成共用 lib（本檔先前主張刻意重複，2026-07-23 推翻）**：舊理由是「三個階段未來可能
 各奔不同平台，共用 lib 會在其中一個移走時斷裂」。推翻的兩點——
