@@ -1,20 +1,21 @@
-import logging
 import multiprocessing as mp
 import time
 from pathlib import Path
 from queue import Empty
 
-from video_analyze.config import settings
-from video_analyze.detector import YOLODetector
-from video_analyze.fps_meter import FpsMeter
-from video_analyze.io.frame_ring import FrameRing
-from video_analyze.io.video_reader import READER_DONE, READER_FAILED, FramePacket
-from video_analyze.io.video_writer import MultiStreamVideoWriter
-from video_analyze.tracker import MultiStreamByteTracker
-from video_analyze.tracking_results import TrackingResultCollector
-from video_analyze.visualization.visualizer import TrackAnnotator
+from vfa_observability import StructuredLogger
 
-logger = logging.getLogger(__name__)
+from video_analyze.models.config import settings
+from video_analyze.services.detector import YOLODetector
+from video_analyze.services.fps_meter import FpsMeter
+from video_analyze.services.frame_ring import FrameRing
+from video_analyze.services.tracker import MultiStreamByteTracker
+from video_analyze.services.tracking_results import TrackingResultCollector
+from video_analyze.services.video_reader import READER_DONE, READER_FAILED, FramePacket
+from video_analyze.services.video_writer import MultiStreamVideoWriter
+from video_analyze.services.visualization import TrackAnnotator
+
+logger = StructuredLogger(component="inference")
 
 # 影格不足目標批次時最多再等這麼久湊批（實測 batch 4→8 可讓每格推理 3.8ms→2.4ms）
 _FILL_MAX_WAIT = 0.004
@@ -197,19 +198,19 @@ class InferencePipeline:
         summary = self.fps_meter.summary(elapsed_seconds)
         for camera_id, fps in summary.per_camera_fps.items():
             logger.info(
-                "FPS[%s]：%d 格 = %.2f fps",
-                camera_id,
-                summary.per_camera_frames[camera_id],
-                fps,
+                "FPS 逐路",
+                camera_id=camera_id,
+                frames=summary.per_camera_frames[camera_id],
+                fps=round(fps, 2),
             )
         logger.info(
-            "FPS[整體]：%d 格 / %.1f 秒 = %.2f fps",
-            summary.total_frames,
-            summary.elapsed_seconds,
-            summary.overall_fps,
+            "FPS 整體",
+            total_frames=summary.total_frames,
+            elapsed_seconds=round(summary.elapsed_seconds, 1),
+            overall_fps=round(summary.overall_fps, 2),
         )
         logger.info(
-            "FPS[階段]：Detection %.2f fps、Tracking %.2f fps",
-            summary.detection_fps,
-            summary.tracking_fps,
+            "FPS 階段",
+            detection_fps=round(summary.detection_fps, 2),
+            tracking_fps=round(summary.tracking_fps, 2),
         )

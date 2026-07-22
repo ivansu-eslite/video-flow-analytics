@@ -1,26 +1,16 @@
-import logging
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 import pyarrow.parquet as pq
+from vfa_observability import StructuredLogger
 
-from video_analyze.io.video_reader import FramePacket
+from video_analyze.config.constants import TRACKING_RESULTS_SCHEMA
+from video_analyze.services.video_reader import FramePacket
 
-logger = logging.getLogger(__name__)
+logger = StructuredLogger(component="tracking_results")
 
-_SCHEMA = {
-    "camera_id": pl.Utf8,
-    "frame_id": pl.Int64,
-    # timestamp 為台北在地時間：檔名為 UTC，已在 io/video_reader.py 解析時轉換成
-    # 台北（見該檔 _FILENAME_TZ / _LOCAL_TZ），schema 標記需與來源 tzinfo 一致。
-    "timestamp": pl.Datetime("us", "Asia/Taipei"),
-    "track_id": pl.Int64,
-    "x1": pl.Float64,
-    "y1": pl.Float64,
-    "x2": pl.Float64,
-    "y2": pl.Float64,
-}
+_SCHEMA = TRACKING_RESULTS_SCHEMA
 
 # 累積這麼多列就 flush 一個 row group，避免整天追蹤明細（數千萬列）常駐記憶體；
 # 用列數而非逐段門檻，因多路串流交錯寫入、片段長度不一
@@ -103,7 +93,9 @@ class TrackingResultCollector:
                 self._results_path
             )
         logger.info(
-            "追蹤結果已寫入 %s（共 %d 列）。", self._results_path, self._total_rows
+            "追蹤結果已寫入",
+            path=str(self._results_path),
+            rows=self._total_rows,
         )
 
     def discard(self) -> None:
