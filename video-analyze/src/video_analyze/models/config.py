@@ -1,7 +1,7 @@
 import datetime
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -26,6 +26,8 @@ class TrackerConfig(BaseModel):
         gmc_method: 全域運動補償方法。
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     track_high_thresh: float = Field(default=0.5, ge=0.0, le=1.0)
     track_low_thresh: float = Field(default=0.1, ge=0.0, le=1.0)
     new_track_thresh: float = Field(default=0.6, ge=0.0, le=1.0)
@@ -44,6 +46,8 @@ class ModelConfig(BaseModel):
         classes: 要保留的偵測類別 id 清單，對應權重的類別定義。
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     model_path: str = "20260714-153811_yolo26m_baseline.pt"
     batch: int = Field(default=1, ge=1)
     classes: list[int] = Field(default_factory=lambda: [2], min_length=1)
@@ -55,6 +59,8 @@ class OutputConfig(BaseModel):
     Attributes:
         save_video: 是否輸出逐片段標註影片。
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     save_video: bool = False
 
@@ -69,6 +75,8 @@ class InputConfig(BaseModel):
             `analyze_daily`。
         camera_ids: 要分析的攝影機清單；空清單代表 registry 內全部攝影機。
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     bucket_dir: str = "bucket_name"
     date: datetime.date | None = None
