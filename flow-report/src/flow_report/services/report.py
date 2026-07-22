@@ -175,10 +175,11 @@ def _write_report(
         wb = openpyxl.load_workbook(path)
     else:
         wb = Workbook()
-        wb.remove(wb.active)
+        default_sheet = wb.active
         _init_sheet(wb, SHEET_HOURLY, HOURLY_HEADERS)
         _init_sheet(wb, SHEET_PEAK, PEAK_HEADERS)
         _init_sheet(wb, SHEET_EVENTS, EVENTS_HEADERS)
+        wb.remove(default_sheet)
 
     try:
         hourly_ws = wb[SHEET_HOURLY]
