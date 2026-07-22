@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `video-flow-analytics` 是三個**各自獨立的 uv 專案**（非單一套件）：`video-analyze/`
 （YOLO+ByteTrack 偵測與多路追蹤，GPU、多進程、重）、`zone-mapping/`（zone 人流統計，純
 CPU 向量化）、`flow-report/`（彙總成跨日累加的 Excel，純 CPU）。每包各帶自己的
-`pyproject.toml`／`config.toml`／`uv.lock`／`src/`／`tests/`，彼此無跨資料夾 import。
+`pyproject.toml`／`config.toml`／`uv.lock`／`src/`／`tests/`，彼此無跨資料夾 import；共用碼
+放在 `libs/`（見「三包共用碼的處理方式」），三包以 path 依賴引用。
 
 本 repo 原為單一套件 `src/video_flow_analytics/`，2026-07 拆成上述三包（issue #18）；
 **各套件的完整實作細節（模組結構、多進程 pipeline、fail-loud 處理、
@@ -28,8 +29,14 @@ uv run --project zone-mapping  zone-mapping    # zone 事件統計 → zone_coun
 uv run --project flow-report   flow-report     # 報表彙總 → report.xlsx
 
 uv run --directory <pkg> ruff check .          # lint；<pkg> = video-analyze / zone-mapping / flow-report
-uv run --directory <pkg> pytest                # 測試（三包各有測試：3／5／5 支）
+uv run --directory <pkg> pytest                # 測試（三包各 5／3／3 支測試檔）
+
+uv run --directory libs/vfa-registry pytest    # 共用 lib 的測試（2 支）自成一套，不在三包底下
+uv run --directory libs/vfa-registry ruff check .
 ```
+
+共用 lib 用 path 依賴（非 uv workspace），因此**上述指令的形式完全不變**：三包仍各有自己的
+`.venv` 與 `uv.lock`，`uv sync --project <pkg>` 會順帶把 lib 以 editable 裝進該包的環境。
 
 **執行 cwd 約束**：`bucket_dir` 與 `OUTPUT_ROOT = Path("outputs")` 是**cwd 相對路徑**，
 與各套件 `config.toml` 的檔案定位（`video-analyze`／`zone-mapping` 用 `__file__`、
@@ -42,35 +49,49 @@ uv run --directory <pkg> pytest                # 測試（三包各有測試：3
 
 ### 三包共用碼的處理方式
 
-三者共用的程式碼只有原本 `core/` 底下兩支：
-
-- **`config.py`**：好切，各包只保留自己 `run_*` 實際讀到的區塊（`video-analyze` 保留
-  `tracker`/`model`/`output`/`input`；`zone-mapping` 保留 `input`/`zone`；`flow-report`
+- **`registry.py`、`structured_logging.py` → 抽成 `libs/` 共用 lib（issue #48）。**
+  `libs/vfa-registry`（`camera_registry.yaml` 的 Pydantic 模型與 zone 驗證，三包都吃）與
+  `libs/vfa-observability`（`StructuredLogger`，目前 `zone-mapping`／`flow-report` 吃，
+  `video-analyze` 仍用 stdlib `logging`）。三包在自己的 `pyproject.toml` 以
+  `[tool.uv.sources]` 的 **path 依賴（editable）** 引用，**不建 root uv workspace**。
+- **`config.py`：仍刻意各包分開**，各包只保留自己 `run_*` 實際讀到的區塊（`video-analyze`
+  保留 `tracker`/`model`/`output`/`input`；`zone-mapping` 保留 `input`/`zone`；`flow-report`
   保留 `input`/`zone.bucket_minutes`/`report`）。`flow-report`（issue #42）與 `zone-mapping`
   （issue #46）已 DDD 重構，兩者的 config 都移至 `models/config.py` 並改用 pydantic-settings
   （`config.toml`＋環境變數覆寫）、以 `find_project_root` 定位設定檔；`video-analyze` 仍是
   扁平 `config.py`＋`__file__` 定位。
-- **`registry.py`**：複製兩種形狀後各自維護——`video-analyze` 是精簡版（無 zone 幾何，
-  但仍需保留 `zones: list[Any]` 忽略欄位，因為 `CameraEntry` 用 `extra="forbid"`）；
-  `zone-mapping`／`flow-report` 各一份完整版（含 `Zone`／`parse_and_validate_zones`），
-  內容相同、刻意重複而非共用 lib——三個階段未來可能各奔不同平台，共用 lib 會在其中一個
-  移走時斷裂。兩份完整版重構後都移至 `models/registry.py`，且驗證邏輯已完全對齊
-  （`resolve_cameras` 的重複 camera_id 檢查、`load_registry_from_path` 的 yaml 型別防呆
-  兩邊都有）；`video-analyze` 的精簡版尚未補上 yaml 防呆。**改動任一份 `registry.py` 的
-  驗證邏輯時，需同步檢查另外兩份是否也該同步改——三份之間無自動同步機制。**
+
+**為何改成共用 lib（本檔先前主張刻意重複，2026-07-23 推翻）**：舊理由是「三個階段未來可能
+各奔不同平台，共用 lib 會在其中一個移走時斷裂」。推翻的兩點——
+
+1. **前提被實際軌跡否定**：三包的既定路線是**一起**移交
+   `argus/pipelines/onprem/<pkg>`，不是各奔平台；lib 用 path 依賴、相對路徑
+   （`../libs/<lib>`）在兩個 repo 相同，是**跟著一起搬**而非會斷裂的耦合。真要分家，把 lib
+   原地複製回該包即可，一次性成本。
+2. **重複的成本已經實現**：`load_registry_from_path` 的 yaml 型別防呆補丁，flow-report 先補
+   （PR #45），zone-mapping 隔一個工作單元才補（issue #46），video-analyze 直到抽 lib 前
+   **從未補上**——空檔或純註解的 registry 在該包會以沒有檔名線索的 `TypeError` 崩潰。
+   「改一份時人工同步另外兩份」這個機制實測撐不住。
+
+**選 path 依賴而非 uv workspace** 的理由：workspace 只有單一 root `uv.lock` 與單一 root
+`.venv`，`video-analyze` 的 torch／ultralytics／opencv 會外溢到另外兩包，破壞「依賴面收斂」
+這個拆包的主要成果（三包 `pyproject.toml` 的版本 pin 註解即以此為前提）；path 依賴則讓
+上方「常用指令」與「執行 cwd 約束」兩節完全不受影響。代價是沒有單一 lock 強制三包版本
+一致——**這不是倒退**（本來就是三份 lock ＋ 註解手動 pin），但 lib 的 `pydantic`／`pyyaml`
+也 pin 成同一組版本，改版時要連同三包一起改，否則消費端解析 lock 會撞版本衝突。
 
 `camera_registry.yaml` 本身**只有一份**（放在 `bucket_dir`，執行時參數傳入，不進版控），
-三包讀的是同一份實體檔案，資料層面無重複；上述重複只發生在讀它的 Pydantic 模型層。此檔
-含 `zones`／`participates_in_zone_mapping` 兩個欄位，即使 `video-analyze` 用不到 zone，
-精簡 registry 也必須保留這兩個欄位（忽略其值即可），否則在 `extra="forbid"` 下會直接
-解析失敗。
+三包讀的是同一份實體檔案。此檔含 `zones`／`participates_in_zone_mapping` 兩個欄位，即使
+`video-analyze` 用不到 zone，模型也必須保留這兩個欄位，否則在 `extra="forbid"` 下會直接
+解析失敗；`video-analyze` 不呼叫 `parse_and_validate_zones`，因此吃完整版 lib 後 zone 幾何
+仍不會被驗證。
 
 ### zone 名稱全域唯一
 
 `zone-mapping` 與 `flow-report` 的報表都以 zone 名稱（不含 `camera_id`）分組彙總，因此
 `camera_registry.yaml` 的 zone 名稱**跨攝影機也不可重複**（非僅同一攝影機內）。此驗證
-的實作是各包自己那份 `registry.py` 裡的 `parse_and_validate_zones`——`zone-mapping` 與
-`flow-report` 都會呼叫，**即使當天不會產生報表，`zone-mapping` 本身也會擋下跨攝影機重複
+的實作是共用 lib `vfa-registry` 的 `parse_and_validate_zones`——`zone-mapping` 與
+`flow-report` 都會呼叫（`video-analyze` 不呼叫），**即使當天不會產生報表，`zone-mapping` 本身也會擋下跨攝影機重複
 的 zone 命名**。`flow-report` 驗證的對象是產生該日 `zone_counts.parquet` 當時的
 `camera_registry_used.yaml` **快照**，而非「當下」的 `camera_registry.yaml`——若兩者之間
 改過 zone 名稱，用即時檔案驗證會通過，但 parquet 裡的 zone 名稱其實是舊定義，可能讓不同
@@ -102,4 +123,6 @@ uv run --directory <pkg> pytest                # 測試（三包各有測試：3
   （`camera_registry.yaml` 含 zone 定義，隨 `bucket_name*/` 一起不進版控）。
 - 三包版本 pin 成彼此一致（`torch`/`ultralytics`/`numpy`/`opencv` 等推理堆疊、
   `polars`/`pyarrow`/`openpyxl` 等輸出格式相關套件），避免函式庫版本漂移造成非邏輯性的
-  輸出差異；新增或升級依賴時留意是否需要三包同步。
+  輸出差異；新增或升級依賴時留意是否需要三包同步。**`libs/` 底下兩個 lib 的 `pydantic`／
+  `pyyaml` 也在此範圍內**——lib 與消費端各自解析 lock，版本不一致會直接讓消費端 `uv sync`
+  撞版本衝突。

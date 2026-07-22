@@ -36,6 +36,7 @@
 | `polars` / `pyarrow` | 追蹤明細 parquet 寫出 |
 | `pydantic` | 設定與 registry 的資料模型與驗證 |
 | `pyyaml` | 讀取 `camera_registry.yaml` |
+| `vfa-registry` | 共用 lib：`camera_registry.yaml` 的模型（path 依賴）|
 
 依賴版本以 `==` 釘住並附 `uv.lock`，固定推理堆疊。
 
@@ -217,7 +218,6 @@ bucket 呼叫。
 | 模組 | 職責 |
 | --- | --- |
 | `config.py` | Pydantic 設定模型與全域 `settings` 單例（模組載入時建立，各模組直接 import 使用） |
-| `registry.py` | `CameraRegistry` / `CameraEntry`，讀 `camera_registry.yaml` |
 | `io/video_reader.py` | 逐日掃描片段、讀影格 |
 | `io/video_writer.py` | 標註影片輸出 |
 | `io/frame_ring.py` | 共享記憶體環形緩衝 |
@@ -228,6 +228,10 @@ bucket 呼叫。
 | `inference.py` | 推理迴圈（湊批、偵測、追蹤、寫檔） |
 | `tracking_results.py` | 追蹤明細累積與 parquet 寫出 |
 | `pipeline.py` | `analyze_daily` 與 CLI 進入點 `run_analyze` |
+
+`camera_registry.yaml` 的 `CameraRegistry` / `CameraEntry` 由三包共用的
+[libs/vfa-registry](../libs/vfa-registry) 提供（`from vfa_registry import load_registry`），
+以 path 依賴引用、不在本包內。本包不呼叫 `parse_and_validate_zones`，zone 幾何不會被驗證。
 
 ### 多進程 pipeline
 
