@@ -85,8 +85,9 @@ cwd 影響。
 
 `config.toml` 置於本套件根目錄（`flow-report/config.toml`），含 `[input]`、`[zone]`、
 `[report]` 三個區塊，透過 pydantic-settings 載入；**找不到此檔**時會印出警告並以各項
-預設值啟動，**此檔存在但參數不合法**則直接報錯（不靜默套用預設值）。各欄位亦可用環境
-變數覆寫（巢狀分隔符 `__`，例如 `REPORT__PERIOD_MINUTES=30`）。範例：
+預設值啟動，**此檔存在但參數不合法**則直接報錯（不靜默套用預設值）。同理，出現**未知的
+頂層區塊**（例如把 `[report]` 拼成 `[reports]`）也會直接報錯，而非被靜默忽略。各欄位亦可
+用環境變數覆寫（巢狀分隔符 `__`，例如 `REPORT__PERIOD_MINUTES=30`）。範例：
 
 ```toml
 [input]

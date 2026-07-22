@@ -86,9 +86,12 @@ class AppConfig(BaseSettings):
         report: Excel 報表參數。
     """
 
+    # extra="forbid" 是 BaseSettings 的預設值，這裡明寫出來讓行為可見：`config.toml`
+    # 出現未知的頂層區塊會直接報錯（拼錯的區塊名不會被靜默忽略）。
     model_config = SettingsConfigDict(
         toml_file=_get_toml_path(),
         env_nested_delimiter="__",
+        extra="forbid",
     )
 
     @classmethod
