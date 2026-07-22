@@ -114,16 +114,20 @@ class AppConfig(BaseSettings):
 def load_config() -> AppConfig:
     """載入 `config.toml`（並支援環境變數覆寫）組成 `AppConfig`。
 
-    解析失敗時記錄警告並以預設參數回退，讓程式仍可啟動而非直接中止。
+    找不到設定檔時記錄警告並以預設參數啟動；設定檔存在但內容不合法時直接拋出
+    `ValidationError`，不吞掉錯誤——參數錯了卻靜默套用預設值，會讓報表以非預期
+    的口徑產出而無人察覺。
 
     Returns:
-        解析後的 `AppConfig`；載入失敗時為預設值版本。
+        解析後的 `AppConfig`；找不到 `config.toml` 時為預設值版本。
+
+    Raises:
+        ValidationError: `config.toml` 或環境變數提供的值不合法。
     """
-    try:
-        return AppConfig()
-    except Exception as e:
-        logger.warning("載入設定時發生錯誤，使用預設值啟動", error=str(e))
-        return AppConfig(_env_file=None)  # type: ignore[call-arg]
+    toml_path = _get_toml_path()
+    if toml_path is None or not Path(toml_path).exists():
+        logger.warning("找不到 config.toml，將使用預設參數啟動", path=toml_path)
+    return AppConfig()
 
 
 # 模組載入時建立全域單例，其他模組直接 import 使用（而非依賴注入）
