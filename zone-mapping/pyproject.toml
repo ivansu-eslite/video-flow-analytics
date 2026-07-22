@@ -13,6 +13,7 @@ dependencies = [
     "polars==1.42.0",
     "pyarrow==24.0.0",
     "pydantic==2.13.4",
+    "pydantic-settings[toml]==2.14.2",
     "pyyaml==6.0.3",
 ]
 
