@@ -41,9 +41,6 @@ COLUMN_WIDTH = 14
 HOURLY_SORT_COLUMNS = ("日期", "小時", "區域")
 PEAK_SORT_COLUMNS = ("日期", "區域")
 
-# 中文星期對照（datetime.weekday() 週一為 0）。
-WEEKDAY_ZH = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-
 # 用餐時段提醒閥值：(開始小時, 結束小時, 提醒文字)。
 MEAL_THRESHOLDS = (
     (11, 14, "加強午餐動線"),

@@ -4,23 +4,9 @@
 在 services/report.py。
 """
 
-import datetime
-
 import polars as pl
 
-from flow_report.config.constants import MEAL_THRESHOLDS, WEEKDAY_ZH
-
-
-def weekday_zh(d: datetime.date) -> str:
-    """把日期轉成中文星期幾。
-
-    Args:
-        d: 要轉換的日期。
-
-    Returns:
-        「星期一」～「星期日」其中之一。
-    """
-    return WEEKDAY_ZH[d.weekday()]
+from flow_report.config.constants import MEAL_THRESHOLDS
 
 
 def to_taipei(df: pl.DataFrame, column: str = "time_bucket") -> pl.DataFrame:
@@ -77,12 +63,17 @@ def rollup_by_period(
         .select("date", "period", "zone", "value")
         .sort(["date", "period", "zone"])
     )
-    weekdays = [
-        weekday_zh(datetime.date.fromisoformat(d)) for d in rolled["date"].to_list()
-    ]
-    return rolled.with_columns(pl.Series("weekday", weekdays)).select(
-        "date", "weekday", "period", "zone", "value"
-    )
+    weekday_map = {
+        1: "星期一", 2: "星期二", 3: "星期三",
+        4: "星期四", 5: "星期五", 6: "星期六",
+        7: "星期日",
+    }
+    return rolled.with_columns(
+        pl.col("date").str.to_date("%Y-%m-%d")
+        .dt.weekday()
+        .replace_strict(weekday_map)
+        .alias("weekday")
+    ).select("date", "weekday", "period", "zone", "value")
 
 
 def meal_time_reminder(hour: int) -> str:
