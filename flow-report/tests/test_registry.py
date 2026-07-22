@@ -1,4 +1,4 @@
-from flow_report.registry import _find_duplicates
+from flow_report.models.registry import _find_duplicates
 
 
 def test_find_duplicates_returns_items_appearing_more_than_once():

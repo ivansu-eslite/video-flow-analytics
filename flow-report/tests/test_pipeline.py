@@ -8,9 +8,8 @@ import polars as pl
 import pytest
 import yaml
 
-from flow_report.pipeline import (
-    SHEET_HOURLY,
-    SHEET_PEAK,
+from flow_report.config.constants import SHEET_HOURLY, SHEET_PEAK
+from flow_report.services.report import (
     _build_report_frames,
     _write_report,
 )

@@ -1,12 +1,10 @@
-"""Zone 人流 Excel 報表：離線下游步驟（CLI 進入點 `flow-report`）。
+"""Zone 人流 Excel 報表：核心匯出邏輯（讀檔、驗證、orchestration 與 Excel 讀寫）。
 
 讀 `outputs/{bucket}/{date}/zone_counts.parquet`，彙總成跨日累加更新的
-`outputs/{bucket}/report.xlsx`。實際的期間彙總／尖峰計算在 `flow_report/stats.py`；
-這裡負責讀檔、驗證、orchestration 與 Excel 讀寫。
+`outputs/{bucket}/report.xlsx`。實際的期間彙總／尖峰計算在 `services/stats.py`。
 """
 
 import datetime
-import logging
 from pathlib import Path
 from typing import Literal
 
@@ -16,16 +14,30 @@ from openpyxl.styles import Font
 from openpyxl.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from flow_report.config import settings
-from flow_report.registry import (
+from flow_report.config.constants import (
+    COLUMN_WIDTH,
+    EVENTS_HEADERS,
+    HOURLY_HEADERS,
+    HOURLY_SORT_COLUMNS,
+    OUTPUT_ROOT,
+    PEAK_HEADERS,
+    PEAK_SORT_COLUMNS,
+    REGISTRY_SNAPSHOT_FILENAME,
+    REPORT_FILENAME,
+    SHEET_EVENTS,
+    SHEET_HOURLY,
+    SHEET_PEAK,
+    TMP_SUFFIX,
+    ZONE_COUNTS_FILENAME,
+)
+from flow_report.models.registry import (
     load_registry_from_path,
     parse_and_validate_zones,
 )
-from flow_report.stats import peak_per_day, rollup_by_period, to_taipei
+from flow_report.observability import StructuredLogger
+from flow_report.services.stats import peak_per_day, rollup_by_period, to_taipei
 
-logger = logging.getLogger(__name__)
-
-OUTPUT_ROOT = Path("outputs")
+logger = StructuredLogger(component="report_builder")
 
 
 def _build_report_frames(
@@ -44,7 +56,7 @@ def _build_report_frames(
 
     bucket_path = Path(bucket_dir)
     output_dir = output_root / bucket_path.name / date.isoformat()
-    counts_path = output_dir / "zone_counts.parquet"
+    counts_path = output_dir / ZONE_COUNTS_FILENAME
     if not counts_path.exists():
         raise FileNotFoundError(
             f"找不到 zone 人流統計 {counts_path}，"
@@ -52,7 +64,7 @@ def _build_report_frames(
         )
 
     # 為何用快照而非當下 registry：見 export_report_daily 的 docstring 說明
-    registry = load_registry_from_path(output_dir / "camera_registry_used.yaml")
+    registry = load_registry_from_path(output_dir / REGISTRY_SNAPSHOT_FILENAME)
     zone_entries = {
         entry.stream_dirname: entry
         for entry in registry.cameras
@@ -80,27 +92,6 @@ def _build_report_frames(
     return hourly_df, peak_df
 
 
-SHEET_HOURLY = "每小時人流"
-SHEET_PEAK = "每日尖峰"
-SHEET_EVENTS = "活動事件"
-
-_HOURLY_HEADERS = ["日期", "星期", "小時", "區域", "人流量"]
-_PEAK_HEADERS = ["日期", "星期", "區域", "尖峰時段", "尖峰人流", "每日提醒"]
-_EVENTS_HEADERS = [
-    "日期",
-    "星期",
-    "開始時間",
-    "結束時間",
-    "區域",
-    "活動名稱",
-    "活動類型",
-]
-
-# _sort_rows 用欄位名稱指定排序鍵，避免欄位順序調整時忘記同步改數字索引。
-_HOURLY_SORT_COLUMNS = ("日期", "小時", "區域")
-_PEAK_SORT_COLUMNS = ("日期", "區域")
-
-
 def _sort_key_columns(headers: list[str], columns: tuple[str, ...]) -> tuple[int, ...]:
     return tuple(headers.index(column) for column in columns)
 
@@ -111,7 +102,8 @@ def _init_sheet(wb: Workbook, name: str, headers: list[str]) -> Worksheet:
     for cell in ws[1]:
         cell.font = Font(bold=True)
     for col_idx in range(1, len(headers) + 1):
-        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = 14
+        col_letter = ws.cell(row=1, column=col_idx).column_letter
+        ws.column_dimensions[col_letter].width = COLUMN_WIDTH
     return ws
 
 
@@ -184,9 +176,9 @@ def _write_report(
     else:
         wb = Workbook()
         wb.remove(wb.active)
-        _init_sheet(wb, SHEET_HOURLY, _HOURLY_HEADERS)
-        _init_sheet(wb, SHEET_PEAK, _PEAK_HEADERS)
-        _init_sheet(wb, SHEET_EVENTS, _EVENTS_HEADERS)
+        _init_sheet(wb, SHEET_HOURLY, HOURLY_HEADERS)
+        _init_sheet(wb, SHEET_PEAK, PEAK_HEADERS)
+        _init_sheet(wb, SHEET_EVENTS, EVENTS_HEADERS)
 
     try:
         hourly_ws = wb[SHEET_HOURLY]
@@ -212,14 +204,14 @@ def _write_report(
         if on_duplicate_date == "overwrite":
             _sort_rows(
                 hourly_ws,
-                key_columns=_sort_key_columns(_HOURLY_HEADERS, _HOURLY_SORT_COLUMNS),
+                key_columns=_sort_key_columns(HOURLY_HEADERS, HOURLY_SORT_COLUMNS),
             )
             _sort_rows(
                 peak_ws,
-                key_columns=_sort_key_columns(_PEAK_HEADERS, _PEAK_SORT_COLUMNS),
+                key_columns=_sort_key_columns(PEAK_HEADERS, PEAK_SORT_COLUMNS),
             )
 
-        tmp_path = path.with_name(path.name + ".tmp")
+        tmp_path = path.with_name(path.name + TMP_SUFFIX)
         wb.save(tmp_path)
         tmp_path.replace(path)
     finally:
@@ -267,41 +259,14 @@ def export_report_daily(
     )
 
     bucket_name = Path(bucket_dir).name
-    report_path = output_root / bucket_name / "report.xlsx"
+    report_path = output_root / bucket_name / REPORT_FILENAME
     _write_report(report_path, hourly_df, peak_df, on_duplicate_date)
 
     logger.info(
-        "Zone 人流報表已寫入 %s（本次日期：%s，%d 列每小時人流、%d 列每日尖峰）。",
-        report_path,
-        sorted(hourly_df["date"].unique().to_list()),
-        hourly_df.height,
-        peak_df.height,
+        "Zone 人流報表已寫入",
+        path=str(report_path),
+        dates=sorted(hourly_df["date"].unique().to_list()),
+        hourly_rows=hourly_df.height,
+        peak_rows=peak_df.height,
     )
     return report_path
-
-
-def run_report() -> None:
-    """`flow-report` 的進入點：從 `config.toml` 取參數後呼叫 `export_report_daily`。
-
-    Raises:
-        ValueError: `config.toml` 的 `[input].date` 未設定。
-    """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-    if settings.input.date is None:
-        raise ValueError("config.toml 的 [input].date 未設定，請指定要分析的日期。")
-
-    export_report_daily(
-        date=settings.input.date,
-        bucket_dir=settings.input.bucket_dir,
-        period_minutes=settings.report.period_minutes,
-        metric=settings.report.metric,
-        on_duplicate_date=settings.report.on_duplicate_date,
-        bucket_minutes=settings.zone.bucket_minutes,
-    )
-
-
-if __name__ == "__main__":
-    run_report()

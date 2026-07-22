@@ -1,14 +1,14 @@
 """Zone 人流報表的核心演算法：時區轉換、期間彙總、尖峰計算、用餐時段規則。
 
 所有函式皆為純運算（不做任何檔案 I/O），方便單元測試；I/O 與 orchestration
-在 pipeline.py。
+在 services/report.py。
 """
 
 import datetime
 
 import polars as pl
 
-_WEEKDAY_ZH = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+from flow_report.config.constants import MEAL_THRESHOLDS, WEEKDAY_ZH
 
 
 def weekday_zh(d: datetime.date) -> str:
@@ -20,7 +20,7 @@ def weekday_zh(d: datetime.date) -> str:
     Returns:
         「星期一」～「星期日」其中之一。
     """
-    return _WEEKDAY_ZH[d.weekday()]
+    return WEEKDAY_ZH[d.weekday()]
 
 
 def to_taipei(df: pl.DataFrame, column: str = "time_bucket") -> pl.DataFrame:
@@ -94,10 +94,9 @@ def meal_time_reminder(hour: int) -> str:
     Returns:
         午餐/晚餐時段提醒文字；不在用餐時段則為「無」。
     """
-    if 11 <= hour < 14:
-        return "加強午餐動線"
-    if 17 <= hour < 20:
-        return "加強晚餐動線"
+    for start, end, message in MEAL_THRESHOLDS:
+        if start <= hour < end:
+            return message
     return "無"
 
 
