@@ -1,0 +1,28 @@
+# 合成的最小 camera_registry，用於驗證精簡 registry 模型在 extra="forbid" 下
+# 能相容 `participates_in_zone_mapping` 欄位——現有兩份真實 fixture
+# （bucket_name／bucket_name1）都缺此欄位，只用真實 yaml 驗會假性通過。
+#
+# 三包（video-analyze／zone-mapping／flow-report）各自複製一份「內容相同」的此檔進
+# 自己的 tests/；任一支的 registry 模型欄位漂移都會在該包自己的相容性測試爆出來。
+bucket_name: synthetic_bucket
+storage:
+  file_ext: mkv
+  target_codec: h265
+  segment_strategy: time
+  segment_seconds: 1800
+cameras:
+  - camera_id: cam_a
+    location: loc1
+    ip: 192.168.0.11
+    participates_in_zone_mapping: true
+    zones:
+      - name: zone_a
+        polygon:
+          - [0, 0]
+          - [10, 0]
+          - [10, 10]
+  - camera_id: cam_b
+    location: loc2
+    ip: 192.168.0.12
+    participates_in_zone_mapping: false
+    zones: []
