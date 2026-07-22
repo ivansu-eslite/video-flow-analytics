@@ -73,6 +73,8 @@ class StructuredLogger:
                 for key, value in fields.items()
             },
         }
-        output = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+        # ensure_ascii=False：本包的 log 訊息是中文，逸出成 \uXXXX 會讓地端直接看
+        # 終端機的維運性變差；輸出仍是合法的 UTF-8 JSON，解析結果完全相同。
+        output = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         stream = sys.stderr if severity in {"ERROR", "CRITICAL"} else sys.stdout
         print(output, file=stream, flush=True)
