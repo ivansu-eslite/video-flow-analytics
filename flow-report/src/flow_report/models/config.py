@@ -9,8 +9,7 @@ from pydantic_settings import (
     SettingsConfigDict,
     TomlConfigSettingsSource,
 )
-
-from flow_report.observability import StructuredLogger
+from vfa_observability import StructuredLogger
 
 logger = StructuredLogger(component="config")
 
