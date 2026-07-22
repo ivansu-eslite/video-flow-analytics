@@ -224,11 +224,15 @@ def load_registry_from_path(path: Path) -> CameraRegistry:
 
     Raises:
         FileNotFoundError: `path` 不存在。
+        ValueError: 檔案內容不是 YAML mapping（空檔或只有註解時
+            `yaml.safe_load` 會回傳 `None`）。
     """
     if not path.exists():
         raise FileNotFoundError(f"找不到設備登錄檔: {path}")
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"設備登錄檔格式不正確或內容為空: {path}")
     return CameraRegistry(**data)
 
 

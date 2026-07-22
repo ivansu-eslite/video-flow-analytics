@@ -28,7 +28,7 @@ uv run --project zone-mapping  zone-mapping    # zone 事件統計 → zone_coun
 uv run --project flow-report   flow-report     # 報表彙總 → report.xlsx
 
 uv run --directory <pkg> ruff check .          # lint；<pkg> = video-analyze / zone-mapping / flow-report
-uv run --directory <pkg> pytest                # 測試（三包各有測試：3／1／3 支）
+uv run --directory <pkg> pytest                # 測試（三包各有測試：3／5／5 支）
 ```
 
 **執行 cwd 約束**：`bucket_dir` 與 `OUTPUT_ROOT = Path("outputs")` 是**cwd 相對路徑**，
@@ -46,17 +46,18 @@ uv run --directory <pkg> pytest                # 測試（三包各有測試：3
 
 - **`config.py`**：好切，各包只保留自己 `run_*` 實際讀到的區塊（`video-analyze` 保留
   `tracker`/`model`/`output`/`input`；`zone-mapping` 保留 `input`/`zone`；`flow-report`
-  保留 `input`/`zone.bucket_minutes`/`report`）。`flow-report` 已 DDD 重構（issue #42），
-  其 config 移至 `models/config.py` 並改用 pydantic-settings（`config.toml`＋環境變數
-  覆寫）；`video-analyze`／`zone-mapping` 仍是扁平 `config.py`＋`__file__` 定位。
+  保留 `input`/`zone.bucket_minutes`/`report`）。`flow-report`（issue #42）與 `zone-mapping`
+  （issue #46）已 DDD 重構，兩者的 config 都移至 `models/config.py` 並改用 pydantic-settings
+  （`config.toml`＋環境變數覆寫）、以 `find_project_root` 定位設定檔；`video-analyze` 仍是
+  扁平 `config.py`＋`__file__` 定位。
 - **`registry.py`**：複製兩種形狀後各自維護——`video-analyze` 是精簡版（無 zone 幾何，
   但仍需保留 `zones: list[Any]` 忽略欄位，因為 `CameraEntry` 用 `extra="forbid"`）；
   `zone-mapping`／`flow-report` 各一份完整版（含 `Zone`／`parse_and_validate_zones`），
   內容相同、刻意重複而非共用 lib——三個階段未來可能各奔不同平台，共用 lib 會在其中一個
-  移走時斷裂。`flow-report` 那份重構後移至 `models/registry.py`，並已把 `resolve_cameras`
-  的重複 camera_id 檢查 reconcile 成與 `zone-mapping` 一致。**改動任一份 `registry.py` 的
-  驗證邏輯時，需同步檢查另外兩份是否也該同步改——三份的核心驗證雖已對齊，仍無自動同步
-  機制。**
+  移走時斷裂。兩份完整版重構後都移至 `models/registry.py`，且驗證邏輯已完全對齊
+  （`resolve_cameras` 的重複 camera_id 檢查、`load_registry_from_path` 的 yaml 型別防呆
+  兩邊都有）；`video-analyze` 的精簡版尚未補上 yaml 防呆。**改動任一份 `registry.py` 的
+  驗證邏輯時，需同步檢查另外兩份是否也該同步改——三份之間無自動同步機制。**
 
 `camera_registry.yaml` 本身**只有一份**（放在 `bucket_dir`，執行時參數傳入，不進版控），
 三包讀的是同一份實體檔案，資料層面無重複；上述重複只發生在讀它的 Pydantic 模型層。此檔

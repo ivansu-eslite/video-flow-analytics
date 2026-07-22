@@ -4,8 +4,8 @@ from zoneinfo import ZoneInfo
 import polars as pl
 import pytest
 
-from zone_mapping.registry import Zone
-from zone_mapping.stats import count_zone_visits, validate_zone_cameras
+from zone_mapping.models.registry import Zone
+from zone_mapping.services.stats import count_zone_visits, validate_zone_cameras
 
 _ZONE = Zone(name="zone_a", polygon=[(0, 0), (10, 0), (10, 10), (0, 10)])
 _INSIDE = (5.0, 5.0)

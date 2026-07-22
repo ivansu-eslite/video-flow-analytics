@@ -1,6 +1,10 @@
 import pytest
 
-from zone_mapping.registry import CameraRegistry, _find_duplicates
+from zone_mapping.models.registry import (
+    CameraRegistry,
+    _find_duplicates,
+    load_registry_from_path,
+)
 
 
 def test_find_duplicates_returns_items_appearing_more_than_once():
@@ -44,3 +48,17 @@ def test_resolve_cameras_preserves_requested_order():
     registry = _make_registry()
     result = registry.resolve_cameras(["cam002", "cam001"])
     assert [cam.camera_id for cam in result] == ["cam002", "cam001"]
+
+
+@pytest.mark.parametrize("content", ["", "# 只有註解\n"], ids=["empty", "comment_only"])
+def test_load_registry_from_path_rejects_non_mapping_yaml(tmp_path, content):
+    """空檔／純註解檔的 safe_load 回傳 None，須報出指向檔案的 ValueError。
+
+    少了這道檢查會直接把 None 丟進 CameraRegistry(**data)，只得到一個沒有檔名
+    線索的 TypeError，維運時看不出是哪份 registry 壞掉。
+    """
+    path = tmp_path / "camera_registry.yaml"
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="格式不正確或內容為空"):
+        load_registry_from_path(path)

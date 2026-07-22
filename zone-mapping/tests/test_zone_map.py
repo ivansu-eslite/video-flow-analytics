@@ -6,7 +6,7 @@ import polars as pl
 import pytest
 import yaml
 
-from zone_mapping.pipeline import map_zones_daily
+from zone_mapping.services.zone_map import map_zones_daily
 
 _TAIPEI = ZoneInfo("Asia/Taipei")
 
