@@ -90,6 +90,16 @@ def test_invalid_metric_in_toml_raises(tmp_path):
         _config_class(toml)()
 
 
+def test_unknown_field_in_nested_section_raises(tmp_path):
+    """巢狀區塊內欄位名打錯要報錯：period_minutes 少一個底線寫成 periodminutes，不可被
+    靜默忽略而退回預設（巢狀 model 的 extra="forbid"，非僅頂層區塊名）。"""
+    toml = tmp_path / "config.toml"
+    toml.write_text("[report]\nperiodminutes = 90\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        _config_class(toml)()
+
+
 def test_load_config_warns_when_toml_missing(monkeypatch, capsys):
     """找不到設定檔時要留下警告，不可靜默啟動。"""
     monkeypatch.setattr(

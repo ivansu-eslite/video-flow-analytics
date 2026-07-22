@@ -2,7 +2,7 @@ import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -23,6 +23,8 @@ class ZoneConfig(BaseModel):
             故須與產生該份 parquet 時的設定一致。
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     bucket_minutes: int = Field(default=60, ge=1)
 
 
@@ -35,6 +37,8 @@ class ReportConfig(BaseModel):
         metric: 決定「人流量」「尖峰人流」用哪個統計量。
         on_duplicate_date: 同一天資料已存在時的處理方式。
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     period_minutes: int = Field(default=60, ge=1)
     metric: Literal["entries", "unique_visitors"] = "entries"
@@ -50,6 +54,8 @@ class InputConfig(BaseModel):
         date: 開發時由 config 指定彙總日期；正式呼叫端可直接以參數呼叫
             `export_report_daily`。
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     bucket_dir: str = "bucket_name"
     date: datetime.date | None = None
