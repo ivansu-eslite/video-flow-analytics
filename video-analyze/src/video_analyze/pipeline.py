@@ -7,6 +7,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from vfa_registry import load_registry
+
 from video_analyze.config import settings
 from video_analyze.detector import YOLODetector
 from video_analyze.inference import InferencePipeline
@@ -22,7 +24,6 @@ from video_analyze.io.video_reader import (
     run_video_reader,
 )
 from video_analyze.io.video_writer import mirrored_output_path
-from video_analyze.registry import load_registry
 from video_analyze.tracker import MultiStreamByteTracker
 
 logger = logging.getLogger(__name__)

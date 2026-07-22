@@ -1452,6 +1452,27 @@ wheels = [
 ]
 
 [[package]]
+name = "vfa-registry"
+version = "0.1.0"
+source = { editable = "../libs/vfa-registry" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = "==2.13.4" },
+    { name = "pyyaml", specifier = "==6.0.3" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "ruff", specifier = ">=0.15.20" },
+]
+
+[[package]]
 name = "video-analyze"
 version = "0.1.0"
 source = { editable = "." }
@@ -1466,6 +1487,7 @@ dependencies = [
     { name = "torch" },
     { name = "torchvision" },
     { name = "ultralytics" },
+    { name = "vfa-registry" },
 ]
 
 [package.dev-dependencies]
@@ -1486,6 +1508,7 @@ requires-dist = [
     { name = "torch", specifier = "==2.12.1" },
     { name = "torchvision", specifier = "==0.27.1" },
     { name = "ultralytics", specifier = "==8.4.75" },
+    { name = "vfa-registry", editable = "../libs/vfa-registry" },
 ]
 
 [package.metadata.requires-dev]

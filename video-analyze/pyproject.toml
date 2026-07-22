@@ -18,7 +18,14 @@ dependencies = [
     "polars==1.42.0",
     "pyarrow==24.0.0",
     "lap==0.5.13",
+    "vfa-registry",
 ]
+
+# 共用 lib 以 path 依賴（editable）引用、不經 uv workspace：三包各自保留獨立的
+# uv.lock 與 .venv，本包的 torch 才不會外溢到另外兩包；理由詳見 repo 根 CLAUDE.md
+# 「三包共用碼的處理方式」。本包尚未改用 StructuredLogger，故不引 vfa-observability。
+[tool.uv.sources]
+vfa-registry = { path = "../libs/vfa-registry", editable = true }
 
 [project.scripts]
 video-analyze = "video_analyze.pipeline:run_analyze"
