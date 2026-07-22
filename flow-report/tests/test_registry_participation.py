@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from flow_report.registry import CameraRegistry
+from flow_report.models.registry import CameraRegistry
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "registry_with_participation.yaml"
 

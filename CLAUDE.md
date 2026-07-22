@@ -32,7 +32,8 @@ uv run --directory <pkg> pytest                # 測試（三包各有測試：3
 ```
 
 **執行 cwd 約束**：`bucket_dir` 與 `OUTPUT_ROOT = Path("outputs")` 是**cwd 相對路徑**，
-與各套件 `config.toml` 的 `__file__` 定位是兩套機制。三包一律以 `--project`／
+與各套件 `config.toml` 的檔案定位（`video-analyze`／`zone-mapping` 用 `__file__`、
+`flow-report` 重構後用 `find_project_root`）是兩套機制。三包一律以 `--project`／
 `--directory` 指定套件、**在 repo 根目錄執行**（`uv run` 不改變 cwd）；若改在套件資料夾
 內執行，`bucket_dir` 會對到不存在的路徑，`outputs/` 也會裂成三棵互不相通的樹，讓階段間
 的檔案契約失效。
@@ -45,13 +46,17 @@ uv run --directory <pkg> pytest                # 測試（三包各有測試：3
 
 - **`config.py`**：好切，各包只保留自己 `run_*` 實際讀到的區塊（`video-analyze` 保留
   `tracker`/`model`/`output`/`input`；`zone-mapping` 保留 `input`/`zone`；`flow-report`
-  保留 `input`/`zone.bucket_minutes`/`report`）。
+  保留 `input`/`zone.bucket_minutes`/`report`）。`flow-report` 已 DDD 重構（issue #42），
+  其 config 移至 `models/config.py` 並改用 pydantic-settings（`config.toml`＋環境變數
+  覆寫）；`video-analyze`／`zone-mapping` 仍是扁平 `config.py`＋`__file__` 定位。
 - **`registry.py`**：複製兩種形狀後各自維護——`video-analyze` 是精簡版（無 zone 幾何，
   但仍需保留 `zones: list[Any]` 忽略欄位，因為 `CameraEntry` 用 `extra="forbid"`）；
   `zone-mapping`／`flow-report` 各一份完整版（含 `Zone`／`parse_and_validate_zones`），
   內容相同、刻意重複而非共用 lib——三個階段未來可能各奔不同平台，共用 lib 會在其中一個
-  移走時斷裂。**改動任一份 `registry.py` 的驗證邏輯時，需同步檢查另外兩份是否也該同步
-  改，三份目前並無自動同步機制。**
+  移走時斷裂。`flow-report` 那份重構後移至 `models/registry.py`，並已把 `resolve_cameras`
+  的重複 camera_id 檢查 reconcile 成與 `zone-mapping` 一致。**改動任一份 `registry.py` 的
+  驗證邏輯時，需同步檢查另外兩份是否也該同步改——三份的核心驗證雖已對齊，仍無自動同步
+  機制。**
 
 `camera_registry.yaml` 本身**只有一份**（放在 `bucket_dir`，執行時參數傳入，不進版控），
 三包讀的是同一份實體檔案，資料層面無重複；上述重複只發生在讀它的 Pydantic 模型層。此檔

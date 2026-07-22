@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 
-from flow_report.stats import (
+from flow_report.services.stats import (
     meal_time_reminder,
     peak_per_day,
     rollup_by_period,
