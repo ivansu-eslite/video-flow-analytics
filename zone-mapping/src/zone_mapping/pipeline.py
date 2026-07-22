@@ -17,7 +17,7 @@ from pathlib import Path
 import polars as pl
 
 from zone_mapping.models.config import settings
-from zone_mapping.registry import (
+from zone_mapping.models.registry import (
     load_registry,
     parse_and_validate_zones,
     registry_path,

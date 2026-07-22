@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from zone_mapping.registry import CameraRegistry
+from zone_mapping.models.registry import CameraRegistry
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "registry_with_participation.yaml"
 

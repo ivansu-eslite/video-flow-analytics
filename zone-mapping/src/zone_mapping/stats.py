@@ -11,7 +11,7 @@
 import numpy as np
 import polars as pl
 
-from zone_mapping.registry import Zone
+from zone_mapping.models.registry import Zone
 
 
 def points_in_polygon(

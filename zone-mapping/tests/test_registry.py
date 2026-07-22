@@ -1,6 +1,6 @@
 import pytest
 
-from zone_mapping.registry import (
+from zone_mapping.models.registry import (
     CameraRegistry,
     _find_duplicates,
     load_registry_from_path,
