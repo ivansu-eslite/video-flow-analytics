@@ -85,6 +85,7 @@ def test_get_toml_path_points_to_existing_config():
     path = _get_toml_path()
     assert path is not None
     assert path.endswith("config.toml")
+    assert Path(path).exists()
 
 
 def test_uses_defaults_when_toml_missing(tmp_path):
