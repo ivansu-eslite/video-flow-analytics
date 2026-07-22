@@ -1,7 +1,7 @@
 import datetime
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -23,6 +23,8 @@ class ZoneConfig(BaseModel):
             邊界抖動；預設 1 = 不去抖。
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     bucket_minutes: int = Field(default=60, ge=1)
     entry_debounce_frames: int = Field(default=1, ge=1)
 
@@ -36,6 +38,8 @@ class InputConfig(BaseModel):
         date: 開發時由 config 指定統計日期；正式呼叫端可直接以參數呼叫
             `map_zones_daily`。
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     bucket_dir: str = "bucket_name"
     date: datetime.date | None = None
