@@ -7,7 +7,8 @@
 
 本 repo 是**三個各自獨立的 uv 專案**（非單一套件），對應人流分析的三道處理階段。每包
 各帶自己的 `pyproject.toml`／`config.toml`／`uv.lock`／`src/`／`tests/`，可獨立安裝與
-執行，彼此**無跨資料夾 import**，只透過 `outputs/` 下的檔案交接：
+執行，彼此**無跨資料夾 import**，只透過 `outputs/` 下的檔案交接；三包共用的程式碼放在
+[`libs/`](#共用-lib)，以 path 依賴引用：
 
 | 套件 | 職責 | 運算特性 | 進入點 | 詳細文件 |
 | --- | --- | --- | --- | --- |
@@ -64,7 +65,7 @@ flowchart LR
 | 類別 | 需求 |
 | --- | --- |
 | 執行環境 | Python `>= 3.12`（`.python-version` 釘 `3.12`） |
-| 套件管理 | [uv](https://docs.astral.sh/uv/)（安裝與執行皆透過 uv，各包各附 `uv.lock`） |
+| 套件管理 | [uv](https://docs.astral.sh/uv/)（安裝與執行皆透過 uv，各包與各 lib 各附 `uv.lock`） |
 | GPU | 選用。`video-analyze` 以 `torch.cuda.is_available()` 判斷，無 GPU 時 fallback 到 CPU（明顯變慢）；`zone-mapping` 與 `flow-report` 為純 CPU |
 | 系統相依 | FFmpeg / 影像編解碼器（OpenCV 解 `mkv` 等格式）；`lap` 為 C 擴充，環境無對應 wheel 時需要編譯工具鏈 |
 
@@ -183,18 +184,34 @@ cameras:
 | `outputs/{bucket}/{date}/camera_registry_used.yaml` | zone-mapping | 產生當日資料時的 registry 快照 |
 | `outputs/{bucket}/report.xlsx` | flow-report | 跨日累加的 Excel 報表（三個分頁） |
 
+## 共用 lib
+
+三包共用的程式碼放在 `libs/`，各自是獨立的 uv 專案，由三包以 `[tool.uv.sources]` 的
+**path 依賴（editable）** 引用——**刻意不建 root uv workspace**，否則單一 root `.venv`
+會讓 `video-analyze` 的 torch 外溢到另外兩包（理由詳見 [CLAUDE.md](CLAUDE.md)）：
+
+| lib | 內容 | 誰在用 |
+| --- | --- | --- |
+| [`libs/vfa-registry/`](libs/vfa-registry/README.md) | `camera_registry.yaml` 的 Pydantic 模型與 zone 驗證 | 三包 |
+| [`libs/vfa-observability/`](libs/vfa-observability/README.md) | 輸出單行 JSON 的 `StructuredLogger` | `zone-mapping`／`flow-report` |
+
+`uv sync --project <pkg>` 會順帶把 lib 以 editable 裝進該包的環境，因此下方安裝與執行
+指令的形式完全不受影響。
+
 ## 開發
 
-各套件各自 lint 與測試（`<pkg>` = `video-analyze` / `zone-mapping` / `flow-report`）：
+各套件與各 lib 各自 lint 與測試
+（`<pkg>` = `video-analyze` / `zone-mapping` / `flow-report` / `libs/vfa-registry` /
+`libs/vfa-observability`）：
 
 ```bash
-uv run --directory <pkg> ruff check .   # lint（line-length = 88，select = ["E", "F", "I", "W"]）
+uv run --directory <pkg> ruff check .   # lint（select = ["E", "F", "I", "W"]；line-length 見各包 pyproject）
 uv run --directory <pkg> pytest         # 執行測試
 ```
 
 此處用 `--directory`（切換 cwd 進套件資料夾）而非執行分析時的 `--project`，pytest 才會
-解析到該套件的 `tests/`。三包各自都有測試（video-analyze 3 支、zone-mapping 1 支、
-flow-report 3 支）。
+解析到該套件的 `tests/`。**改動 `libs/` 底下的程式碼時要跑該 lib 自己的測試**——三包的
+測試不涵蓋 lib 內部（registry 的模型與 zone 驗證測試都在 `libs/vfa-registry/tests/`）。
 
 此倉庫另附一份 [CLAUDE.md](CLAUDE.md)，是給 Claude Code 的工作指引，記錄跨套件、不易從
 單一套件程式碼看出的設計決策。

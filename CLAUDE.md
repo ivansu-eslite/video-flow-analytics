@@ -91,8 +91,8 @@ uv run --directory libs/vfa-registry ruff check .
 `zone-mapping` 與 `flow-report` 的報表都以 zone 名稱（不含 `camera_id`）分組彙總，因此
 `camera_registry.yaml` 的 zone 名稱**跨攝影機也不可重複**（非僅同一攝影機內）。此驗證
 的實作是共用 lib `vfa-registry` 的 `parse_and_validate_zones`——`zone-mapping` 與
-`flow-report` 都會呼叫（`video-analyze` 不呼叫），**即使當天不會產生報表，`zone-mapping` 本身也會擋下跨攝影機重複
-的 zone 命名**。`flow-report` 驗證的對象是產生該日 `zone_counts.parquet` 當時的
+`flow-report` 都會呼叫（`video-analyze` 不呼叫），**即使當天不會產生報表，`zone-mapping`
+本身也會擋下跨攝影機重複的 zone 命名**。`flow-report` 驗證的對象是產生該日 `zone_counts.parquet` 當時的
 `camera_registry_used.yaml` **快照**，而非「當下」的 `camera_registry.yaml`——若兩者之間
 改過 zone 名稱，用即時檔案驗證會通過，但 parquet 裡的 zone 名稱其實是舊定義，可能讓不同
 攝影機的人流被靜默合併。

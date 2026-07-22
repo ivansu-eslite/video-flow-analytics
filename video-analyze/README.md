@@ -35,7 +35,7 @@
 | `numpy` | 影格與追蹤結果的陣列運算 |
 | `polars` / `pyarrow` | 追蹤明細 parquet 寫出 |
 | `pydantic` | 設定與 registry 的資料模型與驗證 |
-| `pyyaml` | 讀取 `camera_registry.yaml` |
+| `pyyaml` | `vfa-registry` 讀 `camera_registry.yaml` 用；本包不直接 import，pin 在此是為了與 lib 對齊版本（見根 CLAUDE.md）|
 | `vfa-registry` | 共用 lib：`camera_registry.yaml` 的模型（path 依賴）|
 
 依賴版本以 `==` 釘住並附 `uv.lock`，固定推理堆疊。
