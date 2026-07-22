@@ -3,8 +3,8 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
+from vfa_registry import Zone
 
-from zone_mapping.models.registry import Zone
 from zone_mapping.services.stats import count_zone_visits, validate_zone_cameras
 
 _ZONE = Zone(name="zone_a", polygon=[(0, 0), (10, 0), (10, 10), (0, 10)])

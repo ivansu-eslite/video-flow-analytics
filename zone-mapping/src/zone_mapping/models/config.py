@@ -8,8 +8,7 @@ from pydantic_settings import (
     SettingsConfigDict,
     TomlConfigSettingsSource,
 )
-
-from zone_mapping.observability import StructuredLogger
+from vfa_observability import StructuredLogger
 
 logger = StructuredLogger(component="config")
 
