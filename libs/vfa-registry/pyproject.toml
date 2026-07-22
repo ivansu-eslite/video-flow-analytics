@@ -1,0 +1,33 @@
+[project]
+name = "vfa-registry"
+version = "0.1.0"
+description = "Shared camera_registry.yaml models and zone validation for video-flow-analytics"
+readme = "README.md"
+requires-python = ">=3.12"
+# 版本 pin 成與三個消費套件相同：三包各自解析自己的 uv.lock，本 lib 的 pydantic/pyyaml
+# 若與消費端要求的版本不同，會在該包的解析階段撞版本衝突。這裡逐一對齊是讓三份 lock
+# 收斂到同一組版本的唯一機制（本 repo 刻意不用 uv workspace，見 CLAUDE.md）。
+dependencies = [
+    "pydantic==2.13.4",
+    "pyyaml==6.0.3",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.14,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.20",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

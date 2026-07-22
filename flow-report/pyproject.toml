@@ -15,7 +15,16 @@ dependencies = [
     "pydantic==2.13.4",
     "pydantic-settings[toml]==2.14.2",
     "pyyaml==6.0.3",
+    "vfa-observability",
+    "vfa-registry",
 ]
+
+# 共用 lib 以 path 依賴（editable）引用、不經 uv workspace：三包各自保留獨立的
+# uv.lock 與 .venv，video-analyze 的 torch 才不會外溢；理由詳見 repo 根 CLAUDE.md
+# 「三包共用碼的處理方式」。
+[tool.uv.sources]
+vfa-observability = { path = "../libs/vfa-observability", editable = true }
+vfa-registry = { path = "../libs/vfa-registry", editable = true }
 
 [project.scripts]
 flow-report = "flow_report.main:main"

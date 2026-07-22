@@ -1,10 +1,7 @@
 import pytest
 
-from zone_mapping.models.registry import (
-    CameraRegistry,
-    _find_duplicates,
-    load_registry_from_path,
-)
+from vfa_registry import CameraRegistry, load_registry_from_path
+from vfa_registry.registry import _find_duplicates
 
 
 def test_find_duplicates_returns_items_appearing_more_than_once():
@@ -27,6 +24,7 @@ def _make_registry() -> CameraRegistry:
 
 
 def test_resolve_cameras_rejects_duplicate_camera_ids():
+    """重複的 camera_id 會讓同一台攝影機在回傳清單中出現多次，須 fail-loud。"""
     registry = _make_registry()
     with pytest.raises(ValueError, match="重複"):
         registry.resolve_cameras(["cam001", "cam001"])

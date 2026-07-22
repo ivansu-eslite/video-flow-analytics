@@ -13,6 +13,8 @@ import shutil
 from pathlib import Path
 
 import polars as pl
+from vfa_observability import StructuredLogger
+from vfa_registry import load_registry, parse_and_validate_zones, registry_path
 
 from zone_mapping.config.constants import (
     OUTPUT_ROOT,
@@ -22,12 +24,6 @@ from zone_mapping.config.constants import (
     ZONE_COUNTS_FILENAME,
     ZONE_COUNTS_SCHEMA,
 )
-from zone_mapping.models.registry import (
-    load_registry,
-    parse_and_validate_zones,
-    registry_path,
-)
-from zone_mapping.observability import StructuredLogger
 from zone_mapping.services.stats import count_zone_visits, validate_zone_cameras
 
 logger = StructuredLogger(component="zone_map")

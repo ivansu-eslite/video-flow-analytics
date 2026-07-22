@@ -450,6 +450,44 @@ wheels = [
 ]
 
 [[package]]
+name = "vfa-observability"
+version = "0.1.0"
+source = { editable = "../libs/vfa-observability" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = "==2.13.4" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "ruff", specifier = ">=0.15.20" },
+]
+
+[[package]]
+name = "vfa-registry"
+version = "0.1.0"
+source = { editable = "../libs/vfa-registry" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = "==2.13.4" },
+    { name = "pyyaml", specifier = "==6.0.3" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "ruff", specifier = ">=0.15.20" },
+]
+
+[[package]]
 name = "zone-mapping"
 version = "0.1.0"
 source = { editable = "." }
@@ -460,6 +498,8 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings", extra = ["toml"] },
     { name = "pyyaml" },
+    { name = "vfa-observability" },
+    { name = "vfa-registry" },
 ]
 
 [package.dev-dependencies]
@@ -476,6 +516,8 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.13.4" },
     { name = "pydantic-settings", extras = ["toml"], specifier = "==2.14.2" },
     { name = "pyyaml", specifier = "==6.0.3" },
+    { name = "vfa-observability", editable = "../libs/vfa-observability" },
+    { name = "vfa-registry", editable = "../libs/vfa-registry" },
 ]
 
 [package.metadata.requires-dev]

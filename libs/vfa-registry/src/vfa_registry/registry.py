@@ -48,14 +48,14 @@ class CameraEntry(BaseModel):
         location: 攝影機所在位置名稱；與 `camera_id` 組成的 `stream_dirname`
             同樣必須在 `CameraRegistry` 內唯一。
         ip: 攝影機 IP。
-        participates_in_zone_mapping: 是否參與 zone mapping；`False` 時
-            `map_zones_daily` 直接跳過這台攝影機（即使 `zones` 有內容也不
-            處理）。正式訊號，取代舊版「`zones` 空清單代表不參與」的隱含推斷。
+        participates_in_zone_mapping: 是否參與 zone mapping；`False` 代表
+            zone 相關處理應跳過這台攝影機（即使 `zones` 有內容也不處理）。
+            正式訊號，取代舊版「`zones` 空清單代表不參與」的隱含推斷。
         zones: 原始 zone 定義（未經驗證的 dict 清單）。刻意用 `list[Any]`
-            （非 `list[Zone]`）：`map_zones_daily` 要先 `validate_zone_cameras`
-            確認攝影機對得上當天資料、再解析 zone 幾何，若在載入 registry 時就
-            驗證幾何，zone 定義的打字錯誤會蓋過「camera 對不上」這個更根本的
-            錯誤；驗證因此延後到 `parsed_zones()`。
+            （非 `list[Zone]`）：載入 registry 時就驗證幾何，會讓某台攝影機的
+            zone 筆誤蓋過更根本、也更該先報出來的錯誤（例如攝影機對不上當天
+            資料、或該攝影機根本不在本次處理範圍內）；幾何驗證因此延後到
+            呼叫端明確呼叫 `parsed_zones()` 的時候。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -74,9 +74,8 @@ class CameraEntry(BaseModel):
     def parsed_zones(self) -> list[Zone]:
         """把原始 zone 定義解析並驗證成 `Zone` model。
 
-        由 `map_zones_daily` 在 `validate_zone_cameras` 通過後才呼叫，讓
-        「camera 對不上當天資料」這個更根本的錯誤先報出來，而不是被 zone
-        定義的打字錯誤蓋過。
+        刻意不在載入 registry 時自動執行：呼叫端通常要先確認攝影機篩選與資料
+        對應無誤，才輪到幾何是否合法（見 `zones` 欄位說明）。
 
         Returns:
             解析驗證後的 `Zone` 清單。
@@ -167,8 +166,7 @@ def parse_and_validate_zones(entries: dict[str, CameraEntry]) -> dict[str, list[
     """解析已篩選過攝影機的 zone 定義，並驗證跨攝影機 zone 名稱全域唯一。
 
     「zone 名稱跨攝影機也不可重複」這條規則來自下游報表依 zone 名稱分組彙總、
-    不含 camera_id。`flow-report` 套件有一份相同實作（兩包各自獨立、刻意不跨
-    資料夾 import），改動時兩邊需同步。
+    不含 camera_id：同名區域會讓不同攝影機的人流被靜默合併成同一列。
 
     Args:
         entries: 已依需求篩選過（例如 participates_in_zone_mapping）的
@@ -212,9 +210,9 @@ def registry_path(bucket_dir: Path) -> Path:
 def load_registry_from_path(path: Path) -> CameraRegistry:
     """讀指定路徑的 registry yaml。
 
-    本包只用它讀 `bucket_dir` 下當下的 `camera_registry.yaml`（見
-    `load_registry`）；獨立成一個吃路徑的函式是為了與 `flow-report` 共用同一份
-    registry.py——該包用它讀 `camera_registry_used.yaml` 快照。
+    刻意吃任意路徑而非只吃 `bucket_dir`：呼叫端自行決定要讀 bucket 下當下的
+    `camera_registry.yaml`（見 `load_registry`），或是某日輸出目錄下的
+    `camera_registry_used.yaml` 快照——後者才能反映產生該日資料當時的定義。
 
     Args:
         path: registry yaml 檔案路徑。

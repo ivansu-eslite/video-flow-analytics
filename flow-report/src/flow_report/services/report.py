@@ -13,6 +13,8 @@ import polars as pl
 from openpyxl.styles import Font
 from openpyxl.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
+from vfa_observability import StructuredLogger
+from vfa_registry import load_registry_from_path, parse_and_validate_zones
 
 from flow_report.config.constants import (
     COLUMN_WIDTH,
@@ -30,11 +32,6 @@ from flow_report.config.constants import (
     TMP_SUFFIX,
     ZONE_COUNTS_FILENAME,
 )
-from flow_report.models.registry import (
-    load_registry_from_path,
-    parse_and_validate_zones,
-)
-from flow_report.observability import StructuredLogger
 from flow_report.services.stats import peak_per_day, rollup_by_period, to_taipei
 
 logger = StructuredLogger(component="report_builder")

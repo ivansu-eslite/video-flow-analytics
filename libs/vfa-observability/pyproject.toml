@@ -1,0 +1,31 @@
+[project]
+name = "vfa-observability"
+version = "0.1.0"
+description = "Shared structured logging (JSON lines) for video-flow-analytics"
+readme = "README.md"
+requires-python = ">=3.12"
+# pydantic pin 成與消費套件一致（理由同 vfa-registry）：`_normalize_log_value` 用
+# `BaseModel.model_dump` 把 model 轉成 JSON-safe 值。
+dependencies = [
+    "pydantic==2.13.4",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.14,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.20",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
