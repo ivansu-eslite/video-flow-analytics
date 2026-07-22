@@ -1,8 +1,9 @@
 """設定載入語義的回歸測試。
 
-重點守護「找不到 `config.toml` → 警告並以預設值啟動；檔案存在但值不合法 →
-直接報錯」這條 fail-loud 語義：參數錯了卻靜默套用預設值，會讓人流統計以非預期
-的口徑產出而無人察覺（例如 `entry_debounce_frames` 打錯後悄悄退回不去抖）。
+重點守護「找不到 `config.toml` → 警告並以預設值啟動；檔案存在但值不合法或頂層
+區塊名未知 → 直接報錯」這條 fail-loud 語義：參數錯了卻靜默套用預設值，會讓人流
+統計以非預期的口徑產出而無人察覺（例如把 `[zone]` 拼成 `[zones]`，去抖與時段
+粒度整段悄悄退回預設）。
 
 `AppConfig.model_config` 的 `toml_file` 在 class 定義時就求值，事後 monkeypatch
 `_get_toml_path` 不會改變它，故這裡改用指定 `toml_file` 的子類別來測實際載入行為。
@@ -21,14 +22,30 @@ from zone_mapping.models.config import (
     load_config,
 )
 
+# 設定來源含環境變數，且欄位名未加前綴：執行環境剛好有這些變數時會蓋掉 toml 的值，
+# 讓測試結果取決於誰的機器在跑。逐一清掉，測的才是「從這份 toml 載入」的行為。
+_ENV_OVERRIDES = ("INPUT", "ZONE", "INPUT__BUCKET_DIR", "INPUT__DATE") + (
+    "ZONE__BUCKET_MINUTES",
+    "ZONE__ENTRY_DEBOUNCE_FRAMES",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_config_env(monkeypatch):
+    for name in _ENV_OVERRIDES:
+        monkeypatch.delenv(name, raising=False)
+
 
 def _config_class(toml_path) -> type[AppConfig]:
     """建立一個讀指定 toml 的 AppConfig 子類別。"""
 
     class _ScopedConfig(AppConfig):
+        # extra="forbid" 明寫出來：test_unknown_top_level_section_raises 靠的就是它，
+        # 繼承自父類別的話，日後有人改父類別會讓那支測試無聲失去守護對象。
         model_config = SettingsConfigDict(
             toml_file=str(toml_path),
             env_nested_delimiter="__",
+            extra="forbid",
         )
 
     return _ScopedConfig

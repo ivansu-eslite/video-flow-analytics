@@ -84,7 +84,9 @@ cwd 影響。
 兩個區塊，透過 pydantic-settings 載入；**找不到此檔**時會印出警告並以各項預設值啟動，
 **此檔存在但參數不合法**則直接報錯（不靜默套用預設值）。同理，出現**未知的頂層區塊**
 （例如把 `[zone]` 拼成 `[zones]`）也會直接報錯，而非被靜默忽略。各欄位亦可用環境變數覆寫
-（巢狀分隔符 `__`，例如 `ZONE__ENTRY_DEBOUNCE_FRAMES=3`）。範例：
+（巢狀分隔符 `__`，例如 `ZONE__ENTRY_DEBOUNCE_FRAMES=3`）。注意欄位名未加前綴，
+`ZONE`／`INPUT` 這兩個名稱本身也是有效的覆寫來源（設成 JSON 會整段取代該區塊），
+在共用的執行環境中留意不要與其他程式的環境變數撞名。範例：
 
 ```toml
 [input]
@@ -171,13 +173,14 @@ gcloud storage cp "$B/inputs/2026-05-01/tracking_results.parquet" "$W/outputs/bu
 gcloud storage cp "$B/inputs/2026-05-01/camera_registry.yaml" "$W/bucket_name1/"
 gcloud storage cp "$B/expected/2026-05-01/zone_counts.parquet" "$W/expected.parquet"
 
-cd "$W" && uv run --project <倉庫路徑>/zone-mapping zone-mapping
+cd "$W" && INPUT__BUCKET_DIR=bucket_name1 INPUT__DATE=2026-05-01 \
+  uv run --project <倉庫路徑>/zone-mapping zone-mapping
 cmp "$W/outputs/bucket_name1/2026-05-01/zone_counts.parquet" "$W/expected.parquet"
 ```
 
 `OUTPUT_ROOT` 與 `bucket_dir` 是 cwd 相對路徑，故在 `$W` 下執行會讓輸入輸出都落在 `$W`；
-`config.toml` 由 `find_project_root` 定位，不受 cwd 影響（本例沿用其預設的
-`bucket_name1` 與 `2026-05-01`）。
+`config.toml` 由 `find_project_root` 定位，不受 cwd 影響。上面用環境變數指定 bucket 與
+日期，讓這段步驟不依賴 `config.toml` 當下的值（本機改過設定也照樣重現得出來）。
 
 **各階段的 golden sample 各自獨立，不可跨階段串接比對。** 本階段的輸入是完整
 `tracking_results.parquet` 的一段切片，產出的 `zone_counts.parquet` 與下游 `flow-report`
