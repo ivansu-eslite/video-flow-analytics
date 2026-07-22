@@ -79,7 +79,7 @@ def _build_report_frames(
         for camera_id, zones in zone_cameras.items()
         for zone in zones
     }
-    actual_pairs = set(zip(df["camera_id"].to_list(), df["zone"].to_list()))
+    actual_pairs = set(df.select(["camera_id", "zone"]).unique(maintain_order=True).iter_rows())
     unknown_pairs = actual_pairs - valid_pairs
     if unknown_pairs:
         raise ValueError(
