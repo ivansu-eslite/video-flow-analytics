@@ -34,9 +34,10 @@
 | `lap` | ByteTrack 的線性指派求解 |
 | `numpy` | 影格與追蹤結果的陣列運算 |
 | `polars` / `pyarrow` | 追蹤明細 parquet 寫出 |
-| `pydantic` | 設定與 registry 的資料模型與驗證 |
+| `pydantic` / `pydantic-settings` | 設定與 registry 的資料模型與驗證；`config.toml`＋環境變數載入 |
 | `pyyaml` | `vfa-registry` 讀 `camera_registry.yaml` 用；本包不直接 import，pin 在此是為了與 lib 對齊版本（見根 CLAUDE.md）|
 | `vfa-registry` | 共用 lib：`camera_registry.yaml` 的模型（path 依賴）|
+| `vfa-observability` | 共用 lib：`StructuredLogger` 結構化 JSON log（path 依賴）|
 
 依賴版本以 `==` 釘住並附 `uv.lock`，固定推理堆疊。
 
@@ -68,8 +69,8 @@ uv run --project video-analyze video-analyze
 此命令不接受任何旗標，所有參數都讀自 `config.toml`。
 
 > **於倉庫根目錄執行**：`bucket_dir`、輸出根目錄 `outputs/` 與 `model_path` 皆為 **cwd
-> 相對路徑**，`uv run --project` 不改變 cwd。本套件自己的 `config.toml` 則以 `__file__`
-> 定位，不受 cwd 影響。
+> 相對路徑**，`uv run --project` 不改變 cwd。本套件自己的 `config.toml` 則以
+> `find_project_root`（往上找 `pyproject.toml`）定位，不受 cwd 影響。
 
 ## 設定
 
@@ -129,8 +130,9 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 <bucket_dir>/<location>_<camera_id>/{YYYY}/{MM}/{DD}/{HHmmss}.{SSS}Z.mkv
 ```
 
-> **時區處理**：檔名的 `Z` 尾綴依 RFC 3339 為真正的 UTC，本套件在 `io/video_reader.py`
-> 解析時即把它轉換成台北在地時間（`Asia/Taipei`，UTC+8）；`tracking_results.parquet` 的
+> **時區處理**：檔名的 `Z` 尾綴依 RFC 3339 為真正的 UTC，本套件在
+> `services/video_reader.py` 解析時即把它轉換成台北在地時間（`Asia/Taipei`，UTC+8）；
+> `tracking_results.parquet` 的
 > `timestamp` 即為台北在地時間，下游不需要、也不應該再對它做任何 UTC→+8 位移。
 
 格式範例：
@@ -213,21 +215,28 @@ bucket 呼叫。
 
 ### 模組結構
 
-`src/video_analyze/` 依職責分層，依賴方向單向、無循環：
+`src/video_analyze/` 依 DDD 分層（與 `flow-report`／`zone-mapping` 及 argus 慣例對齊），
+依賴方向單向、無循環：
 
 | 模組 | 職責 |
 | --- | --- |
-| `config.py` | Pydantic 設定模型與全域 `settings` 單例（模組載入時建立，各模組直接 import 使用） |
-| `io/video_reader.py` | 逐日掃描片段、讀影格 |
-| `io/video_writer.py` | 標註影片輸出 |
-| `io/frame_ring.py` | 共享記憶體環形緩衝 |
-| `visualization/visualizer.py` | `TrackAnnotator`，畫追蹤框 |
-| `detector.py` | YOLO 偵測 |
-| `tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |
-| `fps_meter.py` | 處理 FPS 統計 |
-| `inference.py` | 推理迴圈（湊批、偵測、追蹤、寫檔） |
-| `tracking_results.py` | 追蹤明細累積與 parquet 寫出 |
-| `pipeline.py` | `analyze_daily` 與 CLI 進入點 `run_analyze` |
+| `main.py` | 薄 CLI 外殼：進入點 `main`，讀 `settings` 組參數後呼叫 `analyze_daily` |
+| `models/config.py` | Pydantic-settings 設定模型（`config.toml`＋環境變數）與全域 `settings` 單例 |
+| `config/constants.py` | 非 Pydantic 靜態常數（`OUTPUT_ROOT`、輸出檔名與 parquet schema） |
+| `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理子進程生命週期） |
+| `services/inference.py` | 推理迴圈（湊批、偵測、追蹤、寫檔） |
+| `services/detector.py` | YOLO 偵測 |
+| `services/tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |
+| `services/tracking_results.py` | 追蹤明細累積與 parquet 寫出 |
+| `services/fps_meter.py` | 處理 FPS 統計 |
+| `services/frame_ring.py` | 共享記憶體環形緩衝 |
+| `services/video_reader.py` | 逐日掃描片段、讀影格 |
+| `services/video_writer.py` | 標註影片輸出 |
+| `services/visualization.py` | `TrackAnnotator`，畫追蹤框 |
+
+I/O 邊界（讀寫檔、子進程、影像編解碼、繪圖）依 argus 慣例一律放 `services/`，不另立
+頂層 adapter/io 層。log 用共用 lib `vfa-observability` 的 `StructuredLogger`
+（`from vfa_observability import StructuredLogger`），輸出單行 JSON。
 
 `camera_registry.yaml` 的 `CameraRegistry` / `CameraEntry` 由三包共用的
 [libs/vfa-registry](../libs/vfa-registry) 提供（`from vfa_registry import load_registry`），
@@ -262,7 +271,7 @@ bucket 呼叫。
 ## 開發
 
 ```bash
-uv run --directory video-analyze ruff check .   # lint（line-length = 88，select = ["E", "F", "I", "W"]）
+uv run --directory video-analyze ruff check .   # lint（line-length = 100，select = ["E", "F", "I", "W"]）
 uv run --directory video-analyze pytest         # 執行測試
 ```
 

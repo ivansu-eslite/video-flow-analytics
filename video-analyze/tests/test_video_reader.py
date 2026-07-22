@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from video_analyze.io.video_reader import _parse_segment_start
+from video_analyze.services.video_reader import _parse_segment_start
 
 _TAIPEI = ZoneInfo("Asia/Taipei")
 

@@ -1,14 +1,14 @@
-import logging
 from pathlib import Path
 
 import numpy as np
 import torch
 from ultralytics import YOLO
 from ultralytics.engine.results import Results
+from vfa_observability import StructuredLogger
 
-from video_analyze.config import settings
+from video_analyze.models.config import settings
 
-logger = logging.getLogger(__name__)
+logger = StructuredLogger(component="detector")
 
 
 def _basename(value: object) -> object:
@@ -39,7 +39,7 @@ def _log_model_metadata(model: YOLO) -> None:
     try:
         names = getattr(model, "names", None)
         if names:
-            logger.info("模型類別: %s", names)
+            logger.info("模型類別", classes=names)
 
         ckpt = getattr(model, "ckpt", None)
         if not isinstance(ckpt, dict):
@@ -49,15 +49,17 @@ def _log_model_metadata(model: YOLO) -> None:
         train_args = ckpt.get("train_args")
         if isinstance(train_args, dict):
             logger.info(
-                "訓練參數: base 模型=%s, 訓練資料集=%s",
-                _basename(train_args.get("model")),
-                _basename(train_args.get("data")),
+                "訓練參數",
+                base_model=_basename(train_args.get("model")),
+                dataset=_basename(train_args.get("data")),
             )
-        logger.info("訓練 ultralytics 版本: %s", ckpt.get("version"))
-        logger.info("訓練日期: %s", ckpt.get("date"))
-        logger.info("驗證指標: %s", ckpt.get("train_metrics"))
-    except Exception:
-        logger.warning("記錄模型 metadata 時發生例外，略過。", exc_info=True)
+        logger.info("訓練 ultralytics 版本", version=ckpt.get("version"))
+        logger.info("訓練日期", date=ckpt.get("date"))
+        logger.info("驗證指標", metrics=ckpt.get("train_metrics"))
+    except Exception as exc:
+        # 多進程共寫 stdout/stderr：不用 .exception()（完整 traceback 長行可能超過
+        # PIPE_BUF 4096 被切斷交錯），改附短 error 字串並保留 WARNING 語意（非致命）。
+        logger.warning("記錄模型 metadata 時發生例外，略過。", error=str(exc))
 
 
 def _validate_classes(model: YOLO) -> None:
@@ -115,9 +117,7 @@ class YOLODetector:
         if torch.cuda.is_available():
             device = "cuda"
         else:
-            logger.warning(
-                "未偵測到可用的 CUDA 裝置，改用 CPU 執行（推論速度會明顯變慢）。"
-            )
+            logger.warning("未偵測到可用的 CUDA 裝置，改用 CPU 執行（推論速度會明顯變慢）。")
             device = "cpu"
         self.model = YOLO(model_path).to(device)
         _log_model_metadata(self.model)

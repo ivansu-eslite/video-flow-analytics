@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import cv2
 import numpy as np
 
-from video_analyze.io.frame_ring import FrameRing
+from video_analyze.services.frame_ring import FrameRing
 
 # 讀取進程正常讀完整天片段時放入 queue 的結束訊號；與 READER_FAILED 對稱，讓推理進程
 # 能明確區分「正常讀完」與「中途例外」兩種結束，而非依賴裸 None。

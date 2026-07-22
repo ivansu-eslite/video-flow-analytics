@@ -2,7 +2,7 @@ import numpy as np
 from ultralytics.engine.results import Boxes
 from ultralytics.trackers.byte_tracker import BYTETracker
 
-from video_analyze.config import settings
+from video_analyze.models.config import settings
 
 
 class MultiStreamByteTracker:

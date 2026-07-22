@@ -1,6 +1,6 @@
 import pytest
 
-from video_analyze.fps_meter import FpsMeter
+from video_analyze.services.fps_meter import FpsMeter
 
 
 def test_per_camera_and_overall_throughput():

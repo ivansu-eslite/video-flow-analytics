@@ -1,34 +1,30 @@
-import dataclasses
 import datetime
-import json
-import logging
 import multiprocessing as mp
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from vfa_observability import StructuredLogger
 from vfa_registry import load_registry
 
-from video_analyze.config import settings
-from video_analyze.detector import YOLODetector
-from video_analyze.inference import InferencePipeline
-from video_analyze.io.frame_ring import (
+from video_analyze.config.constants import OUTPUT_ROOT, TRACKING_RESULTS_FILENAME
+from video_analyze.models.config import settings
+from video_analyze.services.detector import YOLODetector
+from video_analyze.services.frame_ring import (
     RING_SLOTS,
     FrameRing,
     create_ring_buffer,
 )
-from video_analyze.io.video_reader import (
+from video_analyze.services.inference import InferencePipeline
+from video_analyze.services.tracker import MultiStreamByteTracker
+from video_analyze.services.video_reader import (
     SegmentInfo,
     discover_segments,
     probe_frame_shape,
     run_video_reader,
 )
-from video_analyze.io.video_writer import mirrored_output_path
-from video_analyze.tracker import MultiStreamByteTracker
+from video_analyze.services.video_writer import mirrored_output_path
 
-logger = logging.getLogger(__name__)
-
-OUTPUT_ROOT = Path("outputs")
+logger = StructuredLogger(component="pipeline")
 
 
 @dataclass
@@ -100,7 +96,7 @@ def _terminate_all(processes: list[mp.Process]) -> None:
     for p in processes:
         p.join(timeout=5)
         if p.is_alive():
-            logger.warning("進程 %s 未在時限內結束，強制 kill。", p.pid)
+            logger.warning("進程未在時限內結束，強制 kill", pid=p.pid)
             p.kill()
             p.join()
 
@@ -156,7 +152,7 @@ def analyze_daily(
         # 依首格解析度一次配置該路的共享環形緩衝（假設整天解析度固定）
         frame_shapes.append(probe_frame_shape(segments[0]))
 
-    results_path = output_root / date.isoformat() / "tracking_results.parquet"
+    results_path = output_root / date.isoformat() / TRACKING_RESULTS_FILENAME
 
     num_streams = len(stream_names)
     # 影格走共享記憶體環形緩衝，queue 只傳輕量索引，避免每格 6MB 走 pickle + pipe
@@ -239,36 +235,3 @@ def analyze_daily(
         tracking_results_path=str(results_path),
         output_video_paths=output_video_paths,
     )
-
-
-def run_analyze() -> None:
-    """`analyze` 子命令的進入點：從 `config.toml` 取參數後呼叫 `analyze_daily`。
-
-    Raises:
-        ValueError: `config.toml` 的 `[input].date` 未設定。
-    """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-    if settings.input.date is None:
-        raise ValueError("config.toml 的 [input].date 未設定，請指定要分析的日期。")
-    try:
-        result = analyze_daily(
-            date=settings.input.date,
-            bucket_dir=settings.input.bucket_dir,
-            camera_ids=settings.input.camera_ids,
-        )
-    except KeyboardInterrupt:
-        sys.exit(130)
-    logger.info("當日所有影片皆已處理完畢！")
-    logger.info(
-        "分析結果:\n%s",
-        json.dumps(
-            dataclasses.asdict(result), indent=2, default=str, ensure_ascii=False
-        ),
-    )
-
-
-if __name__ == "__main__":
-    run_analyze()

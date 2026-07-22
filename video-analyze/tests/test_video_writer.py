@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-from video_analyze.io.video_writer import MultiStreamVideoWriter
+from video_analyze.services.video_writer import MultiStreamVideoWriter
 
 _FRAME = np.zeros((2, 2, 3), dtype=np.uint8)
 

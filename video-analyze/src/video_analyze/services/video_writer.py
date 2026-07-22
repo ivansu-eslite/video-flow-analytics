@@ -1,4 +1,3 @@
-import logging
 import queue
 import threading
 from dataclasses import dataclass
@@ -6,10 +5,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from vfa_observability import StructuredLogger
 
-from video_analyze.config import settings
+from video_analyze.models.config import settings
 
-logger = logging.getLogger(__name__)
+logger = StructuredLogger(component="video_writer")
 
 # 每路 writer 執行緒的待編碼影格緩衝上限。編碼（234 fps/路）遠快於單路的實際
 # 影格產出速率，正常情況 queue 不會積壓；設上限只為防止病態情況吃光記憶體，
@@ -153,7 +153,7 @@ class MultiStreamVideoWriter:
     def _close(self, current: _OpenSegment) -> None:
         current.writer.release()
         output_path = mirrored_output_path(self.output_root, current.relpath)
-        logger.info("已輸出: %s", output_path)
+        logger.info("已輸出標註影片", path=str(output_path))
 
     def close_stream(self, stream_id: int) -> None:
         """某一路正常讀完：通知該路 writer 執行緒收尾並等它把緩衝的影格寫完。
