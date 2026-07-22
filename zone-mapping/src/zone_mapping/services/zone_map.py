@@ -1,42 +1,36 @@
-"""Zone Mapping：離線下游步驟（CLI 進入點 `zone-mapping`）。
+"""Zone Mapping 的核心編排：讀檔、逐攝影機/逐 zone 套用演算法、寫檔與快照。
 
 讀 `outputs/{bucket}/{date}/tracking_results.parquet`，套上人工維護在
 `camera_registry.yaml` 各攝影機底下的 zone 幾何，輸出每個時段每個區域的人流統計
 到同層的 `zone_counts.parquet`，並把當下套用的 camera_registry.yaml 快照成
 `camera_registry_used.yaml` 以供回溯。
 
-實際的 point-in-polygon 判定與聚合演算法在 `zone_mapping/stats.py`；這裡只負責
-讀檔、逐攝影機/逐 zone 呼叫演算法、寫檔與快照。
+實際的 point-in-polygon 判定與聚合演算法在 `services/stats.py`。
 """
 
 import datetime
-import logging
 import shutil
 from pathlib import Path
 
 import polars as pl
 
-from zone_mapping.models.config import settings
+from zone_mapping.config.constants import (
+    OUTPUT_ROOT,
+    REGISTRY_SNAPSHOT_FILENAME,
+    TMP_SUFFIX,
+    TRACKING_RESULTS_FILENAME,
+    ZONE_COUNTS_FILENAME,
+    ZONE_COUNTS_SCHEMA,
+)
 from zone_mapping.models.registry import (
     load_registry,
     parse_and_validate_zones,
     registry_path,
 )
-from zone_mapping.stats import count_zone_visits, validate_zone_cameras
+from zone_mapping.observability import StructuredLogger
+from zone_mapping.services.stats import count_zone_visits, validate_zone_cameras
 
-logger = logging.getLogger(__name__)
-
-OUTPUT_ROOT = Path("outputs")
-
-# 空輸出也寫出正確 schema 的 parquet；time_bucket tz 沿用 timestamp——上游
-# tracking_results.parquet 的 timestamp 已是台北在地時間，見 README 的檔案契約
-_ZONE_COUNTS_SCHEMA = {
-    "camera_id": pl.Utf8,
-    "zone": pl.Utf8,
-    "time_bucket": pl.Datetime("us", "Asia/Taipei"),
-    "unique_visitors": pl.Int64,
-    "entries": pl.Int64,
-}
+logger = StructuredLogger(component="zone_map")
 
 
 def map_zones_daily(
@@ -69,7 +63,7 @@ def map_zones_daily(
             結果中查無資料，或任一 zone 定義不合法。
     """
     output_dir = output_root / Path(bucket_dir).name / date.isoformat()
-    results_path = output_dir / "tracking_results.parquet"
+    results_path = output_dir / TRACKING_RESULTS_FILENAME
     if not results_path.exists():
         raise FileNotFoundError(
             f"找不到追蹤結果 {results_path}，請先執行 analyze_daily 產生當日 parquet。"
@@ -101,9 +95,7 @@ def map_zones_daily(
     for camera_id, zones in zone_cameras.items():
         cam_sub = df.filter(pl.col("camera_id") == camera_id)
         for zone in zones:
-            counts = count_zone_visits(
-                cam_sub, zone, entry_debounce_frames
-            ).with_columns(
+            counts = count_zone_visits(cam_sub, zone, entry_debounce_frames).with_columns(
                 pl.lit(camera_id).alias("camera_id"),
                 pl.lit(zone.name).alias("zone"),
             )
@@ -112,52 +104,25 @@ def map_zones_daily(
     if frames:
         result = (
             pl.concat(frames)
-            .select(list(_ZONE_COUNTS_SCHEMA))
+            .select(list(ZONE_COUNTS_SCHEMA))
             .sort("camera_id", "zone", "time_bucket")
         )
     else:
-        result = pl.DataFrame(schema=_ZONE_COUNTS_SCHEMA)
+        result = pl.DataFrame(schema=ZONE_COUNTS_SCHEMA)
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    counts_path = output_dir / "zone_counts.parquet"
-    tmp_path = counts_path.with_name(counts_path.name + ".tmp")
+    counts_path = output_dir / ZONE_COUNTS_FILENAME
+    tmp_path = counts_path.with_name(counts_path.name + TMP_SUFFIX)
     result.write_parquet(tmp_path)
     tmp_path.replace(counts_path)
 
     # 快照當下套用的 camera_registry.yaml，讓這份 zone_counts 自帶當天的 zone 依據可回溯
-    shutil.copyfile(
-        registry_path(bucket_path), output_dir / "camera_registry_used.yaml"
-    )
+    shutil.copyfile(registry_path(bucket_path), output_dir / REGISTRY_SNAPSHOT_FILENAME)
 
     logger.info(
-        "Zone 人流統計已寫入 %s（%d 台攝影機、共 %d 列時段×區域）。",
-        counts_path,
-        len(zone_cameras),
-        result.height,
+        "Zone 人流統計已寫入",
+        path=str(counts_path),
+        cameras=len(zone_cameras),
+        rows=result.height,
     )
     return counts_path
-
-
-def run_zone_map() -> None:
-    """`zone-mapping` 的進入點：從 `config.toml` 取參數後呼叫 `map_zones_daily`。
-
-    Raises:
-        ValueError: `config.toml` 的 `[input].date` 未設定。
-    """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-    if settings.input.date is None:
-        raise ValueError("config.toml 的 [input].date 未設定，請指定要分析的日期。")
-
-    map_zones_daily(
-        date=settings.input.date,
-        bucket_dir=settings.input.bucket_dir,
-        bucket_minutes=settings.zone.bucket_minutes,
-        entry_debounce_frames=settings.zone.entry_debounce_frames,
-    )
-
-
-if __name__ == "__main__":
-    run_zone_map()
