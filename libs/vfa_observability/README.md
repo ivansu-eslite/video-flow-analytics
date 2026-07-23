@@ -1,7 +1,7 @@
-# vfa-observability
+# vfa_observability
 
-輸出單行 JSON log 的 `StructuredLogger`，由 `video-analyze`／`zone-mapping`／`flow-report`
-三包共用（`video-analyze` 於 issue #50 的 DDD 重構一併改用）。
+輸出單行 JSON log 的 `StructuredLogger`，由 `video_analyze`／`zone_mapping`／`flow_report`
+三包共用（`video_analyze` 於 issue #50 的 DDD 重構一併改用）。
 
 ## 內容
 
@@ -17,10 +17,10 @@
 ## 使用方式
 
 ```toml
-dependencies = ["vfa-observability"]
+dependencies = ["vfa_observability"]
 
 [tool.uv.sources]
-vfa-observability = { path = "../libs/vfa-observability", editable = true }
+vfa_observability = { workspace = true }
 ```
 
 ```python

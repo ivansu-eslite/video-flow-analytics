@@ -1,4 +1,4 @@
-# video-analyze
+# video_analyze
 
 多路離線影片的偵測與追蹤：以「一天」為單位，讀取多路攝影機的錄影片段，用 YOLO
 （CrowdHuman 微調權重，僅偵測 `fbody` 完整人體）搭配 ByteTrack 做多路追蹤，產出每格的
@@ -20,7 +20,7 @@
 | 類別 | 需求 |
 | --- | --- |
 | 執行環境 | Python `>= 3.12` |
-| 套件管理 | [uv](https://docs.astral.sh/uv/)（安裝與執行皆透過 uv，本套件附 `uv.lock`） |
+| 套件管理 | [uv](https://docs.astral.sh/uv/)（安裝與執行皆透過 uv，整個 workspace 共用單一 root `uv.lock`） |
 | GPU | 選用。以 `torch.cuda.is_available()` 判斷，無 GPU 時 fallback 到 CPU（明顯變慢） |
 | 系統相依 | FFmpeg / 影像編解碼器（OpenCV 解 `mkv` 等格式）；`lap` 為 C 擴充，環境無對應 wheel 時需要編譯工具鏈 |
 
@@ -35,11 +35,11 @@
 | `numpy` | 影格與追蹤結果的陣列運算 |
 | `polars` / `pyarrow` | 追蹤明細 parquet 寫出 |
 | `pydantic` / `pydantic-settings` | 設定與 registry 的資料模型與驗證；`config.toml`＋環境變數載入 |
-| `pyyaml` | `vfa-registry` 讀 `camera_registry.yaml` 用；本包不直接 import，pin 在此是為了與 lib 對齊版本（見根 CLAUDE.md）|
-| `vfa-registry` | 共用 lib：`camera_registry.yaml` 的模型（path 依賴）|
-| `vfa-observability` | 共用 lib：`StructuredLogger` 結構化 JSON log（path 依賴）|
+| `pyyaml` | `vfa_registry` 讀 `camera_registry.yaml` 用；本包不直接 import，pin 在此是為了與 lib 對齊版本（見根 CLAUDE.md）|
+| `vfa_registry` | 共用 lib：`camera_registry.yaml` 的模型（workspace 成員）|
+| `vfa_observability` | 共用 lib：`StructuredLogger` 結構化 JSON log（workspace 成員）|
 
-依賴版本以 `==` 釘住並附 `uv.lock`，固定推理堆疊。
+依賴版本以 `==` 釘住，固定推理堆疊。
 
 **模型權重**：`config.toml` 的 `model_path`（預設
 `20260714-153811_yolo26m_baseline.pt`，CrowdHuman 微調權重）指向的權重檔不進版控
@@ -53,7 +53,7 @@ mAP50≈0.806、recall≈0.72、precision≈0.847。
 ## 安裝與執行
 
 ```bash
-uv sync --project video-analyze
+uv sync --package video_analyze
 ```
 
 準備下列輸入後即可執行：
@@ -63,13 +63,13 @@ uv sync --project video-analyze
 2. 本套件根目錄的 `config.toml`（指定要跑哪個 bucket、哪一天、哪些攝影機與各項參數）。
 
 ```bash
-uv run --project video-analyze video-analyze
+uv run --package video_analyze video_analyze
 ```
 
 此命令不接受任何旗標，所有參數都讀自 `config.toml`。
 
 > **於倉庫根目錄執行**：`bucket_dir`、輸出根目錄 `outputs/` 與 `model_path` 皆為 **cwd
-> 相對路徑**，`uv run --project` 不改變 cwd。本套件自己的 `config.toml` 則以
+> 相對路徑**，`uv run --package` 不改變 cwd。本套件自己的 `config.toml` 則以
 > `find_project_root`（往上找 `pyproject.toml`）定位，不受 cwd 影響。
 
 ## 設定
@@ -215,7 +215,7 @@ bucket 呼叫。
 
 ### 模組結構
 
-`src/video_analyze/` 依 DDD 分層（與 `flow-report`／`zone-mapping` 及 argus 慣例對齊），
+`src/video_analyze/` 依 DDD 分層（與 `flow_report`／`zone_mapping` 及 argus 慣例對齊），
 依賴方向單向、無循環：
 
 | 模組 | 職責 |
@@ -235,12 +235,12 @@ bucket 呼叫。
 | `services/visualization.py` | `TrackAnnotator`，畫追蹤框 |
 
 I/O 邊界（讀寫檔、子進程、影像編解碼、繪圖）依 argus 慣例一律放 `services/`，不另立
-頂層 adapter/io 層。log 用共用 lib `vfa-observability` 的 `StructuredLogger`
+頂層 adapter/io 層。log 用共用 lib `vfa_observability` 的 `StructuredLogger`
 （`from vfa_observability import StructuredLogger`），輸出單行 JSON。
 
 `camera_registry.yaml` 的 `CameraRegistry` / `CameraEntry` 由三包共用的
-[libs/vfa-registry](../libs/vfa-registry) 提供（`from vfa_registry import load_registry`），
-以 path 依賴引用、不在本包內。本包不呼叫 `parse_and_validate_zones`，zone 幾何不會被驗證。
+[libs/vfa_registry](../libs/vfa_registry) 提供（`from vfa_registry import load_registry`），
+以 workspace 成員引用。本包不呼叫 `parse_and_validate_zones`，zone 幾何不會被驗證。
 
 ### 多進程 pipeline
 
@@ -271,9 +271,11 @@ I/O 邊界（讀寫檔、子進程、影像編解碼、繪圖）依 argus 慣例
 ## 開發
 
 ```bash
-uv run --directory video-analyze ruff check .   # lint（line-length = 100，select = ["E", "F", "I", "W"]）
-uv run --directory video-analyze pytest         # 執行測試
+uv run --directory video_analyze ruff check .   # lint（line-length = 100，select = ["E", "F", "I", "W"]）
+uv run --directory video_analyze pytest         # 執行測試
 ```
 
-此處用 `--directory`（切換 cwd 進 `video-analyze/`）而非執行分析時的 `--project`，
-pytest 才會收集到本套件的 `tests/`。
+此處用 `--directory`（切換 cwd 進 `video_analyze/`）而非執行分析時的 `--package`：
+`--package` 不會改變 cwd，pytest 會從 repo 根遞迴收集到全部套件的 `tests/`，因三包皆有
+同名測試檔（如 `test_config.py`）而撞名衝突報錯；`--directory` 才會讓 pytest 只解析
+本套件自己的 `tests/`。

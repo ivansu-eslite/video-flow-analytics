@@ -1,11 +1,9 @@
 [project]
-name = "vfa-observability"
+name = "vfa_observability"
 version = "0.1.0"
 description = "Shared structured logging (JSON lines) for video-flow-analytics"
 readme = "README.md"
 requires-python = ">=3.12"
-# pydantic pin 成與消費套件一致（理由同 vfa-registry）：`_normalize_log_value` 用
-# `BaseModel.model_dump` 把 model 轉成 JSON-safe 值。
 dependencies = [
     "pydantic==2.13.4",
 ]
