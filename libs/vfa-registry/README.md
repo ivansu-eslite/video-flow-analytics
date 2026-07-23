@@ -16,8 +16,8 @@
 
 ## 使用方式
 
-三包以 path 依賴（editable）引用，不經 uv workspace（理由見 repo 根 `CLAUDE.md`
-「三包共用碼的處理方式」）：
+各消費套件以 path 依賴（editable）引用，不經 uv workspace——每個消費套件因此保留獨立的
+`.venv`／`uv.lock`，重依賴不跨包外溢：
 
 ```toml
 dependencies = ["vfa-registry"]
@@ -30,12 +30,14 @@ vfa-registry = { path = "../libs/vfa-registry", editable = true }
 from vfa_registry import CameraRegistry, load_registry, parse_and_validate_zones
 ```
 
-依賴版本（`pydantic`／`pyyaml`）與三個消費套件 pin 成一致；改版時三處要一起改，
+依賴版本（`pydantic`／`pyyaml`）與各消費套件 pin 成一致；改版時消費端要一起改，
 否則消費端解析 lock 會撞版本衝突。
 
 ## 測試
 
+在本 lib 目錄下執行：
+
 ```bash
-uv run --directory libs/vfa-registry pytest
-uv run --directory libs/vfa-registry ruff check .
+uv run pytest
+uv run ruff check .
 ```
