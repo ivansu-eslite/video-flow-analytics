@@ -1,11 +1,11 @@
 [input]
 # bucket_dir／outputs 皆為 cwd 相對路徑：一律以
-# `uv run --project flow-report flow-report` 在 repo 根執行（見 README）。
+# `uv run --package flow_report flow_report` 在 repo 根執行（見 README）。
 bucket_dir = "bucket_name1" # 本機模擬 GCS bucket 的根目錄
 date = 2026-05-01           # 開發時指定的彙總日期；正式呼叫端可直接以參數呼叫 export_report_daily
 
 [zone]
-# 上游 zone_counts.parquet 的時段粒度，須與 zone-mapping/config.toml 的同名欄位一致；
+# 上游 zone_counts.parquet 的時段粒度，須與 zone_mapping/config.toml 的同名欄位一致；
 # report.period_minutes 必須是它的倍數。
 bucket_minutes = 60
 

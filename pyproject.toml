@@ -1,0 +1,2 @@
+[tool.uv.workspace]
+members = ["video_analyze", "zone_mapping", "flow_report", "libs/*"]

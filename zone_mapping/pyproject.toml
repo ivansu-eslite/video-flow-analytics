@@ -1,10 +1,10 @@
 [project]
-name = "zone-mapping"
+name = "zone_mapping"
 version = "0.1.0"
 description = "Zone occupancy stats from tracking results (CPU-only, vectorized)"
 readme = "README.md"
 requires-python = ">=3.12"
-# 版本 pin 成與 golden 產生時（root uv.lock）相同：影響輸出格式的 polars/pyarrow 與
+# 版本 pin 成與 golden 產生時相同：影響輸出格式的 polars/pyarrow 與
 # 影響數值判定的 numpy 逐一對齊，讓 golden 比對只反映「拆分是否改動邏輯」，排除
 # 函式庫版本漂移這個變數。刻意不含 torch/ultralytics/opencv/openpyxl——依賴面收斂
 # 是拆包的主要成果。
@@ -15,19 +15,16 @@ dependencies = [
     "pydantic==2.13.4",
     "pydantic-settings[toml]==2.14.2",
     "pyyaml==6.0.3",
-    "vfa-observability",
-    "vfa-registry",
+    "vfa_observability",
+    "vfa_registry",
 ]
 
-# 共用 lib 以 path 依賴（editable）引用、不經 uv workspace：三包各自保留獨立的
-# uv.lock 與 .venv，video-analyze 的 torch 才不會外溢；理由詳見 repo 根 CLAUDE.md
-# 「三包共用碼的處理方式」。
 [tool.uv.sources]
-vfa-observability = { path = "../libs/vfa-observability", editable = true }
-vfa-registry = { path = "../libs/vfa-registry", editable = true }
+vfa_observability = { workspace = true }
+vfa_registry = { workspace = true }
 
 [project.scripts]
-zone-mapping = "zone_mapping.main:main"
+zone_mapping = "zone_mapping.main:main"
 
 [build-system]
 requires = ["uv_build>=0.11.14,<0.12.0"]

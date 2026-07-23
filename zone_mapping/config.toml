@@ -1,6 +1,6 @@
 [input]
 # bucket_dir／outputs 皆為 cwd 相對路徑：一律以
-# `uv run --project zone-mapping zone-mapping` 在 repo 根執行（見 README）。
+# `uv run --package zone_mapping zone_mapping` 在 repo 根執行（見 README）。
 bucket_dir = "bucket_name1" # 本機模擬 GCS bucket 的根目錄
 date = 2026-05-01           # 開發時指定的分析日期；正式呼叫端可直接以參數呼叫 map_zones_daily
 

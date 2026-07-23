@@ -1,12 +1,9 @@
 [project]
-name = "vfa-registry"
+name = "vfa_registry"
 version = "0.1.0"
 description = "Shared camera_registry.yaml models and zone validation for video-flow-analytics"
 readme = "README.md"
 requires-python = ">=3.12"
-# 版本 pin 成與各消費套件相同：各消費套件各自解析自己的 uv.lock，本 lib 的 pydantic/pyyaml
-# 若與消費端要求的版本不同，會在該包的解析階段撞版本衝突。逐一對齊是讓各消費端的 lock
-# 收斂到同一組版本的唯一機制（刻意不用 uv workspace）。
 dependencies = [
     "pydantic==2.13.4",
     "pyyaml==6.0.3",
