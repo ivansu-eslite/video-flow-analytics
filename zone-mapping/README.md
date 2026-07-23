@@ -154,39 +154,3 @@ uv run --directory zone-mapping pytest         # 執行測試
 > 測試的 cwd 要求與執行 CLI 相反：這裡用 `--directory`（會 chdir 進 `zone-mapping/`），
 > 讓 pytest 的 rootdir 解析到本套件；測試本身不碰 `bucket_dir` 與 `outputs/`。
 > 等價寫法：`uv run --project zone-mapping pytest zone-mapping/tests`。
-
-## golden sample 驗證
-
-用一份固定的輸入重跑本階段，確認改動沒有改變輸出。輸入與期望輸出放在 GCS
-（`gs://eslite-minority-report-dev-argus-data-storage`，base `reference/golden_samples/`），
-**不進版控**：
-
-| 角色 | 檔案 | 路徑（base 之下） |
-| --- | --- | --- |
-| inputs | `tracking_results.parquet`、`camera_registry.yaml` | `zone_mapping/inputs/2026-05-01/` |
-| expected | `zone_counts.parquet`、`camera_registry_used.yaml` | `zone_mapping/expected/2026-05-01/` |
-
-拉到本機後重跑並逐 byte 比對（`zone_counts.parquet` 經 `time_bucket` 聚合後可重現，
-同一份輸入重跑必得相同 bytes）：
-
-```bash
-W=/tmp/zm-golden   # 任一暫存目錄；輸出會落在這裡，不污染倉庫
-B=gs://eslite-minority-report-dev-argus-data-storage/reference/golden_samples/zone_mapping
-
-mkdir -p "$W/bucket_name1" "$W/outputs/bucket_name1/2026-05-01"
-gcloud storage cp "$B/inputs/2026-05-01/tracking_results.parquet" "$W/outputs/bucket_name1/2026-05-01/"
-gcloud storage cp "$B/inputs/2026-05-01/camera_registry.yaml" "$W/bucket_name1/"
-gcloud storage cp "$B/expected/2026-05-01/zone_counts.parquet" "$W/expected.parquet"
-
-cd "$W" && INPUT__BUCKET_DIR=bucket_name1 INPUT__DATE=2026-05-01 \
-  uv run --project <倉庫路徑>/zone-mapping zone-mapping
-cmp "$W/outputs/bucket_name1/2026-05-01/zone_counts.parquet" "$W/expected.parquet"
-```
-
-`OUTPUT_ROOT` 與 `bucket_dir` 是 cwd 相對路徑，故在 `$W` 下執行會讓輸入輸出都落在 `$W`；
-`config.toml` 由 `find_project_root` 定位，不受 cwd 影響。上面用環境變數指定 bucket 與
-日期，讓這段步驟不依賴 `config.toml` 當下的值（本機改過設定也照樣重現得出來）。
-
-**各階段的 golden sample 各自獨立，不可跨階段串接比對。** 本階段的輸入是完整
-`tracking_results.parquet` 的一段切片，產出的 `zone_counts.parquet` 與下游 `flow-report`
-所用的輸入雖然同名，內容並不相同——拿本階段的產出去比對下游的 golden 會得到無意義的差異。
