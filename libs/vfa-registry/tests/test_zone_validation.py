@@ -1,8 +1,8 @@
 """zone 幾何與名稱唯一性的驗證。
 
-這幾條規則的編輯點在本 lib，但先前只有消費套件的測試會間接碰到；改壞了跑
-`uv run --directory libs/vfa-registry pytest` 仍會全綠，要跑到 flow-report／
-zone-mapping 才會爆。故在 lib 內直接釘住。
+這幾條規則的編輯點在本 lib，但先前本 lib 沒有直接測試、只有消費套件的測試會間接
+碰到；改壞了單獨跑本 lib 的測試仍會全綠，要跑到消費套件（flow-report／zone-mapping）
+才會爆。故在 lib 內直接釘住。
 """
 
 import pytest
