@@ -109,6 +109,28 @@ def test_band_still_counts_crossing_larger_than_band():
     assert _totals(result) == (1, 0)
 
 
+def test_band_boundary_distance_stays_in_dead_zone():
+    # 邊界鎖：腳底恰在 d == band（y=7 → d=+3）時屬死區、不確認側別，committed 沿用
+    # 前一格的外側（y=20 → d=-10）→ 不產生跨越。守護 `> band`（而非 `>= band`）：
+    # 改成 >= 會把邊界點誤判為內側而多算一次 in。
+    result = count_line_crossings(
+        _make_cam_sub([(10, 20), (10, 7)]), _LINE, crossing_band_px=3
+    )
+    assert _totals(result) == (0, 0)
+
+
+def test_forward_fill_carries_side_through_multi_frame_dead_zone():
+    # hysteresis 鎖：跨越途中連續 2 格落在死區（y=9 → d=+1 < band=3）才落定對側，
+    # forward_fill 讓死區沿用前一個已確認側別，最終仍正確判為一次 in。拿掉
+    # forward_fill 會讓 committed 在死區變 null、經 shift 汙染 _prev，使跨越被靜默漏計。
+    result = count_line_crossings(
+        _make_cam_sub([(10, 20), (10, 9), (10, 9), (10, 0)]),
+        _LINE,
+        crossing_band_px=3,
+    )
+    assert _totals(result) == (1, 0)
+
+
 def test_multiple_tracks_and_buckets_aggregate_separately():
     # 兩個 track 各穿越一次（一進一出），time_bucket 相同 → 聚合為 in=1、out=1
     cam = pl.concat(
