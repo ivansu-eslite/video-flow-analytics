@@ -81,8 +81,10 @@ def count_line_crossings(
     以「帶死區的 Schmitt-trigger」偵測跨越：帶號距離 `d > band` 判內側（`+1`）、
     `d < -band` 判外側（`-1`）、落在 `[-band, band]` 帶內為死區（沿用前一個已確認
     側別，hysteresis）。committed 側別翻轉即一次跨越——翻到內側計 `in`、翻到外側計
-    `out`；track 起始就在某側（前一格為 null）不計，語意同 zone-mapping「起始就在
-    區內不算 entry」。`crossing_band_px = 0` 時死區退化為單點，等同幾何零交越。
+    `out`；track 起始就在某側（前一格為 null）本身不算跨越（注意：這一點與
+    `zone_mapping` **相反**——`zone_mapping` 首次即在區內會算一次 entry；計數線只認
+    「側別翻轉」，起始側不構成翻轉）。`crossing_band_px = 0` 時死區退化為單點，等同
+    幾何零交越。
 
     Args:
         cam_sub: 單一攝影機的追蹤明細，需已含 `foot_x`／`foot_y`／
