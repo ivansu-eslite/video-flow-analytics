@@ -1,0 +1,9 @@
+[input]
+# bucket_dir／outputs 皆為 cwd 相對路徑：一律以
+# `uv run --package line_counting line_counting` 在 repo 根執行（見 README）。
+bucket_dir = "bucket_name1" # 本機模擬 GCS bucket 的根目錄
+date = 2026-05-01           # 開發時指定的分析日期；正式呼叫端可直接以參數呼叫 count_lines_daily
+
+[line]
+bucket_minutes = 60   # 進出人數統計的時段粒度（分鐘）
+crossing_band_px = 0  # 跨越去抖的帶狀死區寬度（像素）；0 = 細線純零交越，調高可濾掉門口駐留抖動

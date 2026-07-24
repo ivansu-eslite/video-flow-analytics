@@ -1,2 +1,2 @@
 [tool.uv.workspace]
-members = ["video_analyze", "zone_mapping", "flow_report", "libs/*"]
+members = ["video_analyze", "zone_mapping", "line_counting", "flow_report", "libs/*"]
