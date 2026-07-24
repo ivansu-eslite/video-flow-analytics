@@ -28,3 +28,12 @@ def test_registry_accepts_participation_field():
     assert by_id["cam_a"].zones == [
         {"name": "zone_a", "polygon": [[0, 0], [10, 0], [10, 10]]}
     ]
+    # lines 同樣以原始 list[Any] 保留：共用模型在 extra="forbid" 下相容含 lines: 的
+    # yaml（四包讀同一份實體檔案），幾何驗證延後到 parsed_lines()。
+    assert by_id["cam_c"].lines == [
+        {
+            "name": "front_door",
+            "points": [[100, 400], [300, 380]],
+            "inside_point": [200, 200],
+        }
+    ]
