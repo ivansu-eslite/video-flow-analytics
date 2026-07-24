@@ -1,0 +1,47 @@
+[project]
+name = "line_counting"
+version = "0.1.0"
+description = "Directional line-crossing in/out counts from tracking results (CPU-only, vectorized)"
+readme = "README.md"
+requires-python = ">=3.12"
+# 版本 pin 成與 zone_mapping 一致：影響輸出格式的 polars/pyarrow 與影響數值判定的
+# numpy 逐一對齊，讓輸出差異只反映邏輯改動，排除函式庫版本漂移這個變數（單一 root
+# uv.lock 下由 uv lock 把關）。刻意不含 torch/ultralytics/opencv/openpyxl——依賴面
+# 收斂是拆包的主要成果。
+dependencies = [
+    "numpy==2.5.0",
+    "polars==1.42.0",
+    "pyarrow==24.0.0",
+    "pydantic==2.13.4",
+    "pydantic-settings[toml]==2.14.2",
+    "pyyaml==6.0.3",
+    "vfa_observability",
+    "vfa_registry",
+]
+
+[tool.uv.sources]
+vfa_observability = { workspace = true }
+vfa_registry = { workspace = true }
+
+[project.scripts]
+line_counting = "line_counting.main:main"
+
+[build-system]
+requires = ["uv_build>=0.11.14,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.20",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
