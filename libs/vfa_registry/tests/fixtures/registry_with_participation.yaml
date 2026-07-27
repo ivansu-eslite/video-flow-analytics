@@ -26,3 +26,14 @@ cameras:
     ip: 192.168.0.12
     participates_in_zone_mapping: false
     zones: []
+  # cam_c 帶 lines:（line-counting 用）——驗證共用模型在 extra="forbid" 下能相容
+  # 含計數線的 yaml，且 lines 以原始 list[Any] 保留、不在載入時驗證幾何。
+  - camera_id: cam_c
+    location: loc3
+    ip: 192.168.0.13
+    lines:
+      - name: front_door
+        points:
+          - [100, 400]
+          - [300, 380]
+        inside_point: [200, 200]
