@@ -96,6 +96,7 @@ def count_lines_daily(
             ).with_columns(
                 pl.lit(camera_id).alias("camera_id"),
                 pl.lit(line.name).alias("line"),
+                pl.lit(line.line_group).alias("line_group"),
             )
             frames.append(counts)
 
@@ -103,7 +104,7 @@ def count_lines_daily(
         result = (
             pl.concat(frames)
             .select(list(LINE_COUNTS_SCHEMA))
-            .sort("camera_id", "line", "time_bucket")
+            .sort("line_group", "camera_id", "line", "time_bucket")
         )
     else:
         result = pl.DataFrame(schema=LINE_COUNTS_SCHEMA)

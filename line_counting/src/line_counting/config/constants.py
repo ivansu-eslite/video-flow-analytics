@@ -21,6 +21,7 @@ TMP_SUFFIX = ".tmp"
 # 空輸出也寫出正確 schema 的 parquet；time_bucket tz 沿用 timestamp——上游
 # tracking_results.parquet 的 timestamp 已是台北在地時間，見 README 的檔案契約
 LINE_COUNTS_SCHEMA = {
+    "line_group": pl.Utf8,
     "camera_id": pl.Utf8,
     "line": pl.Utf8,
     "time_bucket": pl.Datetime("us", "Asia/Taipei"),

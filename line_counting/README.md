@@ -150,6 +150,7 @@ lines:
   - name: "front_door"                          # 全域唯一（比照 zone）
     points: [[100, 400], [300, 380], [500, 400]]  # polyline，>= 2 頂點；固定解析度像素座標
     inside_point: [300, 200]                    # 場內一點；跨越往這側 = in
+    line_group: "mall_main_entrance"            # 這條線所屬的範圍（可跨攝影機同名）
 ```
 
 與本階段相關的使用限制（皆為 fail-loud，違反時直接報錯）：
@@ -158,6 +159,8 @@ lines:
   覆蓋其中一筆攝影機，載入 registry 時即擋下。
 - **`line` 名稱須全域唯一**：不只同一攝影機內不可重複，跨攝影機也不可重複（下游報表以
   計數線名稱、不含 `camera_id` 分組彙總，同名計數線會被合併）。
+- **`line_group` 必填，但刻意不驗證跨攝影機唯一**——與 `name` 的規則相反，見下方
+  「`line_group`：一個範圍的所有出入口」。
 - **`points` 至少需要 2 個頂點**（polyline），且不可有零長度段（連續重複頂點）；座標為
   該攝影機固定解析度下的像素座標。
 - **`inside_point` 不可落在任一段的無限延伸線上**：否則該段的側別無法定號、方向判定失效。
@@ -165,6 +168,23 @@ lines:
   移除其 `lines`（不另設參與旗標）。
 - **定義了計數線的攝影機在當日追蹤明細中必須有資料**：攝影機改名或 key 打錯時直接報錯，
   而非靜默算出漏掉出入口的進出人數。
+
+### `line_group`：一個範圍的所有出入口
+
+要統計的對象常是「一個範圍的進出」（例如一個賣場、一個樓層），而這種範圍通常不只一個
+出入口，還可能分屬不同攝影機。`line_group` 標示一條計數線屬於哪個範圍，讓
+`line_counts.parquet` 的每一列都帶著這個維度，供後續彙總依據——**本階段只輸出這個
+標示，不在 `line_counting` 產生範圍層級的加總數字**，那是後續任務的功能。
+
+與 `line` 名稱相反，**`line_group` 允許、也預期會跨攝影機同名**：一個賣場的數個門本來
+就分屬不同攝影機，要能歸成同一組（見 [ADR-002](../docs/adr/002-line-group-semantics.md)）。
+
+**使用前提（程式不驗證，需配置時自行保證）**：一個範圍的進出是把該範圍各出入口的
+`in`／`out` 相加，這只有在**每個出入口的 `inside_point` 都指向該範圍的內側**時才成立。
+某個門的 `inside_point` 指反了，從那個門進來的人會被記成 `out`，加總後同時少算進、
+多算出，且不會有任何錯誤訊息——`vfa_registry` 驗不出這件事，它只知道 `inside_point`
+不能落在線段的延伸線上，無從得知哪一側才是「這個範圍的內側」。標註頁會在每條線上畫出
+「進」方向的箭頭，配置同一群組的線時可用它確認箭頭是否都朝向範圍內側。
 
 計數線幾何在載入 registry 時刻意不驗證，而是先確認攝影機對得上當日資料、再解析幾何，讓
 「攝影機對不上」這個更根本的錯誤先報出來，不被計數線定義的筆誤蓋過。
@@ -177,7 +197,7 @@ lines:
 | --- | --- | --- |
 | `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯 |
 | `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與計數線幾何 |
-| `outputs/{bucket}/{date}/line_counts.parquet` | 寫 | 每時段每計數線進出人數，欄位 `camera_id` / `line` / `time_bucket` / `in_count` / `out_count` |
+| `outputs/{bucket}/{date}/line_counts.parquet` | 寫 | 每時段每計數線進出人數，欄位 `line_group` / `camera_id` / `line` / `time_bucket` / `in_count` / `out_count` |
 | `outputs/{bucket}/{date}/camera_registry_used.yaml` | 寫 | 本次套用的 `camera_registry.yaml` 快照，供下游以「產生此份資料時的定義」為準做驗證 |
 
 **時區**：`tracking_results.parquet` 的 `timestamp` 已是台北在地時間（`Asia/Taipei`），
