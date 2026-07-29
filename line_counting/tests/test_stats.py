@@ -8,6 +8,7 @@ from vfa_registry import Line
 
 from line_counting.services.stats import (
     count_line_crossings,
+    segment_crosses_polyline,
     signed_distance_to_polyline,
     validate_line_cameras,
 )
@@ -161,6 +162,87 @@ def test_multiple_lines_do_not_pollute_each_other():
     cam = _make_cam_sub([(10, 20), (10, 0)])
     assert _totals(count_line_crossings(cam, door)) == (1, 0)
     assert _totals(count_line_crossings(cam, far)) == (0, 0)
+
+
+# --- 有限線段閘門（ADR-003）：線的長度是實質判準 ---
+
+
+@pytest.mark.parametrize("band", [0, 3])
+@pytest.mark.parametrize("x", [25, 5000])
+def test_walking_past_beyond_the_endpoints_is_not_counted(x, band):
+    # 線只有 x=0..20：在端點之外（擦邊的 x=25 與極遠的 x=5000）由 y=20 走到 y=0，
+    # 側別確實會翻轉（側別是最近段的無限直線定的），但沒穿過線段本體 → 不計數
+    result = count_line_crossings(
+        _make_cam_sub([(x, 20), (x, 0)]), _LINE, crossing_band_px=band
+    )
+    assert _totals(result) == (0, 0)
+
+
+def test_leaving_around_the_endpoint_then_entering_through_the_door_counts_once():
+    # 由內側繞過端點外出（翻轉但沒穿過線段 → 不計），再從門口正面進場（計 1 in）。
+    # 閘門若寫成「整條 track 有穿過就放行」，繞出去那次也會被算成 out。
+    result = count_line_crossings(
+        _make_cam_sub([(10, 0), (25, 0), (25, 20), (10, 20), (10, 0)]), _LINE
+    )
+    assert _totals(result) == (1, 0)
+
+
+def test_collinear_displacement_outside_segment_is_not_an_intersection():
+    # 判別式鎖：退化檢查必須是「d == 0 且落在 bounding box 內」，不可把 proper 相交
+    # 直接放寬成 `<=`。沿著線的延伸方向在端點外走（共線但不重疊）、以及靜止站在
+    # 端點外，放寬成 `<=` 都會誤判為相交；只有真的踩在線段上才算。
+    points = np.asarray(_LINE.points, dtype=float)
+    hit = segment_crosses_polyline(
+        np.array([25.0, 25.0, 10.0]),
+        np.array([10.0, 10.0, 10.0]),
+        np.array([30.0, 25.0, 10.0]),
+        np.array([10.0, 10.0, 10.0]),
+        points,
+    )
+    assert hit.tolist() == [False, False, True]
+
+
+@pytest.mark.parametrize("band", [0, 3])
+def test_diagonal_crossing_counts_even_when_previous_frame_is_beyond_the_endpoint(band):
+    # 防過度修正：斜穿門，穿越前一格 (25,20) 的垂足已落在線段之外（夾到端點），
+    # 但位移線段在 x=17.5 真的穿過線段本體 → 仍計 1 in。
+    # 「逐格垂足有效性閘門」會在這裡漏算，事件級閘門不會。
+    result = count_line_crossings(
+        _make_cam_sub([(25, 20), (10, 0)]), _LINE, crossing_band_px=band
+    )
+    assert _totals(result) == (1, 0)
+
+
+def test_dwelling_in_dead_zone_before_entering_still_counts():
+    # 防過度修正：外側接近 → 門口死區駐留數格 → 進場（band=3）。相交發生在死區內的
+    # 那一格，確認側別翻轉則晚好幾格才發生；閘門比對的是「上次確認側別以來」的累計
+    # 相交數，故仍計 1 in。門口駐留正是 ADR-001 引入 Schmitt-trigger 要解的情境。
+    result = count_line_crossings(
+        _make_cam_sub([(10, 20), (10, 11), (10, 9), (10, 9), (10, 0)]),
+        _LINE,
+        crossing_band_px=3,
+    )
+    assert _totals(result) == (1, 0)
+
+
+def test_entering_diagonally_from_outside_a_corner_of_a_u_shaped_line_counts():
+    # 防過度修正：ㄇ 形 barrier（三段包住 inside_point），人從左上轉角外的楔形區域
+    # 斜穿左段進場 → 計 1 in
+    line = Line(
+        name="u",
+        points=[(0, 0), (0, 20), (30, 20), (30, 0)],
+        inside_point=(15, 10),
+        line_group="g",
+    )
+    result = count_line_crossings(_make_cam_sub([(-10, 30), (10, 5)]), line)
+    assert _totals(result) == (1, 0)
+
+
+def test_stepping_exactly_on_the_line_counts():
+    # 防過度修正：位移端點恰落在線上（踩線走過）。d == 0 屬死區、不確認側別，
+    # 但兩段位移都被判為相交，落定內側時閘門放行 → 計 1 in
+    result = count_line_crossings(_make_cam_sub([(10, 20), (10, 10), (10, 0)]), _LINE)
+    assert _totals(result) == (1, 0)
 
 
 def test_validate_line_cameras_reports_value_error_when_data_cameras_has_none():
