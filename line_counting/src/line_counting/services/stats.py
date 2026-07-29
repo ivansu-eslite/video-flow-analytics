@@ -7,6 +7,11 @@
 判定「人在線的哪一側」用 bbox 腳底中心點 ((x1+x2)/2, y2) 到計數線的帶號垂直距離。
 跨越偵測用「帶死區的 Schmitt-trigger」：`crossing_band_px` 把細線加粗成帶狀死區，
 濾除腳底點在線附近的抖動／駐留；`= 0` 退化為細線純零交越。
+
+側別是用最近段的**無限直線**定的，因此側別翻轉本身無法分辨「穿過門」與「繞過門的
+兩端走過去」。翻轉之外另加一道**有限線段閘門**：自上一次確認側別以來，該 track 的
+逐格位移線段必須真的與計數線的有限線段相交過，才算一次跨越。線的長度因此是實質
+判準——標註時線要拉滿可通行寬度，見 ADR-003 與 README「已知限制」。
 """
 
 import numpy as np
@@ -71,6 +76,75 @@ def signed_distance_to_polyline(
     return signed[np.arange(p.shape[0]), nearest]
 
 
+def _cross2(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """2D 叉積的 z 分量 `u.x * v.y - u.y * v.x`；最後一軸為 `(x, y)`，其餘軸廣播。"""
+    return u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
+
+
+def _in_bbox(u: np.ndarray, v: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """`w` 是否落在以 `u`、`v` 為對角的軸對齊 bounding box 內（含邊界）。"""
+    return (
+        (np.minimum(u[..., 0], v[..., 0]) <= w[..., 0])
+        & (w[..., 0] <= np.maximum(u[..., 0], v[..., 0]))
+        & (np.minimum(u[..., 1], v[..., 1]) <= w[..., 1])
+        & (w[..., 1] <= np.maximum(u[..., 1], v[..., 1]))
+    )
+
+
+def segment_crosses_polyline(
+    x0: np.ndarray,
+    y0: np.ndarray,
+    x1: np.ndarray,
+    y1: np.ndarray,
+    points: np.ndarray,
+) -> np.ndarray:
+    """向量化：位移線段 `(x0, y0) → (x1, y1)` 是否與 polyline 的任一**有限**線段相交。
+
+    判別式是「proper 相交 ∪ 四個 on-segment 退化檢查」，兩邊都不能省：
+
+    - 只取 proper 相交（`d1*d2 < 0 且 d3*d4 < 0`），軌跡恰好通過 polyline 的彎折頂點
+      時會判 False（ㄇ／V 形門口的正常穿越就會漏算）。
+    - 直接把判別式放寬成 `<= 0`，共線但不重疊也會判 True——沿著線的延伸方向在端點外
+      走過（正是本函式要擋的情境）會誤判為相交。
+
+    退化檢查用精確 `== 0` 比較、不引入 epsilon：座標是像素浮點，精確共線實務上只在
+    合成資料出現。零長度位移（人靜止）因此只有真的站在線段上才算相交。
+
+    Args:
+        x0: 前一格的 x 座標，長度 N；track 首格無前一格，傳 `NaN`。
+        y0: 前一格的 y 座標，長度 N。
+        x1: 當前格的 x 座標，長度 N。
+        y1: 當前格的 y 座標，長度 N。
+        points: polyline 頂點座標，shape 為 `(M, 2)`，`M >= 2`。
+
+    Returns:
+        長度為 N 的 bool 陣列；座標含 `NaN`（track 首格）的列一律為 False。
+    """
+    p0 = np.column_stack([np.asarray(x0, dtype=float), np.asarray(y0, dtype=float)])
+    p1 = np.column_stack([np.asarray(x1, dtype=float), np.asarray(y1, dtype=float)])
+    pts = np.asarray(points, dtype=float)
+    a = pts[None, :-1, :]  # (1, S, 2) 各段起點
+    b = pts[None, 1:, :]  # (1, S, 2) 各段終點
+    q0 = p0[:, None, :]  # (N, 1, 2) 位移起點
+    q1 = p1[:, None, :]  # (N, 1, 2) 位移終點
+
+    # d1/d2：位移兩端相對「計數線該段」的側；d3/d4：該段兩端相對「位移線段」的側
+    d1 = _cross2(b - a, q0 - a)  # (N, S)
+    d2 = _cross2(b - a, q1 - a)
+    d3 = _cross2(q1 - q0, a - q0)
+    d4 = _cross2(q1 - q0, b - q0)
+
+    proper = (d1 * d2 < 0) & (d3 * d4 < 0)
+    touching = (
+        ((d1 == 0) & _in_bbox(a, b, q0))
+        | ((d2 == 0) & _in_bbox(a, b, q1))
+        | ((d3 == 0) & _in_bbox(q0, q1, a))
+        | ((d4 == 0) & _in_bbox(q0, q1, b))
+    )
+    finite = np.isfinite(p0).all(axis=1) & np.isfinite(p1).all(axis=1)  # (N,)
+    return np.any(proper | touching, axis=1) & finite
+
+
 def count_line_crossings(
     cam_sub: pl.DataFrame, line: Line, crossing_band_px: float = 0
 ) -> pl.DataFrame:
@@ -85,6 +159,12 @@ def count_line_crossings(
     `zone_mapping` **相反**——`zone_mapping` 首次即在區內會算一次 entry；計數線只認
     「側別翻轉」，起始側不構成翻轉）。`crossing_band_px = 0` 時死區退化為單點，等同
     幾何零交越。
+
+    翻轉之外還要過**有限線段閘門**：側別是最近段無限直線定的，繞過線的端點走過去
+    同樣會翻轉，故要求自上一次確認側別以來，該 track 的逐格位移線段至少與計數線的
+    有限線段相交過一次（`segment_crosses_polyline` 的累計數有增加）。閘門是事件級
+    而非逐格：逐格判「腳底垂足有沒有落在線段本體上」會讓門口死區駐留後進場漏算，
+    取捨見 ADR-003。
 
     Args:
         cam_sub: 單一攝影機的追蹤明細，需已含 `foot_x`／`foot_y`／
@@ -102,9 +182,24 @@ def count_line_crossings(
         line.inside_point,
     )
     band = crossing_band_px
-    z = (
+    # _d 逐列獨立故可在排序前算；_hit 依賴 track 內的前一格，必須排序後才算
+    ordered = (
         cam_sub.with_columns(pl.Series("_d", d))
         .sort("track_id", "timestamp")
+        .with_columns(
+            pl.col("foot_x").shift(1).over("track_id").cast(pl.Float64).alias("_px"),
+            pl.col("foot_y").shift(1).over("track_id").cast(pl.Float64).alias("_py"),
+        )
+    )
+    hit = segment_crosses_polyline(
+        ordered["_px"].to_numpy(),
+        ordered["_py"].to_numpy(),
+        ordered["foot_x"].to_numpy(),
+        ordered["foot_y"].to_numpy(),
+        np.asarray(line.points, dtype=float),
+    )
+    z = (
+        ordered.with_columns(pl.Series("_hit", hit))
         # 死區（帶內）留 null，交給 forward_fill 沿用前一個已確認側別
         .with_columns(
             pl.when(pl.col("_d") > band)
@@ -112,21 +207,33 @@ def count_line_crossings(
             .when(pl.col("_d") < -band)
             .then(-1)
             .otherwise(None)
-            .alias("_side")
+            .alias("_side"),
+            pl.col("_hit").cum_sum().over("track_id").alias("_cum"),
         )
         .with_columns(
-            pl.col("_side").forward_fill().over("track_id").alias("_committed")
+            pl.col("_side").forward_fill().over("track_id").alias("_committed"),
+            # 上一次確認側別的那一格當下的相交累計數
+            pl.when(pl.col("_side").is_not_null())
+            .then(pl.col("_cum"))
+            .otherwise(None)
+            .forward_fill()
+            .shift(1)
+            .over("track_id")
+            .alias("_last_conf_cum"),
         )
         .with_columns(
             pl.col("_committed").shift(1).over("track_id").alias("_prev")
         )
     )
 
-    # committed 側別翻轉 = 一次跨越；起始側（_prev 為 null）不算
+    # committed 側別翻轉 = 一次跨越；起始側（_prev 為 null）不算。翻轉還要通過有限
+    # 線段閘門：自上一次確認側別以來真的穿過線段（相交累計數有增加），否則是繞過
+    # 線的端點造成的翻轉，不計。
     crossings = z.filter(
         pl.col("_committed").is_not_null()
         & pl.col("_prev").is_not_null()
         & (pl.col("_committed") != pl.col("_prev"))
+        & (pl.col("_cum") > pl.col("_last_conf_cum"))
     )
     in_counts = (
         crossings.filter(pl.col("_committed") == 1)
