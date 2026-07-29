@@ -64,7 +64,8 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 
 影響整個 workspace 的技術決策記在 [docs/adr/](docs/adr/)（單一套件的決策才放
 `<package>/docs/adr/`）。目前有 ADR-001：`line_counting` 的計數線跨越判定方式，
-說明為什麼不能改成「整條線只有一個方向」。
+說明為什麼不能改成「整條線只有一個方向」；ADR-002：計數線群組（`line_group`）的語意，
+說明為何不驗證跨攝影機唯一。
 
 ### 四包共用碼的處理方式
 
@@ -110,6 +111,12 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 分組彙總，故 line 名稱跨攝影機也不可重複，由 `vfa_registry` 的 `parse_and_validate_lines`
 擋下——**即使當天不會產生報表，`line_counting` 本身也會擋下跨攝影機重複的 line 命名**
 （`flow_report` 對 line 的串接、對快照的同型驗證另開 issue，本次只做到 `line_counting`）。
+
+`Line` 另帶一個 `line_group` 欄位（issue #59），標示一條計數線屬於哪個範圍（例如同一
+賣場的數個出入口）。**`line_group` 是與上述規則刻意相反的例外**：跨攝影機同名不但不
+擋，還正是分組的用途——一個範圍的出入口本來就可能分屬不同攝影機。`line` 名稱本身仍全域
+唯一，故 `(line_group, line)` 組合天然唯一。取捨與「為何不能順手補上同型驗證」見
+[ADR-002](docs/adr/002-line-group-semantics.md)。
 
 ### 時區不變量（貫穿四包）
 

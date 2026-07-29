@@ -58,6 +58,10 @@ class Line(BaseModel):
         points: polyline 頂點清單，至少 2 個 `(x, y)` pixel 座標。
         inside_point: 場內一參考點 `(x, y)`；不可落在任一段的無限延伸線上（否則該段
             的側別無法定號）。
+        line_group: 這條計數線所屬的範圍名稱（例如同一賣場的數個出入口合起來構成
+            一個範圍）。**刻意不驗證跨攝影機唯一**——與 `name` 相反，同一
+            `line_group` 本來就該、也預期會出現在不同攝影機底下，這正是分組的用途。
+            見 `parse_and_validate_lines` 與 ADR-002。
 
     Raises:
         ValueError: `points` 頂點數少於 2、有零長度段（連續重複頂點），或
@@ -69,6 +73,7 @@ class Line(BaseModel):
     name: str
     points: list[tuple[float, float]]
     inside_point: tuple[float, float]
+    line_group: str
 
     @field_validator("points")
     @classmethod
@@ -287,6 +292,12 @@ def parse_and_validate_lines(entries: dict[str, CameraEntry]) -> dict[str, list[
     「計數線名稱跨攝影機也不可重複」這條規則來自下游報表依 line 名稱分組彙總、
     不含 camera_id：同名計數線會讓不同攝影機的進出人數被靜默合併成同一列。與
     `parse_and_validate_zones` 是同型驗證。
+
+    **`line_group` 刻意不做這道跨攝影機唯一驗證，這與上面的 `name` 規則相反**：
+    一個範圍（例如一個賣場）的數個出入口本來就分屬不同攝影機，要能歸成同一組，
+    跨攝影機同名 `line_group` 是分組的正常用途、不是錯誤。誤把 `name` 的驗證邏輯
+    「順手」套用到 `line_group` 會讓分組功能直接失效，且只有測試會發現。詳見
+    ADR-002。`line` 名稱本身仍全域唯一，故 `(line_group, name)` 的組合天然唯一。
 
     Args:
         entries: 已依需求篩選過（例如只留 `lines` 非空）的

@@ -35,5 +35,6 @@ def test_registry_accepts_participation_field():
             "name": "front_door",
             "points": [[100, 400], [300, 380]],
             "inside_point": [200, 200],
+            "line_group": "main_entrance",
         }
     ]

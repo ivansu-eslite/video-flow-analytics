@@ -13,7 +13,9 @@ from line_counting.services.stats import (
 )
 
 # 水平計數線 y=10（x=0..20），inside_point 在下方（y=0 側）：跨到下方 = in
-_LINE = Line(name="door", points=[(0, 10), (20, 10)], inside_point=(10, 0))
+_LINE = Line(
+    name="door", points=[(0, 10), (20, 10)], inside_point=(10, 0), line_group="g"
+)
 
 
 def _make_cam_sub(
@@ -75,7 +77,12 @@ def test_start_already_on_a_side_is_not_counted():
 
 def test_polyline_crossing_counts_and_directs_correctly():
     # V 形彎折 barrier，inside_point 在下方；由上方外側穿越彎折到內側：in=1
-    line = Line(name="v", points=[(0, 10), (10, 20), (20, 10)], inside_point=(10, 0))
+    line = Line(
+        name="v",
+        points=[(0, 10), (10, 20), (20, 10)],
+        inside_point=(10, 0),
+        line_group="g",
+    )
     result = count_line_crossings(_make_cam_sub([(10, 30), (10, 15), (10, 5)]), line)
     assert _totals(result) == (1, 0)
 
@@ -145,8 +152,12 @@ def test_multiple_tracks_and_buckets_aggregate_separately():
 
 def test_multiple_lines_do_not_pollute_each_other():
     # 同一份追蹤明細套兩條不同計數線，各自獨立統計；只跨越 door（y=10）、未及 far（y=100）
-    door = Line(name="door", points=[(0, 10), (20, 10)], inside_point=(10, 0))
-    far = Line(name="far", points=[(0, 100), (20, 100)], inside_point=(10, 0))
+    door = Line(
+        name="door", points=[(0, 10), (20, 10)], inside_point=(10, 0), line_group="g"
+    )
+    far = Line(
+        name="far", points=[(0, 100), (20, 100)], inside_point=(10, 0), line_group="g"
+    )
     cam = _make_cam_sub([(10, 20), (10, 0)])
     assert _totals(count_line_crossings(cam, door)) == (1, 0)
     assert _totals(count_line_crossings(cam, far)) == (0, 0)

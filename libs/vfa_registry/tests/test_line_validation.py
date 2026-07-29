@@ -15,13 +15,18 @@ _INSIDE = (10, 0)
 def test_line_rejects_polyline_with_fewer_than_two_vertices():
     """一個頂點構不成折線，無法定義任何線段。"""
     with pytest.raises(ValueError, match="至少需要 2 個頂點"):
-        Line(name="l", points=[(0, 10)], inside_point=_INSIDE)
+        Line(name="l", points=[(0, 10)], inside_point=_INSIDE, line_group="g")
 
 
 def test_line_rejects_zero_length_segment():
     """連續重複頂點造成零長度段，無法定號、也會讓距離計算除零。"""
     with pytest.raises(ValueError, match="零長度線段"):
-        Line(name="l", points=[(0, 10), (0, 10), (20, 10)], inside_point=_INSIDE)
+        Line(
+            name="l",
+            points=[(0, 10), (0, 10), (20, 10)],
+            inside_point=_INSIDE,
+            line_group="g",
+        )
 
 
 def test_line_rejects_inside_point_on_segment_extension():
@@ -31,16 +36,29 @@ def test_line_rejects_inside_point_on_segment_extension():
     退化成 0，方向（進/出）判定失效卻不報錯。
     """
     with pytest.raises(ValueError, match="延伸線"):
-        Line(name="l", points=[(0, 10), (20, 10)], inside_point=(50, 10))
+        Line(name="l", points=[(0, 10), (20, 10)], inside_point=(50, 10), line_group="g")
 
 
-def _entry(camera_id: str, line_names: list[str]) -> CameraEntry:
+def test_line_rejects_missing_line_group():
+    """`line_group` 為必填欄位，缺少時 fail-loud 並帶出該條線的原始定義。"""
+    with pytest.raises(ValueError, match="line_group"):
+        Line(name="l", points=_POINTS, inside_point=_INSIDE)
+
+
+def _entry(
+    camera_id: str, line_names: list[str], line_group: str = "group"
+) -> CameraEntry:
     return CameraEntry(
         camera_id=camera_id,
         location="loc",
         ip="127.0.0.1",
         lines=[
-            {"name": name, "points": _POINTS, "inside_point": _INSIDE}
+            {
+                "name": name,
+                "points": _POINTS,
+                "inside_point": _INSIDE,
+                "line_group": line_group,
+            }
             for name in line_names
         ],
     )
@@ -85,6 +103,22 @@ def test_parse_and_validate_lines_returns_parsed_lines_per_camera():
 def test_polyline_with_three_vertices_is_accepted():
     """彎折 polyline（≥ 3 頂點、凸向 inside_point）為合法定義。"""
     line = Line(
-        name="v", points=[(0, 10), (10, 20), (20, 10)], inside_point=(10, 0)
+        name="v",
+        points=[(0, 10), (10, 20), (20, 10)],
+        inside_point=(10, 0),
+        line_group="g",
     )
     assert len(line.points) == 3
+
+
+def test_parse_and_validate_lines_allows_same_line_group_across_cameras():
+    """`line_group` 跨攝影機同名是分組的正常用途，與 `name` 的規則刻意相反——
+    一個範圍（例如同一賣場）的數個出入口本來就分屬不同攝影機。見 ADR-002。"""
+    entries = {
+        "loc_cam001": _entry("cam001", ["door_a"], line_group="mall_entrance"),
+        "loc_cam002": _entry("cam002", ["door_b"], line_group="mall_entrance"),
+    }
+    result = parse_and_validate_lines(entries)
+
+    assert result["loc_cam001"][0].line_group == "mall_entrance"
+    assert result["loc_cam002"][0].line_group == "mall_entrance"
