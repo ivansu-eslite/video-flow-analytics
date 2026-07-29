@@ -178,13 +178,18 @@ def test_walking_past_beyond_the_endpoints_is_not_counted(x, band):
     assert _totals(result) == (0, 0)
 
 
-def test_leaving_around_the_endpoint_then_entering_through_the_door_counts_once():
-    # 由內側繞過端點外出（翻轉但沒穿過線段 → 不計），再從門口正面進場（計 1 in）。
-    # 閘門若寫成「整條 track 有穿過就放行」，繞出去那次也會被算成 out。
-    result = count_line_crossings(
+def test_going_around_the_endpoint_is_not_counted_before_or_after_a_real_crossing():
+    # 繞端點造成的翻轉不計，不論它發生在真正穿門之前或之後，兩種順序都只計那一次 in。
+    # 後者是閘門「事件級」的鎖：閘門若寫成「整條 track 有穿過就放行」（`_cum > 0`），
+    # 進門後再繞端點外出的那次翻轉會被放行而多算成 out=1。
+    around_then_through = count_line_crossings(
         _make_cam_sub([(10, 0), (25, 0), (25, 20), (10, 20), (10, 0)]), _LINE
     )
-    assert _totals(result) == (1, 0)
+    through_then_around = count_line_crossings(
+        _make_cam_sub([(10, 20), (10, 0), (25, 0), (25, 20)]), _LINE
+    )
+    assert _totals(around_then_through) == (1, 0)
+    assert _totals(through_then_around) == (1, 0)
 
 
 def test_collinear_displacement_outside_segment_is_not_an_intersection():
