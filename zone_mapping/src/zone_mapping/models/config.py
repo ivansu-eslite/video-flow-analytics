@@ -1,7 +1,8 @@
 import datetime
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -9,6 +10,8 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 from vfa_observability import StructuredLogger
+
+from zone_mapping.config.constants import DEFAULT_BOUNDARY_BAND_PX_1080P
 
 logger = StructuredLogger(component="config")
 
@@ -19,14 +22,38 @@ class ZoneConfig(BaseModel):
     Attributes:
         bucket_minutes: 人流統計的時段粒度（分鐘），time_bucket 依此在台北
             時間上向下取整。
-        entry_debounce_frames: 連續幾格都在區域內才算一次「進入」，用來濾除
-            邊界抖動；預設 1 = 不去抖。
+        boundary_band_px_1080p: entry 判定的區域邊界緩衝帶寬度，以 1080p
+            （寬 1920）為基準的像素值；執行時依各攝影機的 `frame_width` 換算成
+            實際像素。`0` = 純內外判定（每次跨越邊界都計），且 0 換算後仍是 0。
+            預設 25 取自實測（見 README「已知限制」）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     bucket_minutes: int = Field(default=60, ge=1)
-    entry_debounce_frames: int = Field(default=1, ge=1)
+    boundary_band_px_1080p: float = Field(
+        default=DEFAULT_BOUNDARY_BAND_PX_1080P, ge=0
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_entry_debounce_frames(cls, data: Any) -> Any:
+        """舊參數名 `entry_debounce_frames` 要報出「判定方式已換」，而非通用的未知欄位。
+
+        `extra="forbid"` 本來就會擋下舊名，但訊息只說不允許額外欄位，看不出時間去抖
+        已整個被空間緩衝帶取代；沿用舊設定的人需要知道原本的「連續格數」不能直接當成
+        新參數的值（單位由格數變成像素，且是 1080p 基準值）。`mode="before"` 先於
+        `extra="forbid"` 觸發，toml 與環境變數兩條路徑都會走到這裡。
+        """
+        if isinstance(data, dict) and "entry_debounce_frames" in data:
+            raise ValueError(
+                "[zone] 的 entry_debounce_frames 已移除：entry 判定改用區域邊界"
+                "緩衝帶（boundary_band_px_1080p），不再用「連續 N 格都在區內」的"
+                "時間去抖。新參數的單位是以 1080p（寬 1920）為基準的像素，執行時依"
+                "各攝影機的影像寬度換算（1920 → ×1、3840 → ×2），原本的格數不可"
+                "直接沿用。見 ADR-006。"
+            )
+        return data
 
 
 class InputConfig(BaseModel):

@@ -5,5 +5,7 @@ bucket_dir = "bucket_name1" # 本機模擬 GCS bucket 的根目錄
 date = 2026-05-01           # 開發時指定的分析日期；正式呼叫端可直接以參數呼叫 map_zones_daily
 
 [zone]
-bucket_minutes = 60       # 人流統計的時段粒度（分鐘）
-entry_debounce_frames = 1 # 連續幾格都在區域內才算一次進入；1 = 不去抖，調高可濾掉邊界抖動
+bucket_minutes = 60           # 人流統計的時段粒度（分鐘）
+# entries 判定的區域邊界緩衝帶寬度，以 1080p（寬 1920）為基準的像素；執行時依各攝影機
+# 的 frame_width 換算（3840 → ×2）。0 = 純內外判定，調高可濾掉腳底點在邊界抖動的重複計數。
+boundary_band_px_1080p = 25
