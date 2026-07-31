@@ -17,6 +17,7 @@ from video_analyze.services.frame_ring import (
 from video_analyze.services.inference import InferencePipeline
 from video_analyze.services.tracker import MultiStreamByteTracker
 from video_analyze.services.video_reader import (
+    FrameShape,
     SegmentInfo,
     discover_segments,
     probe_frame_shape,
@@ -53,7 +54,7 @@ def run_inference_pipeline(
     data_queues: list[mp.Queue],
     free_queues: list[mp.Queue],
     ring_buffers: list,
-    frame_shapes: list[tuple[int, int]],
+    frame_shapes: list[FrameShape],
     stream_names: list[str],
     output_root: Path,
     results_path: Path,
@@ -67,7 +68,7 @@ def run_inference_pipeline(
         data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
         free_queues: 各路歸還環形緩衝 slot 用的佇列，索引為 stream_id。
         ring_buffers: 各路 `create_ring_buffer` 建立的共享記憶體。
-        frame_shapes: 各路的 `(height, width)`，索引與 `ring_buffers` 對應；
+        frame_shapes: 各路的 `FrameShape`，索引與 `ring_buffers` 對應；
             除了配置環形緩衝，也逐列寫進追蹤結果 parquet。
         stream_names: 各路攝影機的 `stream_dirname`。
         output_root: 標註影片輸出根目錄。
@@ -142,7 +143,7 @@ def analyze_daily(
 
     stream_names: list[str] = []
     segments_per_stream: list[list[SegmentInfo]] = []
-    frame_shapes: list[tuple[int, int]] = []
+    frame_shapes: list[FrameShape] = []
     for cam in cameras:
         segments = discover_segments(
             bucket_path, cam.stream_dirname, date, registry.storage.file_ext

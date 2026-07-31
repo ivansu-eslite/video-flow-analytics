@@ -11,7 +11,12 @@ from video_analyze.services.fps_meter import FpsMeter
 from video_analyze.services.frame_ring import FrameRing
 from video_analyze.services.tracker import MultiStreamByteTracker
 from video_analyze.services.tracking_results import TrackingResultCollector
-from video_analyze.services.video_reader import READER_DONE, READER_FAILED, FramePacket
+from video_analyze.services.video_reader import (
+    READER_DONE,
+    READER_FAILED,
+    FramePacket,
+    FrameShape,
+)
 from video_analyze.services.video_writer import MultiStreamVideoWriter
 from video_analyze.services.visualization import TrackAnnotator
 
@@ -34,7 +39,7 @@ class InferencePipeline:
         tracker: MultiStreamByteTracker,
         output_root: Path,
         results_path: Path,
-        frame_shapes: list[tuple[int, int]],
+        frame_shapes: list[FrameShape],
     ):
         """組裝推理迴圈所需的各個子系統（偵測、追蹤、寫檔、收集結果）。
 
@@ -45,8 +50,8 @@ class InferencePipeline:
             tracker: 多路 ByteTrack 狀態管理器（跨批次重用，維持軌跡延續）。
             output_root: 標註影片輸出根目錄。
             results_path: 追蹤結果 parquet 的目標路徑。
-            frame_shapes: 各路的 `(height, width)`，索引即 stream_id；逐列寫進
-                追蹤結果 parquet，供下游做解析度相關的參數換算。
+            frame_shapes: 各路的 `FrameShape`，索引即 stream_id；逐列寫進追蹤結果
+                parquet，供下游做解析度相關的參數換算。
         """
         self.stream_names = stream_names
         self.frame_shapes = frame_shapes
@@ -175,13 +180,13 @@ class InferencePipeline:
                     track_start = time.perf_counter()
                     tracks = self.tracker.update(stream_id, results[idx].boxes)
                     self.fps_meter.add_tracking_time(time.perf_counter() - track_start)
-                    height, width = self.frame_shapes[stream_id]
+                    shape = self.frame_shapes[stream_id]
                     self.collector.add(
                         camera_id=self.stream_names[stream_id],
                         packet=packet,
                         tracks=tracks,
-                        frame_width=width,
-                        frame_height=height,
+                        frame_width=shape.width,
+                        frame_height=shape.height,
                     )
                     self.fps_meter.record(self.stream_names[stream_id])
                     annotated_frame = self.annotator.draw_bboxes(packet.frame, tracks)

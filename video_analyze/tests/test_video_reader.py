@@ -4,7 +4,21 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from video_analyze.services.video_reader import _parse_segment_start
+from video_analyze.services.video_reader import FrameShape, _parse_segment_start
+
+
+def test_frame_shape_unpacks_as_height_width():
+    """欄位順序是 `(height, width)`（沿用 numpy 的 `frame.shape`）。
+
+    `pipeline.py` 仍以 `height, width = shape` 解包去配置環形緩衝，順序若被調換，
+    緩衝會配成轉置的尺寸而在 `write_slot` 才炸開；寫進 parquet 的尺寸則會靜默相反。
+    """
+    shape = FrameShape(height=1080, width=1920)
+
+    height, width = shape
+    assert (height, width) == (1080, 1920)
+    assert shape.height == 1080
+    assert shape.width == 1920
 
 _TAIPEI = ZoneInfo("Asia/Taipei")
 
