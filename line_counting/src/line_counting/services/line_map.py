@@ -77,7 +77,7 @@ def count_lines_daily(
     date: datetime.date,
     bucket_dir: str,
     bucket_minutes: int,
-    crossing_band_px_1080p: float = 0,
+    crossing_band_px_1080p: float = 25,
     output_root: Path = OUTPUT_ROOT,
 ) -> Path:
     """讀取當日追蹤結果，依 `camera_registry.yaml` 的計數線定義統計進出人數。
@@ -93,7 +93,8 @@ def count_lines_daily(
         bucket_minutes: 進出人數統計的時段粒度（分鐘）。
         crossing_band_px_1080p: 跨越去抖的帶狀死區寬度，以 1080p（寬 1920）為
             基準的像素值；逐攝影機依其 `frame_width` 換算成實際像素後才進判定
-            （見 ADR-004）。`0` = 細線純零交越，且換算後仍是 0。
+            （見 ADR-004）。`0` = 細線純零交越，且換算後仍是 0；預設 25 取自
+            實測（見 README「已知限制」）。
         output_root: 輸出根目錄。
 
     Returns:

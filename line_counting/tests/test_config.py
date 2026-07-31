@@ -67,12 +67,22 @@ def test_get_toml_path_points_to_existing_config():
     assert path.endswith("config.toml")
 
 
+def test_shipped_toml_and_model_agree_on_crossing_band():
+    """版控的 `config.toml` 與 `LineConfig` 的預設值要一致。
+
+    這個值是實測調出來的（見 README），不是「沒設定時的中性值」；兩處分岔會讓同一份
+    程式在有／沒有 `config.toml` 的環境下用不同的去抖尺度統計，而且不會有任何錯誤訊息。
+    日後調整這個值時兩處都要改。（`bucket_dir` 一類的欄位刻意不受此約束。）
+    """
+    assert AppConfig().line.crossing_band_px_1080p == 25
+
+
 def test_uses_defaults_when_toml_missing(tmp_path):
     """找不到設定檔時以預設值啟動，而非中止。"""
     config = _config_class(tmp_path / "nope.toml")()
 
     assert config.line.bucket_minutes == 60
-    assert config.line.crossing_band_px_1080p == 0
+    assert config.line.crossing_band_px_1080p == 25
     assert config.input.bucket_dir == "bucket_name"
 
 

@@ -245,9 +245,9 @@ def test_band_scales_linearly_for_non_standard_resolution():
     assert _resolve_band_px("loc_cam001", cam_sub, 12) == pytest.approx(16.0)
 
 
-def test_default_band_is_zero_at_any_resolution(tmp_path):
-    """基準值 0 換算後仍是 0：非基準解析度的攝影機，預設行為與 1080p 完全一致
-    （純零交越，貼線的小幅跨越照算）。"""
+def test_zero_band_stays_zero_at_any_resolution(tmp_path):
+    """基準值 0 換算後仍是 0：非基準解析度的攝影機設 0 時也是純零交越，貼線的
+    小幅跨越照算，行為與換算機制上線前一致。"""
     bucket_dir = tmp_path / "bucket_test"
     bucket_dir.mkdir()
     _write_registry(
@@ -285,6 +285,7 @@ def test_default_band_is_zero_at_any_resolution(tmp_path):
         date=datetime.date(2026, 5, 1),
         bucket_dir=str(bucket_dir),
         bucket_minutes=60,
+        crossing_band_px_1080p=0,
         output_root=output_root,
     )
 

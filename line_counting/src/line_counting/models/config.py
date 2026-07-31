@@ -22,13 +22,14 @@ class LineConfig(BaseModel):
             時間上向下取整。
         crossing_band_px_1080p: 跨越去抖的帶狀死區寬度，以 1080p（寬 1920）為
             基準的像素值；執行時依各攝影機的 `frame_width` 換算成實際像素。
-            預設 0 = 細線純零交越（每次幾何跨越都計），且 0 換算後仍是 0。
+            `0` = 細線純零交越（每次幾何跨越都計），且 0 換算後仍是 0。
+            預設 25 取自實測（見 README「已知限制」）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     bucket_minutes: int = Field(default=60, ge=1)
-    crossing_band_px_1080p: float = Field(default=0, ge=0)
+    crossing_band_px_1080p: float = Field(default=25, ge=0)
 
     @model_validator(mode="before")
     @classmethod
