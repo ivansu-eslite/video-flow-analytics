@@ -70,22 +70,25 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 ADR-004：線段區域參數的尺規與影像尺寸來源，決定像素參數改以 1080p 為基準依 `frame_width`
 換算，尺寸由上游寫進 parquet（而非人工填 registry 或下游讀影片 header）；ADR-005：
 `flow_report` 的輸入必要性改由 `camera_registry_used.yaml` 快照的定義決定（不看檔案在
-不在），說明為何刻意不留跳過用的旗標。
+不在），說明為何刻意不留跳過用的旗標；ADR-006：`zone_mapping` 的 `entries` 由時間去抖
+改為區域邊界緩衝帶＋Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態、
+為何 zone 與 line 的幾何不可統一，並修訂 ADR-004 的「舊 parquet 不對稱」條款。
 
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
 
 `tracking_results.parquet` 帶 `frame_width`／`frame_height`（issue #63）：值來自
 `video_analyze` 本來就為配置環形緩衝而探測的 `frame_shapes`，逐列重複寫入。**這兩欄不是
-給 `video_analyze` 自己用的**——`line_counting` 是純 CPU 套件、部署時不掛載影片，只能從
-這裡取得尺寸，把設定檔的 `crossing_band_px_1080p`（1080p 基準像素）換算成各攝影機的實際
-像素。因此：
+給 `video_analyze` 自己用的**——`line_counting` 與 `zone_mapping` 都是純 CPU 套件、部署時
+不掛載影片，只能從這裡取得尺寸，把設定檔的 1080p 基準像素（`crossing_band_px_1080p`／
+`boundary_band_px_1080p`）換算成各攝影機的實際像素。因此：
 
-- 缺這兩欄的舊 parquet 會被 `line_counting` **fail loud 擋下**（不給 fallback：「找不到
-  尺寸就當 1080p」會讓 4K 攝影機靜默套用只有一半寬的線段區域，正是要消除的錯誤本身）。同一份舊
-  parquet 在 `zone_mapping` 卻照跑——它不讀這兩欄、輸入端也沒有欄位白名單。這個不對稱是
-  刻意的，不是 bug。
-- `video_analyze` 日後改 `TRACKING_RESULTS_SCHEMA` 要一併考慮 `line_counting` 會不會直接
-  崩；換算與檢查的位置、以及為何不改用「人形肩寬百分比」當尺規，見 ADR-004。
+- 缺這兩欄的舊 parquet 會被 `line_counting` 與 `zone_mapping` 兩包都 **fail loud 擋下**
+  （不給 fallback：「找不到尺寸就當 1080p」會讓 4K 攝影機靜默套用只有一半寬的判定區域，
+  正是要消除的錯誤本身）。ADR-004 當時記的「`zone_mapping` 照跑」不對稱，在 `zone_mapping`
+  也改吃 1080p 基準參數後（issue #68）**已不再成立**，見 ADR-006。
+- `video_analyze` 日後改 `TRACKING_RESULTS_SCHEMA` 要一併考慮 `line_counting` 與
+  `zone_mapping` 會不會直接崩；換算與檢查的位置、以及為何不改用「人形肩寬百分比」當尺規，
+  見 ADR-004。
 
 ### 四包共用碼的處理方式
 
