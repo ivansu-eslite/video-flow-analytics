@@ -5,8 +5,10 @@
 - out_count：該時段內 track 由內側跨越到外側的次數。
 
 判定「人在線的哪一側」用 bbox 腳底中心點 ((x1+x2)/2, y2) 到計數線的帶號垂直距離。
-跨越偵測用「帶死區的 Schmitt-trigger」：`crossing_band_px` 把細線加粗成帶狀死區，
-濾除腳底點在線附近的抖動／駐留；`= 0` 退化為細線純零交越。
+跨越偵測用「帶線段區域的 Schmitt-trigger」：`crossing_band_px` 把細線加粗成有寬度的線段區域，
+濾除腳底點在線附近的抖動／駐留；`= 0` 退化為細線純零交越。本模組收到的
+`crossing_band_px` 已是該攝影機的實際像素——設定檔的值以 1080p 為基準，換算在
+`services/line_map.py` 做完（見 ADR-004），這裡維持純幾何、不知道「基準解析度」。
 
 側別是用最近段的**無限直線**定的，因此側別翻轉本身無法分辨「穿過門」與「繞過門的
 兩端走過去」。翻轉之外另加一道**有限線段閘門**：自上一次確認側別以來，該 track 的
@@ -152,25 +154,26 @@ def count_line_crossings(
 
     輸入 cam_sub 需已含 foot_x / foot_y / time_bucket 欄位，且只包含該攝影機的列。
 
-    以「帶死區的 Schmitt-trigger」偵測跨越：帶號距離 `d > band` 判內側（`+1`）、
-    `d < -band` 判外側（`-1`）、落在 `[-band, band]` 帶內為死區（沿用前一個已確認
+    以「帶線段區域的 Schmitt-trigger」偵測跨越：帶號距離 `d > band` 判內側（`+1`）、
+    `d < -band` 判外側（`-1`）、落在 `[-band, band]` 之內即在線段區域內（沿用前一個已確認
     側別，hysteresis）。committed 側別翻轉即一次跨越——翻到內側計 `in`、翻到外側計
     `out`；track 起始就在某側（前一格為 null）本身不算跨越（注意：這一點與
     `zone_mapping` **相反**——`zone_mapping` 首次即在區內會算一次 entry；計數線只認
-    「側別翻轉」，起始側不構成翻轉）。`crossing_band_px = 0` 時死區退化為單點，等同
+    「側別翻轉」，起始側不構成翻轉）。`crossing_band_px = 0` 時線段區域退化為單點，等同
     幾何零交越。
 
     翻轉之外還要過**有限線段閘門**：側別是最近段無限直線定的，繞過線的端點走過去
     同樣會翻轉，故要求自上一次確認側別以來，該 track 的逐格位移線段至少與計數線的
     有限線段相交過一次（`segment_crosses_polyline` 的累計數有增加）。閘門是事件級
-    而非逐格：逐格判「腳底垂足有沒有落在線段本體上」會讓門口死區駐留後進場漏算，
+    而非逐格：逐格判「腳底垂足有沒有落在線段本體上」會讓門口線段區域內駐留後進場漏算，
     取捨見 ADR-003。
 
     Args:
         cam_sub: 單一攝影機的追蹤明細，需已含 `foot_x`／`foot_y`／
             `time_bucket`／`track_id`／`timestamp` 欄位。
         line: 要套用的計數線定義。
-        crossing_band_px: 跨越去抖的帶狀死區寬度（像素）；`0` = 細線純零交越。
+        crossing_band_px: 跨越去抖的線段區域寬度，為該攝影機**換算後的實際像素**
+            （設定檔的 1080p 基準值由 `line_map.py` 換算）；`0` = 細線純零交越。
 
     Returns:
         依 `time_bucket` 聚合的 `in_count`／`out_count` 統計表。
@@ -200,7 +203,7 @@ def count_line_crossings(
     )
     z = (
         ordered.with_columns(pl.Series("_hit", hit))
-        # 死區（帶內）留 null，交給 forward_fill 沿用前一個已確認側別
+        # 線段區域內留 null，交給 forward_fill 沿用前一個已確認側別
         .with_columns(
             pl.when(pl.col("_d") > band)
             .then(1)

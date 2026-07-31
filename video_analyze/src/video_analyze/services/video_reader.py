@@ -2,6 +2,7 @@ import multiprocessing as mp
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 import cv2
@@ -21,6 +22,19 @@ READER_FAILED = "__READER_FAILED__"
 # 台北在地時間，讓下游 parquet / zone_counts / report 一律以台北 wall-clock 處理。
 _FILENAME_TZ = timezone.utc
 _LOCAL_TZ = ZoneInfo("Asia/Taipei")
+
+
+class FrameShape(NamedTuple):
+    """一路串流的影像尺寸。
+
+    刻意用 NamedTuple 而非 tuple：欄位順序是 `(height, width)`（沿用 numpy 的
+    `frame.shape`），寫進 parquet 時若把兩者對調不會有型別錯誤，只會讓下游的解析度
+    換算靜默算錯。呼叫端一律用 `.height` / `.width` 取值，讓寫反變成 attribute 錯誤。
+    仍是 tuple，既有的 `height, width = shape` 解包與 `mp.Process` 的 pickle 都不受影響。
+    """
+
+    height: int
+    width: int
 
 
 @dataclass
@@ -92,8 +106,8 @@ def _parse_segment_start(path: Path, day: date) -> datetime:
     return start
 
 
-def probe_frame_shape(segment: SegmentInfo) -> tuple[int, int]:
-    """讀出片段首格以取得 (height, width)，供父進程一次配置該路的環形緩衝。
+def probe_frame_shape(segment: SegmentInfo) -> FrameShape:
+    """讀出片段首格以取得影像尺寸，供父進程一次配置該路的環形緩衝。
 
     假設單一攝影機整天解析度固定，故只探測第一支片段的首格即可。
 
@@ -101,7 +115,7 @@ def probe_frame_shape(segment: SegmentInfo) -> tuple[int, int]:
         segment: 要探測的片段（通常是當天第一支片段）。
 
     Returns:
-        `(height, width)`。
+        該路的 `FrameShape(height, width)`。
 
     Raises:
         ValueError: 片段無法開啟，或讀不到任何影格。
@@ -115,7 +129,7 @@ def probe_frame_shape(segment: SegmentInfo) -> tuple[int, int]:
         if not ret:
             raise ValueError(f"片段讀不到任何影格，無法探測解析度: {segment.path}")
         height, width = frame.shape[:2]
-        return height, width
+        return FrameShape(height=height, width=width)
     finally:
         cap.release()
 

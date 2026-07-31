@@ -210,6 +210,12 @@ bucket 呼叫。
 | `timestamp` | datetime（`Asia/Taipei`） | 該片段檔名時間 ＋ 片段內幀序 / fps |
 | `track_id` | int | ByteTrack 指派的追蹤編號，跨片段延續 |
 | `x1` / `y1` / `x2` / `y2` | float | 追蹤框的像素座標 |
+| `frame_width` / `frame_height` | int | 該路的影像尺寸（`probe_frame_shape` 探測首格所得，整天固定）；逐列重複同一個值 |
+
+`frame_width` / `frame_height` 是為下游而存的：`line_counting` 是純 CPU 套件、部署時不
+掛載影片，拿不到影像尺寸，卻需要它把以 1080p 為基準的像素參數換算成各攝影機的實際像素
+（見 [ADR-004](../docs/adr/004-band-resolution-scaling.md)）。缺這兩欄的舊 parquet 會被
+`line_counting` 直接擋下，需以本套件重跑產生。
 
 ## 架構
 

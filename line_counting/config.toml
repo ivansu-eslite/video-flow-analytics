@@ -5,5 +5,8 @@ bucket_dir = "bucket_name1" # 本機模擬 GCS bucket 的根目錄
 date = 2026-05-01           # 開發時指定的分析日期；正式呼叫端可直接以參數呼叫 count_lines_daily
 
 [line]
-bucket_minutes = 60   # 進出人數統計的時段粒度（分鐘）
-crossing_band_px = 0  # 跨越去抖的帶狀死區寬度（像素）；0 = 細線純零交越，調高可濾掉門口駐留抖動
+bucket_minutes = 60         # 進出人數統計的時段粒度（分鐘）
+# 跨越去抖的線段區域寬度，以 1080p（寬 1920）為基準的像素值：各攝影機依自己的
+# frame_width 換算（3840 → 兩倍），故同一個值在不同解析度上代表同樣的實際距離。
+# 0 = 細線純零交越（換算後仍是 0）；25 的由來與再調高的代價見 README「已知限制」。
+crossing_band_px_1080p = 25

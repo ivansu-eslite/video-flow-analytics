@@ -25,4 +25,9 @@ TRACKING_RESULTS_SCHEMA = {
     "y1": pl.Float64,
     "x2": pl.Float64,
     "y2": pl.Float64,
+    # 該路影像尺寸（整天固定，見 services/video_reader.py 的 probe_frame_shape）。
+    # 逐列重複同一個常數，靠 parquet 的 dictionary/RLE 壓縮吸收；下游（line_counting）
+    # 是純 CPU 套件、不掛載影片，只能從這裡取得尺寸做解析度相關的參數換算。
+    "frame_width": pl.Int64,
+    "frame_height": pl.Int64,
 }
