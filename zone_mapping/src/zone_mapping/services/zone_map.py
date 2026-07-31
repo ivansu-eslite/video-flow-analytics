@@ -125,14 +125,22 @@ def _validate_zone_fits_band(
     signed_d, _ = signed_distance_to_polygon(gx.ravel(), gy.ravel(), poly)
     inradius = float(signed_d.max())
     if inradius < band_px:
+        suggested = inradius / scale
+        # 內切半徑小到建議上限會四捨五入成 0 時，「調小 band」不是可執行的路
+        # （boundary_band_px_1080p 有 ge=0），只剩改幾何一條
+        remedy = (
+            f"兩條路擇一：把 [zone].boundary_band_px_1080p 調到 {suggested:.1f} 以下"
+            "（1080p 基準值），或把 camera_registry.yaml 的 zone 多邊形畫寬一點。"
+            if round(suggested, 1) > 0
+            else "這個 zone 窄到放不下任何正的緩衝帶，只能把 camera_registry.yaml 的 "
+            "zone 多邊形畫寬一點。"
+        )
         raise ValueError(
             f"攝影機 {camera_id} 的 zone「{zone.name}」放不下區域邊界緩衝帶："
             f"內切半徑約 {inradius:.1f}px、緩衝帶 {band_px:.1f}px（皆為該攝影機的"
             f"實際像素，frame_width/{BASELINE_FRAME_WIDTH} = {scale:.4g}）。"
             "緩衝帶會吃掉整個區域內部，這個 zone 的 entries 會恆為 0。"
-            f"兩條路擇一：把 [zone].boundary_band_px_1080p 調到 "
-            f"{inradius / scale:.1f} 以下（1080p 基準值），或把 camera_registry.yaml "
-            "的 zone 多邊形畫寬一點。內切半徑為格點取樣的下界，會略微低估。"
+            f"{remedy}內切半徑為格點取樣的下界，會略微低估。"
         )
 
 
