@@ -200,9 +200,33 @@ def test_unique_visitors_ignores_committed_state():
     assert result.select("unique_visitors", "entries").rows() == [(1, 1)]
 
 
+def test_committed_state_does_not_leak_across_tracks():
+    """已確認狀態依 `track_id` 分組，不會從前一個 track 洩漏到下一個。
+
+    三個 track：`t1`／`t2` 各自全程在區內（各 1 次進入），`t3` 前兩格都在緩衝帶內、
+    最後一格才確認在區外（0 次進入），正確答案是 2。輸入按時間交錯，模擬多人同時在
+    畫面裡的實際明細。少了 `over("track_id")` 兩處都會靜默算錯：
+
+    - `forward_fill` 少分組 → `t3` 首格被 `t2` 的「在區內」填滿，多算一次進入（3）。
+    - `shift` 少分組 → `t2` 首格的前一個狀態變成 `t1` 的「在區內」，少算一次（1）。
+    """
+    cam_sub = pl.concat(
+        [
+            _make_cam_sub([_DEEP_INSIDE] * 2, track_id="t1"),
+            _make_cam_sub([_DEEP_INSIDE], track_id="t2"),
+            _make_cam_sub(
+                [_JITTER_INSIDE, _JITTER_OUTSIDE, _DEEP_OUTSIDE], track_id="t3"
+            ),
+        ]
+    ).sort("timestamp")
+
+    result = count_zone_visits(cam_sub, _ZONE, _BAND)
+
+    assert _entries_total(result) == 2
+
+
 def test_validate_zone_cameras_reports_value_error_when_data_cameras_has_none():
     # camera_id 為 nullable Utf8，data_cameras 含 None 時排序不應炸成
     # TypeError，蓋掉本該報出的診斷訊息
     with pytest.raises(ValueError, match="cam_missing"):
         validate_zone_cameras({"cam_missing"}, {"cam001", None})
-
