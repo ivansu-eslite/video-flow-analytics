@@ -34,20 +34,20 @@ logger = StructuredLogger(component="line_map")
 def _resolve_band_px(
     camera_id: str, cam_sub: pl.DataFrame, crossing_band_px_1080p: float
 ) -> float:
-    """把 1080p 基準的死區帶寬換算成該攝影機的實際像素，並記錄換算過程。
+    """把 1080p 基準的線段區域寬度換算成該攝影機的實際像素，並記錄換算過程。
 
     換算只用寬度、線性：`實際 px = 基準值 × frame_width / 1920`。同一台攝影機整天
     解析度固定（上游 `probe_frame_shape` 只探測首格，中途變動會在 `frame_ring`
     就中止），因此這裡要求該攝影機的 `frame_width` 只有單一正值——多個值代表拿到的
-    是手工拼接的 parquet 或上游語義已改，靜默取其中一個會讓半天的死區用錯尺度。
+    是手工拼接的 parquet 或上游語義已改，靜默取其中一個會讓半天的線段區域用錯尺度。
 
     Args:
         camera_id: 該攝影機的 `camera_id`（僅供錯誤訊息與日誌）。
         cam_sub: 只含該攝影機的追蹤明細，需已含 `frame_width` 欄位且非空。
-        crossing_band_px_1080p: 以 1080p（寬 1920）為基準的死區帶寬。
+        crossing_band_px_1080p: 以 1080p（寬 1920）為基準的線段區域寬度。
 
     Returns:
-        換算後的實際像素帶寬。
+        換算後的線段區域寬度（實際像素）。
 
     Raises:
         ValueError: 該攝影機的 `frame_width` 不是單一正值。
@@ -62,7 +62,7 @@ def _resolve_band_px(
     scale = frame_width / BASELINE_FRAME_WIDTH
     band_px = crossing_band_px_1080p * scale
     logger.info(
-        "跨越死區依解析度換算",
+        "線段區域依解析度換算",
         camera_id=camera_id,
         frame_width=frame_width,
         baseline_width=BASELINE_FRAME_WIDTH,
@@ -91,7 +91,7 @@ def count_lines_daily(
         date: 要統計的日期，需已有對應的 `tracking_results.parquet`。
         bucket_dir: 本機模擬 GCS bucket 的根目錄。
         bucket_minutes: 進出人數統計的時段粒度（分鐘）。
-        crossing_band_px_1080p: 跨越去抖的帶狀死區寬度，以 1080p（寬 1920）為
+        crossing_band_px_1080p: 跨越去抖的線段區域寬度，以 1080p（寬 1920）為
             基準的像素值；逐攝影機依其 `frame_width` 換算成實際像素後才進判定
             （見 ADR-004）。`0` = 細線純零交越，且換算後仍是 0；預設 25 取自
             實測（見 README「已知限制」）。

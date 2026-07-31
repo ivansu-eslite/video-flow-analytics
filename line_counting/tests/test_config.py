@@ -2,7 +2,7 @@
 
 重點守護「找不到 `config.toml` → 警告並以預設值啟動；檔案存在但值不合法或頂層
 區塊名未知 → 直接報錯」這條 fail-loud 語義：參數錯了卻靜默套用預設值，會讓進出
-人數統計以非預期的口徑產出而無人察覺（例如把 `[line]` 拼成 `[lines]`，去抖帶寬與
+人數統計以非預期的口徑產出而無人察覺（例如把 `[line]` 拼成 `[lines]`，去抖的線段區域寬度與
 時段粒度整段悄悄退回預設）。
 
 `AppConfig.model_config` 的 `toml_file` 在 class 定義時就求值，事後 monkeypatch
@@ -111,7 +111,7 @@ def test_invalid_value_in_toml_raises_instead_of_silently_defaulting(tmp_path):
 
 
 def test_negative_crossing_band_px_1080p_raises(tmp_path):
-    """crossing_band_px_1080p 有 ge=0 約束：負帶寬不合法，須報錯而非靜默套用。"""
+    """crossing_band_px_1080p 有 ge=0 約束：負寬度不合法，須報錯而非靜默套用。"""
     toml = tmp_path / "config.toml"
     toml.write_text("[line]\ncrossing_band_px_1080p = -1\n", encoding="utf-8")
 
@@ -123,7 +123,7 @@ def test_renamed_crossing_band_px_raises_actionable_error(tmp_path):
     """沿用舊參數名 `crossing_band_px` 要報出「已改名且語義改成 1080p 基準值」。
 
     `extra="forbid"` 本來就會擋下它，但訊息只說欄位未知；沿用舊設定的人需要知道
-    數值語義也變了（4K 攝影機上實際帶寬變兩倍），才知道該不該改數字。
+    數值語義也變了（4K 攝影機上實際的線段區域寬度變兩倍），才知道該不該改數字。
     """
     toml = tmp_path / "config.toml"
     toml.write_text("[line]\ncrossing_band_px = 5\n", encoding="utf-8")
@@ -153,7 +153,7 @@ def test_unknown_top_level_section_raises(tmp_path):
 
 def test_unknown_field_in_nested_section_raises(tmp_path):
     """巢狀欄位名打錯要報錯：crossing_band_px_1080p 拼成 crossing_band_1080p，不可被
-    靜默忽略而讓去抖帶寬退回預設值（巢狀 model 的 extra="forbid"，非僅頂層區塊名）。
+    靜默忽略而讓線段區域寬度退回預設值（巢狀 model 的 extra="forbid"，非僅頂層區塊名）。
 
     錯字刻意不用舊參數名 `crossing_band_px`：那會被改名偵測的 before validator 接手，
     這支測試就會在 extra="forbid" 失效時依然通過，守護目標無聲消失。

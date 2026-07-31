@@ -169,12 +169,12 @@ def test_count_lines_daily_maps_line_group_to_its_own_line(tmp_path):
 
 
 def test_crossing_band_scales_with_each_camera_frame_width(tmp_path):
-    """同一個 1080p 基準值在不同解析度上要換算成不同的實際帶寬。
+    """同一個 1080p 基準值在不同解析度上要換算成不同的實際寬度。
 
     兩台攝影機給完全相同的線與軌跡（腳底 y 85 → 115，離線 15 px），
     `crossing_band_px_1080p = 10`：
-    - cam001（1920）換算後帶寬 10 px < 15 → 兩格分判外／內側，算一次 in。
-    - cam002（3840）換算後帶寬 20 px > 15 → 兩格都落在死區內，不算跨越。
+    - cam001（1920）換算後線段區域寬度 10 px < 15 → 兩格分判外／內側，算一次 in。
+    - cam002（3840）換算後線段區域寬度 20 px > 15 → 兩格都落在線段區域內，不算跨越。
 
     沒換算（兩台都用 10）或換算方向寫反（3840 用 5）時，cam002 都會多出一列，
     斷言會失敗。
@@ -294,7 +294,7 @@ def test_zero_band_stays_zero_at_any_resolution(tmp_path):
 
 def test_tracking_results_without_frame_size_fails_loud(tmp_path):
     """舊版 video_analyze 產出的 parquet 沒有影像尺寸欄位：直接報錯中止，不可
-    退回「把設定值當成實際像素」——那會在 4K 攝影機上靜默套用一半的死區。"""
+    退回「把設定值當成實際像素」——那會在 4K 攝影機上靜默套用只有一半寬的線段區域。"""
     bucket_dir = tmp_path / "bucket_test"
     bucket_dir.mkdir()
     _write_registry(
@@ -336,7 +336,7 @@ def test_tracking_results_without_frame_size_fails_loud(tmp_path):
 
 
 def test_multiple_frame_widths_for_one_camera_fails_loud(tmp_path):
-    """同一台攝影機出現多個 frame_width：靜默取其中一個會讓半天的死區用錯尺度，
+    """同一台攝影機出現多個 frame_width：靜默取其中一個會讓半天的線段區域用錯尺度，
     須報錯（上游整天解析度固定，出現這種資料代表 parquet 是拼接出來的）。"""
     bucket_dir = tmp_path / "bucket_test"
     bucket_dir.mkdir()

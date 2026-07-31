@@ -20,7 +20,7 @@ class LineConfig(BaseModel):
     Attributes:
         bucket_minutes: 進出人數統計的時段粒度（分鐘），time_bucket 依此在台北
             時間上向下取整。
-        crossing_band_px_1080p: 跨越去抖的帶狀死區寬度，以 1080p（寬 1920）為
+        crossing_band_px_1080p: 跨越去抖的線段區域寬度，以 1080p（寬 1920）為
             基準的像素值；執行時依各攝影機的 `frame_width` 換算成實際像素。
             `0` = 細線純零交越（每次幾何跨越都計），且 0 換算後仍是 0。
             預設 25 取自實測（見 README「已知限制」）。
@@ -37,7 +37,7 @@ class LineConfig(BaseModel):
         """舊參數名 `crossing_band_px` 要報出「已改名且語義變了」，而非通用的未知欄位。
 
         `extra="forbid"` 本來就會擋下舊名，但訊息只說不允許額外欄位，看不出這個值
-        現在是 1080p 基準值（4K 攝影機上實際帶寬會是兩倍）；沿用舊設定的人需要知道
+        現在是 1080p 基準值（4K 攝影機上實際的線段區域寬度會是兩倍）；沿用舊設定的人需要知道
         該不該改數值，不是只知道欄位名不對。`mode="before"` 先於 `extra="forbid"`
         觸發，toml 與環境變數兩條路徑都會走到這裡。
         """
