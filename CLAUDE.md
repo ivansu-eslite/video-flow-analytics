@@ -66,7 +66,24 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 `<package>/docs/adr/`）。目前有 ADR-001：`line_counting` 的計數線跨越判定方式，
 說明為什麼不能改成「整條線只有一個方向」；ADR-002：計數線群組（`line_group`）的語意，
 說明為何不驗證跨攝影機唯一；ADR-003：計數線的有效長度，在側別翻轉之外加一道「軌跡要
-真的穿過有限線段」的閘門（修正 ADR-001 的無限直線前提），並說明為何不採逐格有效性閘門。
+真的穿過有限線段」的閘門（修正 ADR-001 的無限直線前提），並說明為何不採逐格有效性閘門；
+ADR-004：判定死區參數的尺規與影像尺寸來源，決定像素參數改以 1080p 為基準依 `frame_width`
+換算，尺寸由上游寫進 parquet（而非人工填 registry 或下游讀影片 header）。
+
+### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
+
+`tracking_results.parquet` 帶 `frame_width`／`frame_height`（issue #63）：值來自
+`video_analyze` 本來就為配置環形緩衝而探測的 `frame_shapes`，逐列重複寫入。**這兩欄不是
+給 `video_analyze` 自己用的**——`line_counting` 是純 CPU 套件、部署時不掛載影片，只能從
+這裡取得尺寸，把設定檔的 `crossing_band_px_1080p`（1080p 基準像素）換算成各攝影機的實際
+像素。因此：
+
+- 缺這兩欄的舊 parquet 會被 `line_counting` **fail loud 擋下**（不給 fallback：「找不到
+  尺寸就當 1080p」會讓 4K 攝影機靜默套用一半的死區，正是要消除的錯誤本身）。同一份舊
+  parquet 在 `zone_mapping` 卻照跑——它不讀這兩欄、輸入端也沒有欄位白名單。這個不對稱是
+  刻意的，不是 bug。
+- `video_analyze` 日後改 `TRACKING_RESULTS_SCHEMA` 要一併考慮 `line_counting` 會不會直接
+  崩；換算與檢查的位置、以及為何不改用「人形肩寬百分比」當尺規，見 ADR-004。
 
 ### 四包共用碼的處理方式
 

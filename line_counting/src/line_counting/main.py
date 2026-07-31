@@ -22,7 +22,7 @@ def main() -> None:
         date=settings.input.date,
         bucket_dir=settings.input.bucket_dir,
         bucket_minutes=settings.line.bucket_minutes,
-        crossing_band_px=settings.line.crossing_band_px,
+        crossing_band_px_1080p=settings.line.crossing_band_px_1080p,
     )
 
 

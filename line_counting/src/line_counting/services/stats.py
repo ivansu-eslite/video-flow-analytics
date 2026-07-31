@@ -6,7 +6,9 @@
 
 判定「人在線的哪一側」用 bbox 腳底中心點 ((x1+x2)/2, y2) 到計數線的帶號垂直距離。
 跨越偵測用「帶死區的 Schmitt-trigger」：`crossing_band_px` 把細線加粗成帶狀死區，
-濾除腳底點在線附近的抖動／駐留；`= 0` 退化為細線純零交越。
+濾除腳底點在線附近的抖動／駐留；`= 0` 退化為細線純零交越。本模組收到的
+`crossing_band_px` 已是該攝影機的實際像素——設定檔的值以 1080p 為基準，換算在
+`services/line_map.py` 做完（見 ADR-004），這裡維持純幾何、不知道「基準解析度」。
 
 側別是用最近段的**無限直線**定的，因此側別翻轉本身無法分辨「穿過門」與「繞過門的
 兩端走過去」。翻轉之外另加一道**有限線段閘門**：自上一次確認側別以來，該 track 的
@@ -170,7 +172,8 @@ def count_line_crossings(
         cam_sub: 單一攝影機的追蹤明細，需已含 `foot_x`／`foot_y`／
             `time_bucket`／`track_id`／`timestamp` 欄位。
         line: 要套用的計數線定義。
-        crossing_band_px: 跨越去抖的帶狀死區寬度（像素）；`0` = 細線純零交越。
+        crossing_band_px: 跨越去抖的帶狀死區寬度，為該攝影機**換算後的實際像素**
+            （設定檔的 1080p 基準值由 `line_map.py` 換算）；`0` = 細線純零交越。
 
     Returns:
         依 `time_bucket` 聚合的 `in_count`／`out_count` 統計表。

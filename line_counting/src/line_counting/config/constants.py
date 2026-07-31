@@ -11,6 +11,14 @@ import polars as pl
 # 輸出根目錄；為 cwd 相對路徑（見 README「執行位置」）。
 OUTPUT_ROOT = Path("outputs")
 
+# 像素參數的基準解析度寬度：設定檔的 `crossing_band_px_1080p` 是以 1080p（寬 1920）
+# 表示的值，執行時各攝影機依 `frame_width / 1920` 換算成自己的實際像素（見 ADR-004）。
+BASELINE_FRAME_WIDTH = 1920
+
+# 追蹤結果 parquet 必須具備的欄位；缺任一欄代表是舊版 video_analyze 的產物，
+# 無法換算像素參數，直接 fail-loud（見 ADR-004）。
+REQUIRED_TRACKING_COLUMNS = ("frame_width", "frame_height")
+
 # 輸入／輸出檔名。
 TRACKING_RESULTS_FILENAME = "tracking_results.parquet"
 LINE_COUNTS_FILENAME = "line_counts.parquet"
