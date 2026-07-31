@@ -18,8 +18,8 @@ bucket_name*/
 # 分析輸出（標註影片與追蹤結果）；不帶尾斜線，讓 outputs 為 symlink 到外部碟時也擋得住
 outputs
 
-# 個人小工具（不進版控）
-cvat_zone_extraction/
+# zone 判定視覺化外掛（開發用測試工具，零侵入、上傳前刪資料夾即無痕）
+overlay/
 
 # 影片檔案
 *.mp4
