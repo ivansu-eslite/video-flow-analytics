@@ -97,9 +97,9 @@ ADR-004 的其餘內容（尺規的選擇、尺寸來源的取捨）不變。
 
 ### band 換算各包一份，不抽共用
 
-`line_counting` 與 `zone_mapping` 各有一份三行的換算，但**前置檢查不同**：line 只需
-`frame_width` 單值檢查，zone 還要加內切半徑上限檢查。現在抽共用會抽出一個殼卻要服務兩種
-前置。**第三個消費者出現時抽進 `libs/`**。（CLAUDE.md 記的 registry 防呆補丁漂移前科
+`line_counting` 與 `zone_mapping` 各有一份三行的換算，兩邊函式本體幾乎逐字相同，差別只在
+zone 這邊多回一個 `scale`（窄區域的錯誤訊息要把建議上限換算回 1080p 基準值）。為這點差異
+抽一個殼，可讀性沒有變好。**第三個消費者出現時抽進 `libs/`**。（CLAUDE.md 記的 registry 防呆補丁漂移前科
 風險型態不同：那是同一份會演化的邏輯，這裡尺規正本已由 ADR-004 固定、
 `BASELINE_FRAME_WIDTH` 是常數。）
 
@@ -110,7 +110,9 @@ Positive
 - `entries` 不再被邊界抖動灌水：實測四個 zone 由 223／424／145／385 降到 42／88／64／96
   （降 56–81%），`unique_visitors` 逐值不變。
 - `boundary_band_px_1080p = 0` 時退化成純內外判定，與改動前 `entry_debounce_frames = 1`
-  的輸出逐值一致（實測整表 `equals` 為 True），可用來對照舊資料。
+  的輸出逐值一致（實測整表 `equals` 為 True），可用來對照舊資料。理論上的已知例外是腳底
+  點恰在邊界（`d == 0`）：`points_in_polygon` 對邊界點的結果是 implementation-defined，
+  band=0 時這種點會落在帶內走 forward_fill。實測資料沒有出現這種點。
 - 同一個設定值在 1080p 與 4K 上代表同樣的實際距離，混解析度的 bucket 不必各調一套。
 - zone 幾何畫得太窄時直接報錯，不會產出一份靜默恆為 0 的 `entries`。
 
