@@ -67,7 +67,8 @@ def run_inference_pipeline(
         data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
         free_queues: 各路歸還環形緩衝 slot 用的佇列，索引為 stream_id。
         ring_buffers: 各路 `create_ring_buffer` 建立的共享記憶體。
-        frame_shapes: 各路的 `(height, width)`，索引與 `ring_buffers` 對應。
+        frame_shapes: 各路的 `(height, width)`，索引與 `ring_buffers` 對應；
+            除了配置環形緩衝，也逐列寫進追蹤結果 parquet。
         stream_names: 各路攝影機的 `stream_dirname`。
         output_root: 標註影片輸出根目錄。
         results_path: 追蹤結果 parquet 的目標路徑。
@@ -84,6 +85,7 @@ def run_inference_pipeline(
         tracker=tracker,
         output_root=output_root,
         results_path=results_path,
+        frame_shapes=frame_shapes,
     )
     pipeline.start_loop(data_queues, free_queues, rings)
 

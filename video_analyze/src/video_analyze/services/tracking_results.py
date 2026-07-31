@@ -43,6 +43,8 @@ class TrackingResultCollector:
         camera_id: str,
         packet: FramePacket,
         tracks: np.ndarray,
+        frame_width: int,
+        frame_height: int,
     ) -> None:
         """把某一格的追蹤結果加入緩衝，累積達門檻列數會自動 flush。
 
@@ -51,6 +53,10 @@ class TrackingResultCollector:
             packet: 該影格的來源資訊（frame_index、timestamp）。
             tracks: `MultiStreamByteTracker.update` 的輸出（列格式定義見該
                 函式的 Returns 說明）；空陣列時不新增任何列。
+            frame_width: 該路的影像寬度（像素）。呼叫端的 `frame_shapes` 存的是
+                `(height, width)`，順序傳反不會有型別錯誤，只會讓下游的解析度
+                換算靜默算錯。
+            frame_height: 該路的影像高度（像素）。
         """
         for track in tracks:
             x1, y1, x2, y2, track_id = track[:5]
@@ -63,6 +69,8 @@ class TrackingResultCollector:
             cols["y1"].append(float(y1))
             cols["x2"].append(float(x2))
             cols["y2"].append(float(y2))
+            cols["frame_width"].append(int(frame_width))
+            cols["frame_height"].append(int(frame_height))
             self._pending_rows += 1
         if self._pending_rows >= _FLUSH_EVERY_ROWS:
             self._flush()
