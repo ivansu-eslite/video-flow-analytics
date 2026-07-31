@@ -427,6 +427,24 @@ def _full_frames(date="2026-05-01", weekday="星期五", period="09:00"):
     )
 
 
+def _write(path: Path, frames: ReportFrames, on_duplicate_date="append", date=None):
+    """呼叫 _write_report 的測試捷徑：date 預設取 frames 帶到的日期。
+
+    date 只在「兩側都沒有資料列」時才與 frames 的內容不同（見
+    test_write_report_overwrite_clears_target_date_without_any_rows）。
+    """
+    if date is None:
+        dates = {
+            d
+            for field in ReportFrames._fields
+            if (df := getattr(frames, field)) is not None
+            for d in df["date"].to_list()
+        }
+        assert len(dates) == 1, f"測試 frames 應只帶單一日期，實得 {sorted(dates)}"
+        date = dates.pop()
+    _write_report(path, frames, datetime.date.fromisoformat(date), on_duplicate_date)
+
+
 def _sheet_rows(path: Path) -> dict[str, list[tuple]]:
     wb = openpyxl.load_workbook(path)
     rows = {
@@ -440,7 +458,7 @@ def _sheet_rows(path: Path) -> dict[str, list[tuple]]:
 def test_write_report_creates_all_sheets_with_headers(tmp_path):
     """不論該 bucket 有沒有計數線，6 個分頁的表頭一律建立，讓 BI 端的 schema 穩定。"""
     path = tmp_path / "report.xlsx"
-    _write_report(path, _zone_frames(), on_duplicate_date="append")
+    _write(path, _zone_frames(), on_duplicate_date="append")
 
     wb = openpyxl.load_workbook(path)
     assert wb.sheetnames == list(_ALL_SHEETS)
@@ -469,7 +487,7 @@ def test_write_report_adds_missing_sheets_to_legacy_workbook(tmp_path):
     wb.save(path)
     wb.close()
 
-    _write_report(path, _full_frames(), on_duplicate_date="append")
+    _write(path, _full_frames(), on_duplicate_date="append")
 
     wb = openpyxl.load_workbook(path)
     assert "活動事件1" not in wb.sheetnames
@@ -488,7 +506,7 @@ def test_write_report_overwrite_removes_date_typed_existing_rows(tmp_path):
     overwrite 模式下 _existing_dates／_remove_rows_for_dates 仍須能辨識出目標
     日期並正確刪除舊列，不因型別不同（date vs str）而比對永遠不成立。"""
     path = tmp_path / "report.xlsx"
-    _write_report(path, _zone_frames(period="09:00", value=10), "append")
+    _write(path, _zone_frames(period="09:00", value=10), "append")
 
     # 模擬用 Excel 開啟存檔後，日期欄的儲格被轉成 datetime.date 型別
     wb = openpyxl.load_workbook(path)
@@ -497,7 +515,7 @@ def test_write_report_overwrite_removes_date_typed_existing_rows(tmp_path):
     wb.save(path)
     wb.close()
 
-    _write_report(path, _zone_frames(period="10:00", value=20), "overwrite")
+    _write(path, _zone_frames(period="10:00", value=20), "overwrite")
 
     hourly_rows = _sheet_rows(path)[SHEET_ZONE_HOURLY]
     # 舊列（09:00／10）已被覆蓋刪除，不是附加成第二列
@@ -510,7 +528,7 @@ def test_write_report_overwrite_sorts_mixed_date_types_without_crashing(tmp_path
     造成），與本次新寫入的 str 型別日期混雜時，_sort_rows 排序不應因型別不同
     而 TypeError。"""
     path = tmp_path / "report.xlsx"
-    _write_report(path, _zone_frames(date="2026-04-01", weekday="星期三"), "append")
+    _write(path, _zone_frames(date="2026-04-01", weekday="星期三"), "append")
 
     wb = openpyxl.load_workbook(path)
     for sheet_name in (SHEET_ZONE_HOURLY, SHEET_ZONE_PEAK):
@@ -519,7 +537,7 @@ def test_write_report_overwrite_sorts_mixed_date_types_without_crashing(tmp_path
     wb.close()
 
     # overwrite 目標是 2026-05-01，2026-04-01 不受影響、維持 date 型別
-    _write_report(path, _zone_frames(period="10:00", value=20), "overwrite")
+    _write(path, _zone_frames(period="10:00", value=20), "overwrite")
 
     dates = [
         d.strftime("%Y-%m-%d") if isinstance(d, datetime.date) else d
@@ -532,7 +550,7 @@ def test_write_report_sorts_sheets_containing_blank_rows(tmp_path):
     """既有分頁可能含全空列（實測既有 report.xlsx 的活動事件分頁就有）；本次新增
     三個會被排序的分頁，_sort_key 拿 None 與 str 比較會 TypeError。"""
     path = tmp_path / "report.xlsx"
-    _write_report(path, _full_frames(), "append")
+    _write(path, _full_frames(), "append")
 
     # 插在資料列之間才會被存檔保留（openpyxl 會裁掉檔尾的空列）
     wb = openpyxl.load_workbook(path)
@@ -540,7 +558,7 @@ def test_write_report_sorts_sheets_containing_blank_rows(tmp_path):
     wb.save(path)
     wb.close()
 
-    _write_report(path, _full_frames(date="2026-05-02", weekday="星期六"), "overwrite")
+    _write(path, _full_frames(date="2026-05-02", weekday="星期六"), "overwrite")
 
     rows = _sheet_rows(path)[SHEET_LINE_HOURLY]
     # 全空列排在最前面且被保留，兩天的資料都在
@@ -551,9 +569,9 @@ def test_write_report_sorts_sheets_containing_blank_rows(tmp_path):
 def test_write_report_overwrite_is_idempotent_across_all_sheets(tmp_path):
     """同一天以 overwrite 重跑，6 個分頁的列序與內容都須逐列一致。"""
     path = tmp_path / "report.xlsx"
-    _write_report(path, _full_frames(), "overwrite")
+    _write(path, _full_frames(), "overwrite")
     first = _sheet_rows(path)
-    _write_report(path, _full_frames(), "overwrite")
+    _write(path, _full_frames(), "overwrite")
 
     assert _sheet_rows(path) == first
 
@@ -562,10 +580,10 @@ def test_write_report_overwrite_clears_line_sheets_when_line_side_is_none(tmp_pa
     """registry 移除 lines 後以 overwrite 重跑該日：出入口三頁的舊列要一併清除，
     否則同一天會在不同分頁混雜新舊資料。"""
     path = tmp_path / "report.xlsx"
-    _write_report(path, _full_frames(), "append")
+    _write(path, _full_frames(), "append")
     assert _sheet_rows(path)[SHEET_LINE_HOURLY]
 
-    _write_report(path, _zone_frames(period="10:00", value=99), "overwrite")
+    _write(path, _zone_frames(period="10:00", value=99), "overwrite")
 
     rows = _sheet_rows(path)
     assert rows[SHEET_LINE_HOURLY] == []
@@ -574,14 +592,34 @@ def test_write_report_overwrite_clears_line_sheets_when_line_side_is_none(tmp_pa
     assert len(rows[SHEET_ZONE_HOURLY]) == 1
 
 
+def test_write_report_overwrite_clears_target_date_without_any_rows(tmp_path):
+    """上游重跑後該日事件清空（0 列，不是缺資料）時 overwrite 仍須清掉該日舊列：
+    要清的日期取自本次彙總的 date，只看資料內容的話 0 列就清不到任何東西。"""
+    path = tmp_path / "report.xlsx"
+    _write(path, _full_frames(), "append")
+    assert _sheet_rows(path)[SHEET_ZONE_HOURLY]
+
+    empty = _frames(
+        zone_hourly=_make_zone_hourly_df([]),
+        zone_peak=_make_zone_peak_df([]),
+        line_hourly=_make_line_hourly_df([]),
+        line_peak_in=_make_line_peak_df([]),
+        line_peak_out=_make_line_peak_df([]),
+    )
+    _write(path, empty, "overwrite", date="2026-05-01")
+
+    rows = _sheet_rows(path)
+    assert all(rows[sheet] == [] for sheet in _ALL_SHEETS)
+
+
 def test_write_report_error_mode_writes_nothing_on_conflict(tmp_path):
     """error 模式遇到日期衝突時，6 個分頁都不可被寫入（跨分頁的原子性）。"""
     path = tmp_path / "report.xlsx"
-    _write_report(path, _full_frames(), "append")
+    _write(path, _full_frames(), "append")
     before = _sheet_rows(path)
 
     with pytest.raises(ValueError, match="未寫入任何內容"):
-        _write_report(path, _full_frames(period="10:00"), "error")
+        _write(path, _full_frames(period="10:00"), "error")
 
     assert _sheet_rows(path) == before
 
@@ -594,10 +632,10 @@ def test_write_report_error_mode_detects_conflict_on_line_sheets(tmp_path):
             [("2026-05-01", "星期五", "09:00", "四樓書店", "main_gate", 3, 1, 2)]
         )
     )
-    _write_report(path, line_only, "append")
+    _write(path, line_only, "append")
 
     with pytest.raises(ValueError, match="未寫入任何內容"):
-        _write_report(path, line_only, "error")
+        _write(path, line_only, "error")
 
 
 def test_write_report_closes_workbook_after_save(tmp_path):
@@ -607,6 +645,6 @@ def test_write_report_closes_workbook_after_save(tmp_path):
     with mock.patch(
         "openpyxl.workbook.workbook.Workbook.close", autospec=True
     ) as mock_close:
-        _write_report(path, _zone_frames(), on_duplicate_date="append")
+        _write(path, _zone_frames(), on_duplicate_date="append")
 
     assert mock_close.called

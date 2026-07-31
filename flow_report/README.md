@@ -135,7 +135,9 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 **`bucket_minutes` 放在 `[input]` 而非 `[report]`**：它描述的是**輸入資料**的粒度（上游
 兩包寫出 parquet 時用的值），不是報表的呈現粒度——後者是 `[report] period_minutes`。
 區域與計數線共用這一個數字，兩包的設定若不一致，這裡只能對上其中一個（見「已知限制」）。
-沿用舊的 `[zone] bucket_minutes` 會直接報錯並指出新位置。
+沿用舊的 `[zone] bucket_minutes` 會直接報錯並指出新位置，環境變數形式
+（`ZONE__BUCKET_MINUTES`）同樣擋下——pydantic-settings 只查已知欄位名，不擋的話這個
+覆寫會變成靜默忽略、`bucket_minutes` 悄悄退回預設值。
 
 `on_duplicate_date` 三種模式的行為：
 
@@ -145,8 +147,11 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 | `append` | 直接附加到尾端、不檢查；重跑同一天會產生重複列 |
 | `error` | 發現重複日期即整個中止，不寫入任何內容 |
 
-`overwrite` 與 `error` 的日期集合取**區域與計數線兩邊的聯集**，且作用於本階段寫入的五個
-分頁（`活動事件` 由其他來源寫入，本階段完全不動它）：
+`overwrite` 與 `error` 的日期集合取**本次彙總的日期，加上區域與計數線兩邊資料實際帶到的
+日期**，且作用於本階段寫入的五個分頁（`活動事件` 由其他來源寫入，本階段完全不動它）：
+
+- 本次彙總的日期一律計入，因為上游重跑後該日事件可能清空（0 列是正常產物，不是缺資料）；
+  只看資料內容的話這種情況一列都清不到，該日的舊資料會留在報表裡。
 
 - `overwrite` 時聯集日期一律從五個分頁清除，該日沒有資料的分頁**只清不寫**。若改成「沒有
   資料的分頁完全不動」，registry 移除 `lines` 後重跑該日，出入口三頁會留著舊列、區域兩頁

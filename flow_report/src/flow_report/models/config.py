@@ -1,4 +1,5 @@
 import datetime
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -97,16 +98,26 @@ class AppConfig(BaseSettings):
     def _reject_moved_zone_section(cls, data: Any) -> Any:
         """舊的 `[zone]` 區塊要報出「已移到哪裡」，而非通用的未知區塊訊息。
 
-        `extra="forbid"` 本來就會擋下 `[zone]`，但訊息只說不允許額外欄位，看不出
-        `bucket_minutes` 該搬到哪個區塊；沿用舊設定的人需要知道下一步怎麼改。
-        `mode="before"` 先於 `extra="forbid"` 觸發，toml 與環境變數兩條路徑都會
-        走到這裡。
+        `extra="forbid"` 本來就會擋下 `config.toml` 裡的 `[zone]`，但訊息只說不允許
+        額外欄位，看不出 `bucket_minutes` 該搬到哪個區塊；沿用舊設定的人需要知道
+        下一步怎麼改。
+
+        環境變數要另外掃 `os.environ`：pydantic-settings 的 env source 只查已知欄位
+        名，產不出 `zone` 這個 key，`ZONE__BUCKET_MINUTES` 不會進到 `data` 裡，也
+        不會被 `extra="forbid"` 擋下——原本有效的覆寫會變成靜默忽略，正是這裡要擋的
+        失敗模式。大小寫都掃，因為 pydantic-settings 預設不分大小寫。
         """
-        if isinstance(data, dict) and "zone" in data:
+        legacy_env_keys = sorted(
+            key for key in os.environ if key.upper().startswith("ZONE__")
+        )
+        if (isinstance(data, dict) and "zone" in data) or legacy_env_keys:
+            source = (
+                f"環境變數 {legacy_env_keys}" if legacy_env_keys else "[zone] 區塊"
+            )
             raise ValueError(
-                "[zone] 區塊已移除：bucket_minutes 改放 [input]，由區域統計與"
-                "計數線統計共用同一個上游時段粒度。請把 [zone] 底下的 "
-                "bucket_minutes 移到 [input] 底下。"
+                f"{source}：[zone] 已移除，bucket_minutes 改放 [input]，由區域統計與"
+                "計數線統計共用同一個上游時段粒度。請把 bucket_minutes 移到 [input] "
+                "底下（環境變數為 INPUT__BUCKET_MINUTES）。"
             )
         return data
 

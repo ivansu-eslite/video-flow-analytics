@@ -317,14 +317,18 @@ def _sort_rows(ws: Worksheet, key_columns: tuple[int, ...]) -> None:
         ws.append(row)
 
 
-def _frame_dates(frames: ReportFrames) -> set[str]:
-    """本次涉及的日期：zone 與 line 兩邊的聯集。
+def _frame_dates(frames: ReportFrames, date: datetime.date) -> set[str]:
+    """本次涉及的日期：本次彙總的 `date`，加上各分頁資料實際帶到的日期。
 
     取聯集而非各分頁各自為政，是為了讓 `overwrite` 維持「該日的完整重寫」這個
     單一語義——否則 registry 移除 `lines` 後重跑該日，出入口三頁會留著舊列、
     區域兩頁換成新列，同一天在不同分頁混雜新舊資料。
+
+    `date` 一律計入，資料本身可能一列都沒有（上游重跑後該日事件清空是 0 列，
+    不是缺資料），只看資料內容的話這種情況會清不到任何列，該日的舊資料留在
+    報表裡，同樣不符「完整重寫」。
     """
-    dates: set[str] = set()
+    dates: set[str] = {date.isoformat()}
     for sheet in _DATA_SHEETS:
         df = getattr(frames, sheet.field)
         if df is not None:
@@ -335,9 +339,10 @@ def _frame_dates(frames: ReportFrames) -> set[str]:
 def _write_report(
     path: Path,
     frames: ReportFrames,
+    date: datetime.date,
     on_duplicate_date: Literal["overwrite", "append", "error"],
 ) -> None:
-    new_dates = _frame_dates(frames)
+    new_dates = _frame_dates(frames, date)
 
     if path.exists():
         wb = openpyxl.load_workbook(path)
@@ -438,12 +443,12 @@ def export_report_daily(
 
     bucket_name = Path(bucket_dir).name
     report_path = output_root / bucket_name / REPORT_FILENAME
-    _write_report(report_path, frames, on_duplicate_date)
+    _write_report(report_path, frames, date, on_duplicate_date)
 
     logger.info(
         "人流報表已寫入",
         path=str(report_path),
-        dates=sorted(_frame_dates(frames)),
+        dates=sorted(_frame_dates(frames, date)),
         rows_by_sheet={
             sheet.name: (
                 None

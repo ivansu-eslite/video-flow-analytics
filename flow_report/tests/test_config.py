@@ -8,7 +8,9 @@
 `_get_toml_path` 不會改變它，故這裡改用指定 `toml_file` 的子類別來測實際載入行為。
 """
 
+import os
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from pydantic import ValidationError
@@ -83,6 +85,21 @@ def test_legacy_zone_section_reports_where_bucket_minutes_moved(tmp_path):
 
     with pytest.raises(ValidationError, match="bucket_minutes 改放 \\[input\\]"):
         _config_class(toml)()
+
+
+def test_legacy_zone_env_var_is_rejected_instead_of_silently_ignored(tmp_path):
+    """舊的 `ZONE__BUCKET_MINUTES` 環境變數同樣要擋下。
+
+    pydantic-settings 的 env source 只查已知欄位名，這個變數不會進到模型、也不會被
+    `extra="forbid"` 擋下——原本有效的覆寫會變成靜默忽略，`bucket_minutes` 悄悄退回
+    預設值，正是這條驗證要消除的失敗模式。
+    """
+    toml = tmp_path / "config.toml"
+    toml.write_text("[input]\nbucket_minutes = 60\n", encoding="utf-8")
+
+    with mock.patch.dict(os.environ, {"ZONE__BUCKET_MINUTES": "30"}):
+        with pytest.raises(ValidationError, match="bucket_minutes 改放 \\[input\\]"):
+            _config_class(toml)()
 
 
 def test_invalid_value_in_toml_raises_instead_of_silently_defaulting(tmp_path):
