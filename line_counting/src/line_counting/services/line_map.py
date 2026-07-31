@@ -18,6 +18,7 @@ from vfa_registry import load_registry, parse_and_validate_lines, registry_path
 
 from line_counting.config.constants import (
     BASELINE_FRAME_WIDTH,
+    DEFAULT_CROSSING_BAND_PX_1080P,
     LINE_COUNTS_FILENAME,
     LINE_COUNTS_SCHEMA,
     OUTPUT_ROOT,
@@ -77,7 +78,7 @@ def count_lines_daily(
     date: datetime.date,
     bucket_dir: str,
     bucket_minutes: int,
-    crossing_band_px_1080p: float = 25,
+    crossing_band_px_1080p: float = DEFAULT_CROSSING_BAND_PX_1080P,
     output_root: Path = OUTPUT_ROOT,
 ) -> Path:
     """讀取當日追蹤結果，依 `camera_registry.yaml` 的計數線定義統計進出人數。

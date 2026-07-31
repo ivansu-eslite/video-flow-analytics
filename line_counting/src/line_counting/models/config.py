@@ -11,6 +11,8 @@ from pydantic_settings import (
 )
 from vfa_observability import StructuredLogger
 
+from line_counting.config.constants import DEFAULT_CROSSING_BAND_PX_1080P
+
 logger = StructuredLogger(component="config")
 
 
@@ -29,7 +31,9 @@ class LineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     bucket_minutes: int = Field(default=60, ge=1)
-    crossing_band_px_1080p: float = Field(default=25, ge=0)
+    crossing_band_px_1080p: float = Field(
+        default=DEFAULT_CROSSING_BAND_PX_1080P, ge=0
+    )
 
     @model_validator(mode="before")
     @classmethod

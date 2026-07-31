@@ -88,7 +88,7 @@ def test_polyline_crossing_counts_and_directs_correctly():
     assert _totals(result) == (1, 0)
 
 
-def test_band_filters_jitter_within_dead_zone():
+def test_band_filters_jitter_within_line_region():
     # band=3：腳底在線段區域內（|d|<3）來回抖動不產生跨越
     result = count_line_crossings(
         _make_cam_sub([(10, 20), (10, 9), (10, 20), (10, 20)]),
@@ -117,7 +117,7 @@ def test_band_still_counts_crossing_larger_than_band():
     assert _totals(result) == (1, 0)
 
 
-def test_band_boundary_distance_stays_in_dead_zone():
+def test_band_boundary_distance_stays_in_line_region():
     # 邊界鎖：腳底恰在 d == band（y=7 → d=+3）時屬線段區域內、不確認側別，committed 沿用
     # 前一格的外側（y=20 → d=-10）→ 不產生跨越。守護 `> band`（而非 `>= band`）：
     # 改成 >= 會把邊界點誤判為內側而多算一次 in。
@@ -127,7 +127,7 @@ def test_band_boundary_distance_stays_in_dead_zone():
     assert _totals(result) == (0, 0)
 
 
-def test_forward_fill_carries_side_through_multi_frame_dead_zone():
+def test_forward_fill_carries_side_through_multi_frame_line_region():
     # hysteresis 鎖：跨越途中連續 2 格落在線段區域內（y=9 → d=+1 < band=3）才落定對側，
     # forward_fill 讓線段區域內沿用前一個已確認側別，最終仍正確判為一次 in。拿掉
     # forward_fill 會讓 committed 在線段區域內變 null、經 shift 汙染 _prev，使跨越被靜默漏計。
@@ -218,7 +218,7 @@ def test_diagonal_crossing_counts_even_when_previous_frame_is_beyond_the_endpoin
     assert _totals(result) == (1, 0)
 
 
-def test_dwelling_in_dead_zone_before_entering_still_counts():
+def test_dwelling_in_line_region_before_entering_still_counts():
     # 防過度修正：外側接近 → 門口線段區域內駐留數格 → 進場（band=3）。相交發生在線段區域內的
     # 那一格，確認側別翻轉則晚好幾格才發生；閘門比對的是「上次確認側別以來」的累計
     # 相交數，故仍計 1 in。門口駐留正是 ADR-001 引入 Schmitt-trigger 要解的情境。

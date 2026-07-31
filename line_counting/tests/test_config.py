@@ -9,18 +9,22 @@
 `_get_toml_path` 不會改變它，故這裡改用指定 `toml_file` 的子類別來測實際載入行為。
 """
 
+import inspect
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
 
+from line_counting.config.constants import DEFAULT_CROSSING_BAND_PX_1080P
 from line_counting.models.config import (
     AppConfig,
+    LineConfig,
     _get_toml_path,
     find_project_root,
     load_config,
 )
+from line_counting.services.line_map import count_lines_daily
 
 # 設定來源含環境變數，且欄位名未加前綴：執行環境剛好有這些變數時會蓋掉 toml 的值，
 # 讓測試結果取決於誰的機器在跑。逐一清掉，測的才是「從這份 toml 載入」的行為。
@@ -67,14 +71,21 @@ def test_get_toml_path_points_to_existing_config():
     assert path.endswith("config.toml")
 
 
-def test_shipped_toml_and_model_agree_on_crossing_band():
-    """版控的 `config.toml` 與 `LineConfig` 的預設值要一致。
+def test_default_crossing_band_agrees_across_all_three_places():
+    """版控的 `config.toml`、`LineConfig` 與 `count_lines_daily` 簽名的預設值要一致。
 
-    這個值是實測調出來的（見 README），不是「沒設定時的中性值」；兩處分岔會讓同一份
-    程式在有／沒有 `config.toml` 的環境下用不同的去抖尺度統計，而且不會有任何錯誤訊息。
-    日後調整這個值時兩處都要改。（`bucket_dir` 一類的欄位刻意不受此約束。）
+    這個值是實測調出來的（見 README），不是「沒設定時的中性值」；任兩處分岔都會讓同
+    一份程式用不同的去抖尺度統計，而且不會有任何錯誤訊息——沒有 `config.toml` 的環境
+    吃模型預設值，直接呼叫 `count_lines_daily`（README 說明的正式進入點）吃的是簽名
+    預設值。後兩者已共用同一個常數，`config.toml` 無法引用常數，由本測試鎖住。
+    （`bucket_dir` 一類的欄位刻意不受此約束。）
     """
-    assert AppConfig().line.crossing_band_px_1080p == 25
+    assert AppConfig().line.crossing_band_px_1080p == DEFAULT_CROSSING_BAND_PX_1080P
+    assert LineConfig().crossing_band_px_1080p == DEFAULT_CROSSING_BAND_PX_1080P
+    signature_default = inspect.signature(count_lines_daily).parameters[
+        "crossing_band_px_1080p"
+    ].default
+    assert signature_default == DEFAULT_CROSSING_BAND_PX_1080P
 
 
 def test_uses_defaults_when_toml_missing(tmp_path):

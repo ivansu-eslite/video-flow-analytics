@@ -15,8 +15,15 @@ OUTPUT_ROOT = Path("outputs")
 # 表示的值，執行時各攝影機依 `frame_width / 1920` 換算成自己的實際像素（見 ADR-004）。
 BASELINE_FRAME_WIDTH = 1920
 
+# 線段區域寬度的預設值（1080p 基準像素），由實測挑出，見 README「已知限制」。
+# `LineConfig` 與 `count_lines_daily` 的簽名共用這一份，避免「預設」在同一個套件裡
+# 有兩個意思；`config.toml` 無法引用常數，那一份由 tests/test_config.py 鎖住一致性。
+DEFAULT_CROSSING_BAND_PX_1080P = 25
+
 # 追蹤結果 parquet 必須具備的欄位；缺任一欄代表是舊版 video_analyze 的產物，
-# 無法換算像素參數，直接 fail-loud（見 ADR-004）。
+# 無法換算像素參數，直接 fail-loud（見 ADR-004）。`frame_height` 本次的換算用不到，
+# 仍列為必要：兩欄同時寫入，只有其中一欄代表產物不完整，此時放行等於接受一份來源
+# 不明的 parquet；後續的幾何合理性檢查也要用它。
 REQUIRED_TRACKING_COLUMNS = ("frame_width", "frame_height")
 
 # 輸入／輸出檔名。
