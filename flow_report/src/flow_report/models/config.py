@@ -1,8 +1,8 @@
 import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -14,27 +14,14 @@ from vfa_observability import StructuredLogger
 logger = StructuredLogger(component="config")
 
 
-class ZoneConfig(BaseModel):
-    """上游 zone 人流統計的參數，本包只需要其中的時段粒度。
-
-    Attributes:
-        bucket_minutes: 上游 `zone_counts.parquet` 的時段粒度（分鐘）。
-            `export_report_daily` 用它驗證 `report.period_minutes` 是它的倍數，
-            故須與產生該份 parquet 時的設定一致。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    bucket_minutes: int = Field(default=60, ge=1)
-
-
 class ReportConfig(BaseModel):
     """Excel 人流報表參數。
 
     Attributes:
         period_minutes: 報表人流彙總的時段粒度（分鐘），需為
-            zone.bucket_minutes 的倍數。
-        metric: 決定「人流量」「尖峰人流」用哪個統計量。
+            input.bucket_minutes 的倍數。
+        metric: 決定「人流量」「尖峰人流」用哪個統計量；只作用於區域統計，
+            計數線固定用 `in_count`／`out_count`。
         on_duplicate_date: 同一天資料已存在時的處理方式。
     """
 
@@ -53,12 +40,19 @@ class InputConfig(BaseModel):
             `outputs/{bucket}/` 下的輸入與輸出路徑。
         date: 開發時由 config 指定彙總日期；正式呼叫端可直接以參數呼叫
             `export_report_daily`。
+        bucket_minutes: 上游 `zone_counts.parquet`／`line_counts.parquet` 的
+            時段粒度（分鐘）。`export_report_daily` 用它驗證
+            `report.period_minutes` 是它的倍數，故須與產生這兩份 parquet 時
+            的設定一致。它描述的是**輸入資料**的粒度（上游兩包寫檔時用的
+            值），不是報表的呈現粒度（後者是 `report.period_minutes`），
+            故放在 `[input]` 而非 `[report]`。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     bucket_dir: str = "bucket_name"
     date: datetime.date | None = None
+    bucket_minutes: int = Field(default=60, ge=1)
 
 
 def find_project_root(start_path: Path) -> Path | None:
@@ -87,7 +81,6 @@ class AppConfig(BaseSettings):
 
     Attributes:
         input: `export_report_daily` 輸入參數。
-        zone: 上游 zone 人流統計參數。
         report: Excel 報表參數。
     """
 
@@ -98,6 +91,24 @@ class AppConfig(BaseSettings):
         env_nested_delimiter="__",
         extra="forbid",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_moved_zone_section(cls, data: Any) -> Any:
+        """舊的 `[zone]` 區塊要報出「已移到哪裡」，而非通用的未知區塊訊息。
+
+        `extra="forbid"` 本來就會擋下 `[zone]`，但訊息只說不允許額外欄位，看不出
+        `bucket_minutes` 該搬到哪個區塊；沿用舊設定的人需要知道下一步怎麼改。
+        `mode="before"` 先於 `extra="forbid"` 觸發，toml 與環境變數兩條路徑都會
+        走到這裡。
+        """
+        if isinstance(data, dict) and "zone" in data:
+            raise ValueError(
+                "[zone] 區塊已移除：bucket_minutes 改放 [input]，由區域統計與"
+                "計數線統計共用同一個上游時段粒度。請把 [zone] 底下的 "
+                "bucket_minutes 移到 [input] 底下。"
+            )
+        return data
 
     @classmethod
     def settings_customise_sources(
@@ -115,7 +126,6 @@ class AppConfig(BaseSettings):
         )
 
     input: InputConfig = Field(default_factory=InputConfig)
-    zone: ZoneConfig = Field(default_factory=ZoneConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
 
 

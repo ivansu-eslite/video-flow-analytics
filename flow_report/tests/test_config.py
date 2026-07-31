@@ -53,14 +53,13 @@ def test_uses_defaults_when_toml_missing(tmp_path):
 
     assert config.report.period_minutes == 60
     assert config.report.metric == "entries"
-    assert config.zone.bucket_minutes == 60
+    assert config.input.bucket_minutes == 60
 
 
 def test_reads_values_from_toml(tmp_path):
     toml = tmp_path / "config.toml"
     toml.write_text(
-        '[input]\nbucket_dir = "bucket_x"\ndate = 2026-05-01\n'
-        "[zone]\nbucket_minutes = 30\n"
+        '[input]\nbucket_dir = "bucket_x"\ndate = 2026-05-01\nbucket_minutes = 30\n'
         '[report]\nperiod_minutes = 90\nmetric = "unique_visitors"\n',
         encoding="utf-8",
     )
@@ -68,9 +67,22 @@ def test_reads_values_from_toml(tmp_path):
     config = _config_class(toml)()
 
     assert config.input.bucket_dir == "bucket_x"
-    assert config.zone.bucket_minutes == 30
+    assert config.input.bucket_minutes == 30
     assert config.report.period_minutes == 90
     assert config.report.metric == "unique_visitors"
+
+
+def test_legacy_zone_section_reports_where_bucket_minutes_moved(tmp_path):
+    """沿用舊 `[zone] bucket_minutes` 的設定檔要報出新位置。
+
+    `extra="forbid"` 本來就會擋下 `[zone]`，但只說「不允許額外欄位」；沿用舊設定
+    的人需要知道該把這個數值搬到哪裡，否則只能去翻 source。
+    """
+    toml = tmp_path / "config.toml"
+    toml.write_text("[zone]\nbucket_minutes = 30\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="bucket_minutes 改放 \\[input\\]"):
+        _config_class(toml)()
 
 
 def test_invalid_value_in_toml_raises_instead_of_silently_defaulting(tmp_path):
