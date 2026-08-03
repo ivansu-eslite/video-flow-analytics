@@ -159,6 +159,11 @@ boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像
 - **內切半徑用格點取樣，求出的是下界**：真正的內切圓心不一定落在格點上，因此檢查會略微
   低估、可能誤擋邊緣案例。誤擋時**整天所有攝影機的 `zone_mapping` 都不會產出**，錯誤
   訊息會列出兩條操作路徑（調小 band 或把 zone 多邊形畫寬）。
+- **本階段沒產出時，當日整份報表都不會產出**：`flow_report` 的輸入必要性看
+  `camera_registry_used.yaml` 快照，快照裡有 `zones` 定義就必須有 `zone_counts.parquet`，
+  缺檔會中止整份報表、連出入口三個分頁也不產（見
+  [ADR-005](../docs/adr/005-report-input-requirement-from-snapshot.md)）。上面兩道
+  fail-loud 誤擋的代價因此不只是區域那兩頁。
 - **跨日報表會混到兩種口徑**：`flow_report` 以 `append` 累加各日的 `zone_counts.parquet`，
   改動前後產出的 `entries` 語義不同。要口徑一致就得重跑歷史日期，否則需在報表註明
   改動日期。`unique_visitors` 無此問題（數值完全不變）。
