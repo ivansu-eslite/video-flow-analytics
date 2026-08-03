@@ -68,7 +68,9 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 說明為何不驗證跨攝影機唯一；ADR-003：計數線的有效長度，在側別翻轉之外加一道「軌跡要
 真的穿過有限線段」的閘門（修正 ADR-001 的無限直線前提），並說明為何不採逐格有效性閘門；
 ADR-004：線段區域參數的尺規與影像尺寸來源，決定像素參數改以 1080p 為基準依 `frame_width`
-換算，尺寸由上游寫進 parquet（而非人工填 registry 或下游讀影片 header）。
+換算，尺寸由上游寫進 parquet（而非人工填 registry 或下游讀影片 header）；ADR-005：
+`flow_report` 的輸入必要性改由 `camera_registry_used.yaml` 快照的定義決定（不看檔案在
+不在），說明為何刻意不留跳過用的旗標。
 
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
 
@@ -97,7 +99,7 @@ ADR-004：線段區域參數的尺規與影像尺寸來源，決定像素參數�
   本身無需改碼。
 - **`config.py`：仍刻意各包分開**，各包只保留自己 `run_*` 實際讀到的區塊（`video_analyze`
   保留 `tracker`/`model`/`output`/`input`；`zone_mapping` 保留 `input`/`zone`；`line_counting`
-  保留 `input`/`line`；`flow_report` 保留 `input`/`zone.bucket_minutes`/`report`）。四包皆已
+  保留 `input`/`line`；`flow_report` 保留 `input`（含 `bucket_minutes`）/`report`）。四包皆已
   DDD 重構（`flow_report` issue #42、`zone_mapping` issue #46、`video_analyze` issue #50、
   `line_counting` issue #41 沿用 `zone_mapping` 的結構建立），config 都在 `models/config.py` 並改用
   pydantic-settings（`config.toml`＋環境變數覆寫）、以 `find_project_root` 定位設定檔。
@@ -127,14 +129,29 @@ ADR-004：線段區域參數的尺規與影像尺寸來源，決定像素參數�
 
 `line_counting` 的計數線名稱有**同樣**的約束：下游同樣以 line 名稱（不含 `camera_id`）
 分組彙總，故 line 名稱跨攝影機也不可重複，由 `vfa_registry` 的 `parse_and_validate_lines`
-擋下——**即使當天不會產生報表，`line_counting` 本身也會擋下跨攝影機重複的 line 命名**
-（`flow_report` 對 line 的串接、對快照的同型驗證另開 issue，本次只做到 `line_counting`）。
+擋下——**即使當天不會產生報表，`line_counting` 本身也會擋下跨攝影機重複的 line 命名**。
+`flow_report` 於 issue #69 串接 `line_counts.parquet` 後，也對同一份快照呼叫
+`parse_and_validate_lines`，與 zone 那側是同型驗證（同樣驗快照、不驗當下的檔案）。
 
 `Line` 另帶一個 `line_group` 欄位（issue #59），標示一條計數線屬於哪個範圍（例如同一
 賣場的數個出入口）。**`line_group` 是與上述規則刻意相反的例外**：跨攝影機同名不但不
 擋，還正是分組的用途——一個範圍的出入口本來就可能分屬不同攝影機。`line` 名稱本身仍全域
 唯一，故 `(line_group, line)` 組合天然唯一。取捨與「為何不能順手補上同型驗證」見
 [ADR-002](docs/adr/002-line-group-semantics.md)。
+
+### `flow_report` 的輸入必要性看快照，不看檔案（跨套件契約）
+
+`flow_report` 有兩個上游輸入，**該有哪幾份由 `camera_registry_used.yaml` 快照的定義決定**：
+快照裡有攝影機定義了非空 `lines` 就必須有 `line_counts.parquet`，缺檔即 fail loud；沒有
+任何 `lines` 定義則整批跳過出入口三個分頁、不算錯誤（zone 那側同理，判準是
+`participates_in_zone_mapping` 且 `zones` 非空）。這是**這條 repo 唯一不照「下游看上游輸出
+檔是否存在」原則的階段**，根 README 的階段相依原則那段已寫明這個例外；`zone_mapping`／
+`line_counting` 只有單一上游、沒有這個歧義，維持看檔案。取捨與「為何刻意不留跳過用的
+旗標」見 [ADR-005](docs/adr/005-report-input-requirement-from-snapshot.md)。
+
+後果是 `flow_report` 從此被 `line_counting` 綁住：快照只要有任一 `lines`，沒跑
+`line_counting` 就連 zone 兩頁都產不出來（整個 `export_report_daily` 中止）。排程上
+`zone_mapping` 與 `line_counting` 都要排在 `flow_report` 之前。
 
 ### 時區不變量（貫穿四包）
 
