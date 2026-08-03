@@ -225,11 +225,11 @@ cameras:
 | `outputs/{bucket}/report.xlsx` | flow_report | 跨日累加的 Excel 報表（六個分頁：區域兩頁、出入口三頁、活動事件一頁） |
 
 **`tracking_results.parquet` 的影像尺寸欄位是跨套件的硬性契約**：`frame_width`／
-`frame_height` 由 `video_analyze` 逐列寫入，供 `line_counting` 把設定檔的 1080p 基準像素
-換算成各攝影機的實際像素——它是純 CPU 套件、部署時不掛載影片，只能從這裡取得尺寸。缺這
-兩欄的舊 parquet 會被 `line_counting` 直接擋下（不給「當成 1080p」的 fallback），
-`zone_mapping` 則不讀這兩欄、照跑不誤。取捨見
-[ADR-004](docs/adr/004-band-resolution-scaling.md)。
+`frame_height` 由 `video_analyze` 逐列寫入，供 `line_counting` 與 `zone_mapping` 把設定檔
+的 1080p 基準像素換算成各攝影機的實際像素——兩者都是純 CPU 套件、部署時不掛載影片，只能
+從這裡取得尺寸。缺這兩欄的舊 parquet 會被兩包直接擋下（不給「當成 1080p」的 fallback）。
+取捨見 [ADR-004](docs/adr/004-band-resolution-scaling.md)；`zone_mapping` 何時開始依賴
+這兩欄見 [ADR-006](docs/adr/006-zone-boundary-band.md)。
 
 ## 共用 lib
 

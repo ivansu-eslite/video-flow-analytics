@@ -12,13 +12,21 @@ track 的腳底中心點 `((x1 + x2) / 2, y2)` 做 ray-casting 判定是否落�
 | 指標 | 定義 |
 | --- | --- |
 | `unique_visitors` | 該時段內在區域出現過的不重複 `track_id` 數 |
-| `entries` | 「區域外 → 區域內」的轉換次數，`entry_debounce_frames` 控制去抖 |
+| `entries` | 「區域外 → 區域內」的轉換次數，由區域邊界緩衝帶（`boundary_band_px_1080p`）濾掉邊界抖動 |
+
+**兩項指標刻意用不同判定**（見 [ADR-006](../docs/adr/006-zone-boundary-band.md)）：
+`entries` 是事件型指標，用緩衝帶的 Schmitt-trigger——腳底點的帶號距離 `> band` 才確認
+在區內、`< -band` 才確認在區外，落在帶內時沿用前一個已確認狀態，因此在邊界附近來回
+徘徊只計一次進入。`unique_visitors` 是佔用型指標，仍用當格的 point-in-polygon 布林值，
+不吃這個黏著狀態（否則走出區域後停在邊界外緩衝帶內的人，會在其後每個時段都被算成區內
+訪客）。**`entries` 首次出現即在區內算一次進入**，與 `line_counting` 的「起始側不計」
+相反，是刻意的。
 
 本階段只做「事件轉化」，不做跨期間彙總或分析。純 CPU 向量化運算，不需 GPU。只調整區域
 幾何時僅需重跑本階段。
 
 **進入點是函式呼叫，CLI 只是外殼**：核心是
-`map_zones_daily(date, bucket_dir, bucket_minutes, entry_debounce_frames=1,
+`map_zones_daily(date, bucket_dir, bucket_minutes, boundary_band_px_1080p=25,
 output_root=OUTPUT_ROOT) -> Path`（在 `services/zone_map.py`），CLI 進入點
 `zone_mapping.main:main` 只是從 `config.toml` 組出參數後呼叫它。
 
@@ -89,7 +97,7 @@ cwd 影響。
 兩個區塊，透過 pydantic-settings 載入；**找不到此檔**時會印出警告並以各項預設值啟動，
 **此檔存在但參數不合法**則直接報錯（不靜默套用預設值）。同理，出現**未知的頂層區塊**
 （例如把 `[zone]` 拼成 `[zones]`）也會直接報錯，而非被靜默忽略。各欄位亦可用環境變數覆寫
-（巢狀分隔符 `__`，例如 `ZONE__ENTRY_DEBOUNCE_FRAMES=3`）。注意欄位名未加前綴，
+（巢狀分隔符 `__`，例如 `ZONE__BOUNDARY_BAND_PX_1080P=30`）。注意欄位名未加前綴，
 `ZONE`／`INPUT` 這兩個名稱本身也是有效的覆寫來源（設成 JSON 會整段取代該區塊），
 在共用的執行環境中留意不要與其他程式的環境變數撞名。範例：
 
@@ -99,8 +107,8 @@ bucket_dir = "bucket_name1"
 date = 2026-05-01
 
 [zone]
-bucket_minutes = 60        # 事件統計時間粒度（分鐘）
-entry_debounce_frames = 1  # 進場去抖；1 = 不去抖
+bucket_minutes = 60         # 事件統計時間粒度（分鐘）
+boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像素）；0 = 純內外判定
 ```
 
 | 區塊 | 欄位 | 預設 | 約束 / 說明 |
@@ -108,7 +116,12 @@ entry_debounce_frames = 1  # 進場去抖；1 = 不去抖
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（cwd 相對） |
 | | `date` | — | 統計日期；未設定時報錯 |
 | `[zone]` | `bucket_minutes` | `60` | 事件統計時間粒度（分鐘），`>= 1` |
-| | `entry_debounce_frames` | `1` | 連續在區域內幾格才算一次進場，`>= 1`；`1` = 不去抖 |
+| | `boundary_band_px_1080p` | `25` | `entries` 的區域邊界緩衝帶寬度，`>= 0`，以 1080p（寬 1920）為基準的像素；執行時依各攝影機的 `frame_width` 換算成實際像素（`基準值 × frame_width / 1920`，只用寬度、線性），`0` = 純內外判定且換算後仍是 `0` |
+
+同一個設定值在 1080p 與 4K 上代表同樣的實際距離，不必為混解析度的 bucket 各調一套；
+尺寸來自 `tracking_results.parquet` 的 `frame_width`／`frame_height` 欄位，取捨見
+[ADR-004](../docs/adr/004-band-resolution-scaling.md)。舊參數 `entry_debounce_frames`
+（時間去抖）已移除，沿用會直接報錯並說明語義變更。
 
 `camera_registry.yaml`（攝影機清單與區域定義，放在 `bucket_dir` 根目錄、不進版控）的
 完整格式見根 README。與本階段相關的使用限制（皆為 fail-loud，違反時直接報錯）：
@@ -118,6 +131,9 @@ entry_debounce_frames = 1  # 進場去抖；1 = 不去抖
 - **`zone` 名稱須全域唯一**：不只同一攝影機內不可重複，跨攝影機也不可重複（下游報表以
   區域名稱、不含 `camera_id` 分組彙總，同名區域會被合併）。
 - **`polygon` 至少需要 3 個頂點**，座標為該攝影機固定解析度下的像素座標。
+- **`polygon` 要寬到容得下緩衝帶**：內切半徑小於該攝影機換算後的 `boundary_band_px_1080p`
+  時直接報錯。這種區域內部沒有任何點能滿足「帶號距離 > band」，`entries` 會恆為 0；
+  報錯訊息帶算出的半徑與建議上限（半徑為格點取樣的下界，會略微低估）。
 - **`participates_in_zone_mapping = false`** 的攝影機直接跳過，不看其 `zones` 內容。
 - **定義了區域的攝影機在當日追蹤明細中必須有資料**：攝影機改名或 key 打錯時直接報錯，
   而非靜默算出漏掉區域的人流。
@@ -127,13 +143,38 @@ entry_debounce_frames = 1  # 進場去抖；1 = 不去抖
 區域幾何在載入 registry 時刻意不驗證，而是先確認攝影機對得上當日資料、再解析幾何，讓
 「攝影機對不上」這個更根本的錯誤先報出來，不被區域定義的筆誤蓋過。
 
+### 已知限制
+
+- **預設值 `25` 是保守值，不是實測最佳值**：實測掃的是 4K 的 30／50／60／115 px
+  （分別對應基準值 15／25／30／57.5），資料只來自 2026-07-28 的兩台 4K 攝影機、4 個
+  zone。實測建議 60 px（基準值 30），採用的 25 更保守——濾重複計數的力道比實測建議弱。
+  **1080p 攝影機的 zone 從未掃過**。數字與取捨見
+  [ADR-006](../docs/adr/006-zone-boundary-band.md)。
+- **加寬 band 會同時砍掉真實訪客**：基準值 25（4K 50 px）讓四個 zone 的 `entries` 降
+  56–81%，但「貢獻過 entry 的不同人數」也降到原本的 57–80%——只在區域邊緣淺淺待過、
+  從未進到深處的人不再被計為進入。`unique_visitors` 不受影響（該欄不吃緩衝帶）。
+- **內切半徑檢查是必要條件，不是充分條件**：通過檢查（半徑 > band）不代表 band 可用。
+  實測那四個 zone 的內切半徑 141–218 px，但 4K 115 px 的 band 仍讓三個代表性 track
+  完全不再被計入。
+- **內切半徑用格點取樣，求出的是下界**：真正的內切圓心不一定落在格點上，因此檢查會略微
+  低估、可能誤擋邊緣案例。誤擋時**整天所有攝影機的 `zone_mapping` 都不會產出**，錯誤
+  訊息會列出兩條操作路徑（調小 band 或把 zone 多邊形畫寬）。
+- **本階段沒產出時，當日整份報表都不會產出**：`flow_report` 的輸入必要性看
+  `camera_registry_used.yaml` 快照，快照裡有 `zones` 定義就必須有 `zone_counts.parquet`，
+  缺檔會中止整份報表、連出入口三個分頁也不產（見
+  [ADR-005](../docs/adr/005-report-input-requirement-from-snapshot.md)）。上面兩道
+  fail-loud 誤擋的代價因此不只是區域那兩頁。
+- **跨日報表會混到兩種口徑**：`flow_report` 以 `append` 累加各日的 `zone_counts.parquet`，
+  改動前後產出的 `entries` 語義不同。要口徑一致就得重跑歷史日期，否則需在報表註明
+  改動日期。`unique_visitors` 無此問題（數值完全不變）。
+
 ## 輸入 / 輸出檔案
 
 `{bucket}` = `bucket_dir` 的目錄名，皆位於倉庫根目錄的 `outputs/` 下：
 
 | 路徑 | 讀 / 寫 | 內容 |
 | --- | --- | --- |
-| `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯 |
+| `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（緩衝帶寬度的解析度換算靠它），2026-07 之前產出的舊檔沒有這兩欄，會直接報錯要求重跑 `video_analyze` |
 | `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與區域幾何 |
 | `outputs/{bucket}/{date}/zone_counts.parquet` | 寫 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries` |
 | `outputs/{bucket}/{date}/camera_registry_used.yaml` | 寫 | 本次套用的 `camera_registry.yaml` 快照，供下游以「產生此份資料時的定義」為準做驗證 |

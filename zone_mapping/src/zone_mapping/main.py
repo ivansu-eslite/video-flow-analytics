@@ -22,7 +22,7 @@ def main() -> None:
         date=settings.input.date,
         bucket_dir=settings.input.bucket_dir,
         bucket_minutes=settings.zone.bucket_minutes,
-        entry_debounce_frames=settings.zone.entry_debounce_frames,
+        boundary_band_px_1080p=settings.zone.boundary_band_px_1080p,
     )
 
 

@@ -1,9 +1,16 @@
 """Zone Mapping 的核心演算法：point-in-polygon 判定與人流聚合統計。
 
-人流指標：
-- unique_visitors：該時段內腳底落在區域內的不重複 track_id 數（不重複訪客）。
+人流指標（兩者刻意用不同判定，見 ADR-006）：
+- unique_visitors：該時段內腳底落在區域內的不重複 track_id 數（不重複訪客）。純粹
+  用 `points_in_polygon` 的布林值，不吃緩衝帶的黏著狀態——佔用型指標若吃了黏著
+  狀態，走出區域後停在邊界外緩衝帶內的人會在其後每個時段都被算成區內訪客。
 - entries：每個 track 依時間序偵測「區域外 → 區域內」的轉換次數，歸戶到轉換發生
-  那格的時段（同一人離開再進入算多次；首次出現即在區域內也算一次進入）。
+  那格的時段（同一人離開再進入算多次；首次出現即在區域內也算一次進入）。事件型
+  指標，用區域邊界緩衝帶（Schmitt-trigger）濾掉腳底點在邊界附近抖動的重複計數。
+
+**首格語義與 `line_counting` 相反**：這裡首次出現即在區內算一次 entry（人可能從
+畫面外直接走進區內，沒有「先在區外被看到」那一格）；`line_counting` 的起始側不算
+跨越（見 `docs/adr/001-line-crossing-detection.md`）。
 
 判定「人是否在區域內」用 bbox 腳底中心點 ((x1+x2)/2, y2)。
 """
@@ -43,34 +50,83 @@ def points_in_polygon(
     return inside
 
 
+def signed_distance_to_polygon(
+    xs: np.ndarray, ys: np.ndarray, polygon: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """帶號距離：正 = 在多邊形內，絕對值 = 該點到多邊形邊界的最短距離（像素）。
+
+    對封閉多邊形的每一邊算「點到線段」的有限距離（投影落在端點外時夾到端點），逐邊
+    取 running min；符號直接由 `points_in_polygon` 給，不像開放 polyline 版需要參考
+    點錨定側別（`line_counting` 的做法與此刻意不同，見 ADR-006）。
+
+    多邊形自動閉合：`Zone.polygon` 不重複首點，最後一點連回第一點的那條邊也要算，
+    否則收尾邊附近的緩衝帶會整段失效。
+
+    Args:
+        xs: 待判定點的 x 座標，長度 N。
+        ys: 待判定點的 y 座標，長度 N。
+        polygon: 多邊形頂點座標，shape 為 `(M, 2)`，`M >= 3`（自動閉合）。
+
+    Returns:
+        `(signed_d, inside)`：長度均為 N 的帶號距離與內外布林陣列。一併回傳
+        `inside` 是為了讓呼叫端沿用同一個 `points_in_polygon` 結果，不必為了
+        `unique_visitors` 再跑一次逐邊迴圈；也不可改用 `signed_d > 0` 反推，
+        邊界上 `signed_d == 0` 的點會與 `points_in_polygon` 的結果不一致。
+    """
+    px = np.asarray(xs, dtype=float)
+    py = np.asarray(ys, dtype=float)
+    poly = np.asarray(polygon, dtype=float)
+    dist = np.full(px.shape, np.inf)
+    # 逐邊迴圈取 running min（與 points_in_polygon 同風格）：峰值記憶體維持 O(N)，
+    # 不用 (N, S, 2) 廣播——距離對每個 zone 都要重算一次，全天列數下差別很大。
+    for i in range(len(poly)):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % len(poly)]  # 最後一點連回第一點
+        abx, aby = bx - ax, by - ay
+        len2 = abx * abx + aby * aby
+        apx, apy = px - ax, py - ay
+        if len2 == 0:  # 重複頂點的防呆：退化成到該點的距離
+            t = np.zeros_like(px)
+        else:
+            t = np.clip((apx * abx + apy * aby) / len2, 0.0, 1.0)
+        np.minimum(dist, np.hypot(apx - t * abx, apy - t * aby), out=dist)
+
+    inside = points_in_polygon(px, py, poly)
+    return np.where(inside, dist, -dist), inside
+
+
 def count_zone_visits(
-    cam_sub: pl.DataFrame, zone: Zone, entry_debounce_frames: int = 1
+    cam_sub: pl.DataFrame, zone: Zone, boundary_band_px: float = 0
 ) -> pl.DataFrame:
     """對單一攝影機的追蹤明細套一個 zone，回傳每個 time_bucket 的人流統計。
 
     輸入 cam_sub 需已含 foot_x / foot_y / time_bucket 欄位，且只包含該攝影機的列。
 
-    entry_debounce_frames 控制「連續幾格都在區域內才算一次進入」，用來過濾腳底點
-    在區域邊界附近來回抖動造成的假進入；預設 1 = 不去抖（一格在內就算），數字越大
-    越能濾掉抖動，代價是進入事件會延遲 (N-1) 格才被計入、歸戶到較晚的 time_bucket。
+    `entries` 用區域邊界緩衝帶的 Schmitt-trigger：帶號距離 `> band` 確認在內、
+    `< -band` 確認在外、落在帶內則沿用前一個已確認狀態，只有已確認狀態由外翻內才算
+    一次進入。腳底點在邊界附近抖動時整段維持同一個已確認狀態，因此只計一次；
+    `band = 0` 退化成純內外判定。
+
+    `unique_visitors` 不吃已確認狀態，仍用當格的 `points_in_polygon` 布林值。
 
     Args:
         cam_sub: 單一攝影機的追蹤明細，需已含 `foot_x`／`foot_y`／
             `time_bucket`／`track_id`／`timestamp` 欄位。
         zone: 要套用的區域定義。
-        entry_debounce_frames: 連續幾格都在區域內才算一次「進入」。
+        boundary_band_px: 區域邊界緩衝帶的半寬，**實際像素**（1080p 基準值的換算
+            在 `services/zone_map.py` 完成，本模組維持純幾何）。
 
     Returns:
         依 `time_bucket` 聚合的 `unique_visitors`／`entries` 統計表。
     """
-    inside = points_in_polygon(
+    signed_d, inside = signed_distance_to_polygon(
         cam_sub["foot_x"].to_numpy(),
         cam_sub["foot_y"].to_numpy(),
         np.asarray(zone.polygon, dtype=float),
     )
-    z = cam_sub.with_columns(pl.Series("in_zone", inside)).sort(
-        "track_id", "timestamp"
-    )
+    z = cam_sub.with_columns(
+        pl.Series("in_zone", inside), pl.Series("_signed_d", signed_d)
+    ).sort("track_id", "timestamp")
 
     unique_visitors = (
         z.filter(pl.col("in_zone"))
@@ -78,27 +134,26 @@ def count_zone_visits(
         .agg(pl.col("track_id").n_unique().alias("unique_visitors"))
     )
 
-    # 「確認進入」= 連續 entry_debounce_frames 格都在區域內；預設值 1 時等同單純 in_zone
-    confirmed_in = (
-        pl.col("in_zone")
-        .cast(pl.Int8)
-        .rolling_sum(
-            window_size=entry_debounce_frames, min_samples=entry_debounce_frames
-        )
-        .over("track_id")
-        # 前 N-1 格湊不滿窗格 = 未確認；留 null 會經 shift 汙染 _prev_confirmed
-        .fill_null(0)
-        == entry_debounce_frames
-    )
     entries = (
-        z.with_columns(confirmed_in.alias("_confirmed_in"))
-        .with_columns(
-            pl.col("_confirmed_in")
-            .shift(1, fill_value=False)
-            .over("track_id")
-            .alias("_prev_confirmed")
+        z.with_columns(
+            pl.when(pl.col("_signed_d") > boundary_band_px)
+            .then(1)
+            .when(pl.col("_signed_d") < -boundary_band_px)
+            .then(-1)
+            .otherwise(None)  # 落在緩衝帶內：留 null 交給 forward_fill 沿用前一格
+            .alias("_side")
         )
-        .filter(pl.col("_confirmed_in") & ~pl.col("_prev_confirmed"))
+        .with_columns(
+            pl.col("_side").forward_fill().over("track_id").alias("_committed")
+        )
+        .with_columns(pl.col("_committed").shift(1).over("track_id").alias("_prev"))
+        # `_prev` 為 null（該 track 的第一格，或前面整段都還在帶內）視為區外，首次
+        # 確認在區內即算一次進入。不可寫成 `_prev != 1`：polars 的 `null != 1` 得
+        # null，filter 會丟掉該列，首格即在區內的那次進入會靜默消失。
+        .filter(
+            (pl.col("_committed") == 1)
+            & (pl.col("_prev").is_null() | (pl.col("_prev") == -1))
+        )
         .group_by("time_bucket")
         .agg(pl.len().alias("entries"))
     )
