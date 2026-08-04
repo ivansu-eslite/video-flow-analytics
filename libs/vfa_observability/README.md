@@ -1,7 +1,7 @@
 # vfa_observability
 
-輸出單行 JSON log 的 `StructuredLogger`，由 `video_analyze`／`zone_mapping`／`flow_report`
-三包共用（`video_analyze` 於 issue #50 的 DDD 重構一併改用）。
+輸出單行 JSON log 的 `StructuredLogger`，由 `video_analyze`／`zone_mapping`／
+`line_counting`／`flow_report` 四包共用（`video_analyze` 於 issue #50 的 DDD 重構一併改用）。
 
 ## 內容
 

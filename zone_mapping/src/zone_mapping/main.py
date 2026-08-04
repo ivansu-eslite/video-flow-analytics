@@ -1,4 +1,4 @@
-"""Zone Mapping：離線下游步驟的 CLI 進入點（`zone-mapping`）。
+"""Zone Mapping：離線下游步驟的 CLI 進入點（`zone_mapping`）。
 
 從 `config.toml` 取參數後呼叫 `map_zones_daily`，把 `tracking_results.parquet`
 依各攝影機的 zone 幾何轉成 `zone_counts.parquet`。核心邏輯在

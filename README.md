@@ -131,7 +131,7 @@ uv run --package flow_report   flow_report     # 報表彙總 → report.xlsx
 ```
 
 > **時區處理**：檔名的 `Z` 尾綴依 RFC 3339 為真正的 UTC，`video_analyze` 在
-> `io/video_reader.py` 解析時即把它轉換成台北在地時間（`Asia/Taipei`，UTC+8）；此後
+> `services/video_reader.py` 解析時即把它轉換成台北在地時間（`Asia/Taipei`，UTC+8）；此後
 > `tracking_results.parquet` 的 `timestamp`、`zone_counts.parquet`／`line_counts.parquet`
 > 的 `time_bucket`、`report.xlsx` 的日期／小時皆為台北在地時間，下游不需要、也不應該再
 > 對它做任何 UTC→+8 位移。
@@ -194,7 +194,8 @@ cameras:
   區域名稱（不含 `camera_id`）分組彙總，同名區域會被合併。此規則同時作用於 `zone_mapping`
   與 `flow_report`：即使當天不產生報表，`zone_mapping` 也會擋下跨攝影機重複的區域命名。
 - **`line` 名稱同樣須全域唯一**，理由與 zone 相同（下游依計數線名稱分組彙總，不含
-  `camera_id`）。由 `line_counting` 擋下，即使當天不產生報表也一樣。
+  `camera_id`）。此規則同時作用於 `line_counting` 與 `flow_report`：即使當天不產生報表，
+  `line_counting` 也會擋下跨攝影機重複的計數線命名。
 - **`line_group` 則刻意不驗證唯一**——與 `name` 相反，同一個 `line_group` 本來就預期出現
   在不同攝影機底下，這正是分組的用途（一個範圍的數個出入口可能分屬不同攝影機）。`name`
   本身仍全域唯一，故 `(line_group, name)` 組合天然唯一。取捨見

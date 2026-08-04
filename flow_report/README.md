@@ -53,7 +53,7 @@ bucket_minutes, output_root=OUTPUT_ROOT) -> Path`（在 `services/report.py`）�
 | `services/stats.py` | 時區轉換、期間彙總、尖峰計算等純函式 |
 
 `camera_registry.yaml` 的模型與 zone／line 驗證（`vfa_registry`）、單行 JSON 的
-`StructuredLogger`（`vfa_observability`）由三包共用的 lib 提供，以 workspace 成員引用，
+`StructuredLogger`（`vfa_observability`）由四包共用的 lib 提供，以 workspace 成員引用，
 不在本包內：[libs/vfa_registry](../libs/vfa_registry)、
 [libs/vfa_observability](../libs/vfa_observability)。
 
