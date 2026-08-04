@@ -47,35 +47,43 @@ def signed_distance_to_polyline(
     Returns:
         長度為 N 的帶號垂直距離陣列，正值代表該點與 `inside_point` 同側。
     """
-    p = np.column_stack([np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)])
+    px = np.asarray(xs, dtype=float)
+    py = np.asarray(ys, dtype=float)
     pts = np.asarray(points, dtype=float)
-    a = pts[:-1]  # (S, 2) 各段起點
-    b = pts[1:]  # (S, 2) 各段終點
-    ab = b - a  # (S, 2)
-    len2 = np.einsum("si,si->s", ab, ab)  # (S,)
-    # 零長度段（連續重複頂點）在 registry 已被擋下；此處避免除零留一手
-    safe_len2 = np.where(len2 == 0, 1.0, len2)
-    seg_len = np.sqrt(np.where(len2 == 0, 1.0, len2))  # (S,)
-
-    ap = p[:, None, :] - a[None, :, :]  # (N, S, 2)
-    t = np.clip(np.einsum("nsi,si->ns", ap, ab) / safe_len2, 0.0, 1.0)  # (N, S)
-    closest = a[None, :, :] + t[:, :, None] * ab[None, :, :]  # (N, S, 2)
-    diff = p[:, None, :] - closest  # (N, S, 2)
-    dist2 = np.einsum("nsi,nsi->ns", diff, diff)  # (N, S)
-    nearest = np.argmin(dist2, axis=1)  # (N,)
-
-    # 各段無限直線的帶號垂直距離：cross(ab, ap) / |ab|
-    cross = ab[None, :, 0] * ap[..., 1] - ab[None, :, 1] * ap[..., 0]  # (N, S)
-    perp = cross / seg_len[None, :]  # (N, S) 帶號
-
-    # inside_point 相對各段無限直線的側別，用來把「同側」定為正
     inside = np.asarray(inside_point, dtype=float)
-    ai = inside[None, :] - a  # (S, 2)
-    cross_in = ab[:, 0] * ai[:, 1] - ab[:, 1] * ai[:, 0]  # (S,)
-    sign_in = np.sign(cross_in)  # (S,) registry 已擋 inside_point 共線，故非 0
 
-    signed = perp * sign_in[None, :]  # (N, S) 正 = 與 inside_point 同側
-    return signed[np.arange(p.shape[0]), nearest]
+    # 逐段迴圈取 running min（與 zone_mapping 的 signed_distance_to_polygon 同風格）：
+    # 峰值記憶體維持 O(N)，不用 (N, S, 2) 廣播——N 是全天列數，且每條線都要重算一次。
+    # 嚴格 `<` 比較讓並列時保留索引較小的段，與 argmin 取首個最小值的行為一致；此處
+    # 的並列是常態而非巧合——落在彎折頂點外側楔形區的點對相鄰兩段等距，選哪一段會
+    # 決定用哪條無限直線定號，故距離也刻意寫成 `p - (a + t*ab)` 的形式，逐位元對齊
+    # 原本的廣播算式，避免改寫在 1 ulp 的差距上翻掉這些點的側別。
+    best_d2 = np.full(px.shape, np.inf)
+    signed = np.zeros(px.shape)
+    for i in range(len(pts) - 1):
+        ax, ay = pts[i]
+        bx, by = pts[i + 1]
+        abx, aby = bx - ax, by - ay
+        len2 = abx * abx + aby * aby
+        # 零長度段（連續重複頂點）在 registry 已被擋下；此處避免除零留一手
+        safe_len2 = len2 if len2 != 0 else 1.0
+        seg_len = np.sqrt(safe_len2)
+
+        apx, apy = px - ax, py - ay
+        t = np.clip((apx * abx + apy * aby) / safe_len2, 0.0, 1.0)
+        dx, dy = px - (ax + t * abx), py - (ay + t * aby)
+        d2 = dx * dx + dy * dy
+
+        # 該段無限直線的帶號垂直距離：cross(ab, ap) / |ab|
+        perp = (abx * apy - aby * apx) / seg_len
+        # inside_point 相對同一段無限直線的側別，用來把「同側」定為正
+        # registry 已擋 inside_point 共線，故 sign 非 0
+        sign_in = np.sign(abx * (inside[1] - ay) - aby * (inside[0] - ax))
+
+        closer = d2 < best_d2
+        best_d2 = np.where(closer, d2, best_d2)
+        signed = np.where(closer, perp * sign_in, signed)
+    return signed
 
 
 def _cross2(u: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -122,29 +130,33 @@ def segment_crosses_polyline(
     Returns:
         長度為 N 的 bool 陣列；座標含 `NaN`（track 首格）的列一律為 False。
     """
-    p0 = np.column_stack([np.asarray(x0, dtype=float), np.asarray(y0, dtype=float)])
-    p1 = np.column_stack([np.asarray(x1, dtype=float), np.asarray(y1, dtype=float)])
+    q0 = np.column_stack([np.asarray(x0, dtype=float), np.asarray(y0, dtype=float)])
+    q1 = np.column_stack([np.asarray(x1, dtype=float), np.asarray(y1, dtype=float)])
     pts = np.asarray(points, dtype=float)
-    a = pts[None, :-1, :]  # (1, S, 2) 各段起點
-    b = pts[None, 1:, :]  # (1, S, 2) 各段終點
-    q0 = p0[:, None, :]  # (N, 1, 2) 位移起點
-    q1 = p1[:, None, :]  # (N, 1, 2) 位移終點
 
-    # d1/d2：位移兩端相對「計數線該段」的側；d3/d4：該段兩端相對「位移線段」的側
-    d1 = _cross2(b - a, q0 - a)  # (N, S)
-    d2 = _cross2(b - a, q1 - a)
-    d3 = _cross2(q1 - q0, a - q0)
-    d4 = _cross2(q1 - q0, b - q0)
+    # 逐段迴圈取 running or（理由同 signed_distance_to_polyline）：峰值記憶體維持
+    # O(N)，不用 (N, S, 2) 廣播。a／b 為 shape (2,)，與 (N, 2) 的位移端點自然廣播。
+    hit = np.zeros(q0.shape[0], dtype=bool)
+    for i in range(len(pts) - 1):
+        a = pts[i]
+        b = pts[i + 1]
+        # d1/d2：位移兩端相對「計數線該段」的側；d3/d4：該段兩端相對「位移線段」的側
+        d1 = _cross2(b - a, q0 - a)  # (N,)
+        d2 = _cross2(b - a, q1 - a)
+        d3 = _cross2(q1 - q0, a - q0)
+        d4 = _cross2(q1 - q0, b - q0)
 
-    proper = (d1 * d2 < 0) & (d3 * d4 < 0)
-    touching = (
-        ((d1 == 0) & _in_bbox(a, b, q0))
-        | ((d2 == 0) & _in_bbox(a, b, q1))
-        | ((d3 == 0) & _in_bbox(q0, q1, a))
-        | ((d4 == 0) & _in_bbox(q0, q1, b))
-    )
-    finite = np.isfinite(p0).all(axis=1) & np.isfinite(p1).all(axis=1)  # (N,)
-    return np.any(proper | touching, axis=1) & finite
+        proper = (d1 * d2 < 0) & (d3 * d4 < 0)
+        touching = (
+            ((d1 == 0) & _in_bbox(a, b, q0))
+            | ((d2 == 0) & _in_bbox(a, b, q1))
+            | ((d3 == 0) & _in_bbox(q0, q1, a))
+            | ((d4 == 0) & _in_bbox(q0, q1, b))
+        )
+        hit |= proper | touching
+
+    finite = np.isfinite(q0).all(axis=1) & np.isfinite(q1).all(axis=1)  # (N,)
+    return hit & finite
 
 
 def count_line_crossings(
