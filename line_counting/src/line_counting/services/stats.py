@@ -54,10 +54,13 @@ def signed_distance_to_polyline(
 
     # 逐段迴圈取 running min（與 zone_mapping 的 signed_distance_to_polygon 同風格）：
     # 峰值記憶體維持 O(N)，不用 (N, S, 2) 廣播——N 是全天列數，且每條線都要重算一次。
-    # 嚴格 `<` 比較讓並列時保留索引較小的段，與 argmin 取首個最小值的行為一致；此處
-    # 的並列是常態而非巧合——落在彎折頂點外側楔形區的點對相鄰兩段等距，選哪一段會
-    # 決定用哪條無限直線定號，故距離也刻意寫成 `p - (a + t*ab)` 的形式，逐位元對齊
-    # 原本的廣播算式，避免改寫在 1 ulp 的差距上翻掉這些點的側別。
+    # 嚴格 `<` 比較讓並列時保留索引較小的段（與 argmin 取首個最小值一致）；此處的
+    # 並列是常態而非巧合——落在彎折頂點外側楔形區的點對相鄰兩段等距或僅差數 ulp，
+    # 選哪一段會決定用哪條無限直線定號。**距離刻意寫成 `p - (a + t*ab)`、勿改寫成
+    # `(p - a) - t*ab`**：後者多一次捨入，會讓部分點在 1 ulp 上改由另一段勝出而翻掉
+    # 側別（回歸測試見 tests/test_stats.py 的 wedge 那條）。
+    # 以上等價性以**有限輸入**為前提：`d2 < best_d2` 對 NaN 恆為 False，含 NaN 的點
+    # 會拿到初始值 0.0 而非 NaN。呼叫端的 foot_x/foot_y 由 bbox 算出、必為有限值。
     best_d2 = np.full(px.shape, np.inf)
     signed = np.zeros(px.shape)
     for i in range(len(pts) - 1):
