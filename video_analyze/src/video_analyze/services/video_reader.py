@@ -149,7 +149,9 @@ def discover_segments(
         依起始時間排序的 `SegmentInfo` 清單；當天目錄不存在時回傳空清單。
 
     Raises:
-        ValueError: 任一片段檔名不符合 `HHmmss.SSSZ` 命名格式。
+        ValueError: 任一片段檔名不符合 `HHmmss.SSSZ` 命名格式，或轉換台北時區後
+            跨到與 `day` 不同的曆日（見 `_parse_segment_start`）。本函式在主進程
+            逐攝影機呼叫，故任一路踩到都會讓當天整批中止。
     """
     day_dir = bucket_dir / stream_dirname / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
     if not day_dir.is_dir():

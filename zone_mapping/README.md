@@ -41,7 +41,7 @@ output_root=OUTPUT_ROOT) -> Path`（在 `services/zone_map.py`），CLI 進入�
 | `services/stats.py` | point-in-polygon 判定與人流聚合等純函式 |
 
 `camera_registry.yaml` 的模型與 zone 驗證（`vfa_registry`）、單行 JSON 的
-`StructuredLogger`（`vfa_observability`）由三包共用的 lib 提供，為 uv workspace 成員，
+`StructuredLogger`（`vfa_observability`）由四包共用的 lib 提供，為 uv workspace 成員，
 不在本包內：[libs/vfa_registry](../libs/vfa_registry)、
 [libs/vfa_observability](../libs/vfa_observability)。
 

@@ -51,6 +51,32 @@ def test_signed_distance_positive_on_inside_side():
     assert d.tolist() == [10.0, -10.0]
 
 
+def test_side_in_the_wedge_beyond_a_bend_is_decided_by_the_first_segment():
+    # 轉角外側的楔形區是「兩段等距」的區域：ㄥ 形線的轉角在原點、兩臂分別沿 -x 與
+    # -y，第一象限任一點對兩段都夾到同一個轉角頂點，距離相同。此時由哪一段定號是
+    # 實質選擇——第 0 段的無限直線是 y=0、第 1 段的是 x=0，inside_point 放在
+    # (50, -50) 會讓兩段對同一個點給出相反的側別。
+    #
+    # 這區域不是巧合而是有面積的常態區域（且無界），門口計數線只要有彎折就會有。
+    # 若定號的段在此翻來翻去，同一條軌跡在轉角外側的側別會忽正忽負，Schmitt-trigger
+    # 會把它算成反覆進出。實作固定取索引較小的段，故結果恆為第 0 段的 -y。
+    #
+    # 這條測試同時釘住 signed_distance_to_polyline 內距離的算式寫法：改成
+    # `(p - a) - t*ab` 會讓第 0 段的 d2 多一次捨入、在 1 ulp 上輸給第 1 段，
+    # 下面約 4% 的點會改由第 1 段定號而翻成 +x。
+    rng = np.random.default_rng(1)
+    xs = rng.uniform(0.5, 800.0, 2000)
+    ys = rng.uniform(0.5, 800.0, 2000)
+    d = signed_distance_to_polyline(
+        xs, ys, np.array([[-100.0, 0.0], [0.0, 0.0], [0.0, -100.0]]), (50.0, -50.0)
+    )
+    # 側別全部為負（第 0 段），不會有點改由第 1 段定號而翻成正
+    assert np.all(d < 0)
+    # 量值是到第 0 段所在直線 y=0 的距離，不是到第 1 段的 x=0；不比逐位元相等，
+    # perp 的 `cross / seg_len` 本來就可能與 y 差 1 ulp
+    assert np.allclose(-d, ys, rtol=1e-12, atol=0.0)
+
+
 def test_straight_crossing_into_inside_counts_one_in():
     # 由外側（y=20）單向穿越到內側（y=0）：in=1、out=0
     result = count_line_crossings(_make_cam_sub([(10, 20), (10, 20), (10, 0)]), _LINE)

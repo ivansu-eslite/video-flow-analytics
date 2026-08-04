@@ -1,7 +1,7 @@
 [project]
 name = "vfa_registry"
 version = "0.1.0"
-description = "Shared camera_registry.yaml models and zone validation for video-flow-analytics"
+description = "Shared camera_registry.yaml models and zone/line validation for video-flow-analytics"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

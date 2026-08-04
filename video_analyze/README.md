@@ -154,6 +154,11 @@ cameras:
     zones:
       - name: 平擺桌
         polygon: [[640.01, 866.83], [521.34, 938.8], [700.0, 1000.0]]
+    lines:
+      - name: 出入口161_左側
+        points: [[1180.0, 980.0], [1180.0, 1080.0]]
+        inside_point: [900.0, 1030.0]
+        line_group: 4F賣場
 ```
 
 欄位規範：
@@ -170,12 +175,15 @@ cameras:
 | `cameras[]` | `camera_id` | str | 必填 | 攝影機代碼 |
 | | `location` | str | 必填 | 地點名稱 |
 | | `ip` | str | 必填 | 攝影機 IP |
-| | `participates_in_zone_mapping` | bool | `true` | 接受但不使用（語義由 `zone-map` 實作） |
+| | `participates_in_zone_mapping` | bool | `true` | 接受但不使用（語義由 `zone_mapping` 實作） |
 | | `zones` | list | `[]` | 接受但不使用；幾何刻意不在本階段驗證 |
+| | `lines` | list | `[]` | 接受但不使用；幾何刻意不在本階段驗證 |
 
 本套件只讀攝影機身份（`camera_id` / `location` / `ip`）用來定位片段目錄與過濾攝影機。
-`participates_in_zone_mapping` 與 `zones` 由下游的 `zone-map` 使用；registry 的資料模型
-不接受未列出的欄位，故這兩個欄位仍須保留於模型中並忽略其值。
+`participates_in_zone_mapping` 與 `zones` 由下游的 `zone_mapping` 使用、`lines` 由
+`line_counting` 使用；registry 的資料模型不接受未列出的欄位，故這三個欄位仍須保留於
+模型中並忽略其值。`zones[]`／`lines[]` 的子欄位規範見[根 README](../README.md) 的
+`camera_registry.yaml` 章節——本套件不解析它們，此處不重複列出。
 
 使用限制（皆為 fail-loud，違反時直接報錯）：
 
@@ -212,10 +220,12 @@ bucket 呼叫。
 | `x1` / `y1` / `x2` / `y2` | float | 追蹤框的像素座標 |
 | `frame_width` / `frame_height` | int | 該路的影像尺寸（`probe_frame_shape` 探測首格所得，整天固定）；逐列重複同一個值 |
 
-`frame_width` / `frame_height` 是為下游而存的：`line_counting` 是純 CPU 套件、部署時不
-掛載影片，拿不到影像尺寸，卻需要它把以 1080p 為基準的像素參數換算成各攝影機的實際像素
-（見 [ADR-004](../docs/adr/004-band-resolution-scaling.md)）。缺這兩欄的舊 parquet 會被
-`line_counting` 直接擋下，需以本套件重跑產生。
+`frame_width` / `frame_height` 是為下游而存的：`line_counting` 與 `zone_mapping` 都是純
+CPU 套件、部署時不掛載影片，拿不到影像尺寸，卻需要它把以 1080p 為基準的像素參數
+（`crossing_band_px_1080p`／`boundary_band_px_1080p`）換算成各攝影機的實際像素
+（見 [ADR-004](../docs/adr/004-band-resolution-scaling.md) 與
+[ADR-006](../docs/adr/006-zone-boundary-band.md)）。缺這兩欄的舊 parquet 會被這兩包
+**都**直接擋下，需以本套件重跑產生。
 
 ## 架構
 
@@ -244,9 +254,10 @@ I/O 邊界（讀寫檔、子進程、影像編解碼、繪圖）依 argus 慣例
 頂層 adapter/io 層。log 用共用 lib `vfa_observability` 的 `StructuredLogger`
 （`from vfa_observability import StructuredLogger`），輸出單行 JSON。
 
-`camera_registry.yaml` 的 `CameraRegistry` / `CameraEntry` 由三包共用的
+`camera_registry.yaml` 的 `CameraRegistry` / `CameraEntry` 由四包共用的
 [libs/vfa_registry](../libs/vfa_registry) 提供（`from vfa_registry import load_registry`），
-以 workspace 成員引用。本包不呼叫 `parse_and_validate_zones`，zone 幾何不會被驗證。
+以 workspace 成員引用。本包不呼叫 `parse_and_validate_zones`／`parse_and_validate_lines`，
+zone 與 line 幾何都不會被驗證。
 
 ### 多進程 pipeline
 
@@ -268,6 +279,11 @@ I/O 邊界（讀寫檔、子進程、影像編解碼、繪圖）依 argus 慣例
 
 - 檔名格式錯誤 → `discover_segments` 在主進程直接拋 `ValueError`；各攝影機首段的開檔 /
   讀影格失敗 → `probe_frame_shape` 同樣在主進程拋 `ValueError`（子進程尚未啟動）。
+- **片段所在目錄日期與轉換後的台北曆日不同 → `_parse_segment_start` 拋 `ValueError`**。
+  目錄 `{YYYY}/{MM}/{DD}` 是 UTC 曆日、檔名時間轉換後是台北時間，UTC 16:00 之後兩者
+  分岔（例如 `2026/05/01/160000.000Z.mkv` 屬台北 05/02 00:00）。這代表片段被放進錯誤
+  的日期目錄，寧可中止也不靜默寫錯天。此檢查在 `discover_segments` 掃描時、於主進程
+  執行，**任一路踩到就整天中止**（不是只跳過該攝影機或該片段）。
 - 其餘片段的開檔 / 讀 FPS 失敗 → 讀取子進程拋錯、以非零 exitcode 結束。
 - `analyze_daily` 以 0.5 秒輪詢所有子進程；任一非零結束 → 先終止所有子進程再拋
   `RuntimeError`；`KeyboardInterrupt` → 終止後以 exit code 130 收斂。
@@ -282,6 +298,6 @@ uv run --directory video_analyze pytest         # 執行測試
 ```
 
 此處用 `--directory`（切換 cwd 進 `video_analyze/`）而非執行分析時的 `--package`：
-`--package` 不會改變 cwd，pytest 會從 repo 根遞迴收集到全部套件的 `tests/`，因三包皆有
+`--package` 不會改變 cwd，pytest 會從 repo 根遞迴收集到全部套件的 `tests/`，因四包皆有
 同名測試檔（如 `test_config.py`）而撞名衝突報錯；`--directory` 才會讓 pytest 只解析
 本套件自己的 `tests/`。

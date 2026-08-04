@@ -159,7 +159,9 @@ def peak_per_day(rollup_df: pl.DataFrame) -> pl.DataFrame:
         meal_time_reminder(int(period.split(":")[0]))
         for period in peaks["period"].to_list()
     ]
-    return peaks.with_columns(pl.Series("reminder", reminders)).select(
+    # 明寫 dtype：當日無任何 zone 事件（0 列）時空 list 推不出型別，reminder 欄會
+    # 變成 Null dtype（理由同 peak_lines_per_day）。
+    return peaks.with_columns(pl.Series("reminder", reminders, dtype=pl.Utf8)).select(
         "date",
         "weekday",
         "zone",

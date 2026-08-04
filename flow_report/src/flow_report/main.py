@@ -1,4 +1,4 @@
-"""人流 Excel 報表：離線下游步驟的 CLI 進入點（`flow-report`）。
+"""人流 Excel 報表：離線下游步驟的 CLI 進入點（`flow_report`）。
 
 從 `config.toml` 取參數後呼叫 `export_report_daily`，把 `zone_counts.parquet`
 與 `line_counts.parquet` 彙總成跨日累加更新的 `report.xlsx`。核心邏輯在
