@@ -51,9 +51,10 @@ def find_project_root(start_path: Path) -> Path | None:
 def get_toml_path(caller_file: str | Path) -> str | None:
     """由呼叫端所在檔案往上定位它自己套件根的 `config.toml`。
 
-    各包的 `models/config.py` 比套件根多兩層目錄，但改用 `find_project_root` 往上找
-    `pyproject.toml`，避免寫死 `parents[N]` 在搬移後定位錯。抽成共用函式後起點不能
-    再用本檔的 `__file__`（那會定位到本 lib），故由呼叫端傳入自己的 `__file__`。
+    各包的 `models/config.py` 位於套件根底下三層（`src/<pkg>/models/`），但改用
+    `find_project_root` 往上找 `pyproject.toml`，避免寫死 `parents[N]` 在搬移後定位錯。
+    抽成共用函式後起點不能再用本檔的 `__file__`（那會定位到本 lib），故由呼叫端傳入
+    自己的 `__file__`。
 
     Args:
         caller_file: 呼叫端模組的 `__file__`。

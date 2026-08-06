@@ -60,7 +60,9 @@ class AppConfig(BaseSettings):
 
         環境變數那側不需要對稱的守衛：`ZONE__BUCKET_MINUTES` 現在對 `zone_mapping`
         也已不是合法設定（該包的 `bucket_minutes` 同樣移到了 `[input]`），會由該包
-        的搬家提示擋下，本包不必再警告一份。
+        的搬家提示擋下——前提是該包有被執行。只補跑本階段時這個變數確實無訊號，但本包
+        本來就不讀它、值也不會變，屬 ADR-008 已接受的無訊號範圍，不值得為它保留一份
+        會在每次載入都印出來的警告。
         """
         if isinstance(data, dict) and "zone" in data:
             raise ValueError(
