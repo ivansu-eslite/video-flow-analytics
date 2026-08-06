@@ -121,7 +121,7 @@ class AppConfig(BaseSettings):
             )
         if isinstance(data, dict) and "zone" in data:
             raise ValueError(
-                "[zone] 區塊：[zone] 已移除，bucket_minutes 改放 [input]，由區域統計與"
+                "config.toml 的 [zone] 已移除，bucket_minutes 改放 [input]，由區域統計與"
                 "計數線統計共用同一個上游時段粒度。請把 bucket_minutes 移到 [input] "
                 "底下（環境變數為 INPUT__BUCKET_MINUTES）。"
             )

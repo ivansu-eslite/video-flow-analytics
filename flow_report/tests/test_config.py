@@ -105,6 +105,9 @@ def test_legacy_zone_env_var_warns_but_still_loads(tmp_path, capsys):
     assert config.input.bucket_minutes == 60
     assert "WARNING" in out
     assert "INPUT__BUCKET_MINUTES" in out
+    # 命中的變數名要出現在警告裡：只說「有 ZONE__ 變數」而不說是哪個，維運人員
+    # 在設了多個覆寫的 shell 下無從得知要改哪一個。
+    assert "ZONE__BUCKET_MINUTES" in out
 
 
 def test_invalid_value_in_toml_raises_instead_of_silently_defaulting(tmp_path):
