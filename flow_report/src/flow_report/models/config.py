@@ -102,20 +102,26 @@ class AppConfig(BaseSettings):
         額外欄位，看不出 `bucket_minutes` 該搬到哪個區塊；沿用舊設定的人需要知道
         下一步怎麼改。
 
-        環境變數要另外掃 `os.environ`：pydantic-settings 的 env source 只查已知欄位
-        名，產不出 `zone` 這個 key，`ZONE__BUCKET_MINUTES` 不會進到 `data` 裡，也
-        不會被 `extra="forbid"` 擋下——原本有效的覆寫會變成靜默忽略，正是這裡要擋的
-        失敗模式。大小寫都掃，因為 pydantic-settings 預設不分大小寫。
+        `ZONE__` 開頭的環境變數則只警告、不擋下。pydantic-settings 的 env source 只查
+        已知欄位名，`ZONE__BUCKET_MINUTES` 不會進到 `data` 裡，也不會被 `extra="forbid"`
+        擋下，對本包而言是靜默忽略的覆寫，值得提醒；但同一個變數是 `zone_mapping` 的
+        合法設定（該包的 `bucket_minutes` 就在它自己的 `[zone]` 底下），而四包設計成
+        同一個 workspace、共用一份環境設定執行，在這裡拋錯會讓本包連 import 都失敗
+        （模組層就會 `load_config()`）。大小寫都掃，因為 pydantic-settings 預設不分
+        大小寫。
         """
         legacy_env_keys = sorted(
             key for key in os.environ if key.upper().startswith("ZONE__")
         )
-        if (isinstance(data, dict) and "zone" in data) or legacy_env_keys:
-            source = (
-                f"環境變數 {legacy_env_keys}" if legacy_env_keys else "[zone] 區塊"
+        if legacy_env_keys:
+            logger.warning(
+                "偵測到 ZONE__ 開頭的環境變數，本包不讀取它們；若原意是覆寫本包的"
+                "上游時段粒度，請改用 INPUT__BUCKET_MINUTES",
+                keys=legacy_env_keys,
             )
+        if isinstance(data, dict) and "zone" in data:
             raise ValueError(
-                f"{source}：[zone] 已移除，bucket_minutes 改放 [input]，由區域統計與"
+                "config.toml 的 [zone] 已移除，bucket_minutes 改放 [input]，由區域統計與"
                 "計數線統計共用同一個上游時段粒度。請把 bucket_minutes 移到 [input] "
                 "底下（環境變數為 INPUT__BUCKET_MINUTES）。"
             )

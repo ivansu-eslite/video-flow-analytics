@@ -87,19 +87,27 @@ def test_legacy_zone_section_reports_where_bucket_minutes_moved(tmp_path):
         _config_class(toml)()
 
 
-def test_legacy_zone_env_var_is_rejected_instead_of_silently_ignored(tmp_path):
-    """舊的 `ZONE__BUCKET_MINUTES` 環境變數同樣要擋下。
+def test_legacy_zone_env_var_warns_but_still_loads(tmp_path, capsys):
+    """`ZONE__BUCKET_MINUTES` 只警告，不能讓本包載入失敗。
 
-    pydantic-settings 的 env source 只查已知欄位名，這個變數不會進到模型、也不會被
-    `extra="forbid"` 擋下——原本有效的覆寫會變成靜默忽略，`bucket_minutes` 悄悄退回
-    預設值，正是這條驗證要消除的失敗模式。
+    這個變數對本包是靜默忽略的覆寫（pydantic-settings 的 env source 只查已知欄位名，
+    它不會進到模型、也不會被 `extra="forbid"` 擋下），值得提醒；但它同時是
+    `zone_mapping` 的合法設定，四包共用一份環境設定是常態，拋錯等於讓別的套件的正常
+    設定把報表階段打死——而且本模組在載入時就 `load_config()`，連 import 都會失敗。
     """
     toml = tmp_path / "config.toml"
     toml.write_text("[input]\nbucket_minutes = 60\n", encoding="utf-8")
 
     with mock.patch.dict(os.environ, {"ZONE__BUCKET_MINUTES": "30"}):
-        with pytest.raises(ValidationError, match="bucket_minutes 改放 \\[input\\]"):
-            _config_class(toml)()
+        config = _config_class(toml)()
+
+    out = capsys.readouterr().out
+    assert config.input.bucket_minutes == 60
+    assert "WARNING" in out
+    assert "INPUT__BUCKET_MINUTES" in out
+    # 命中的變數名要出現在警告裡：只說「有 ZONE__ 變數」而不說是哪個，維運人員
+    # 在設了多個覆寫的 shell 下無從得知要改哪一個。
+    assert "ZONE__BUCKET_MINUTES" in out
 
 
 def test_invalid_value_in_toml_raises_instead_of_silently_defaulting(tmp_path):

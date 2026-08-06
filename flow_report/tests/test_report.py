@@ -217,6 +217,24 @@ def test_build_report_frames_rejects_orphan_zone_counts(tmp_path):
         _build(tmp_path, bucket_dir)
 
 
+def test_build_report_frames_rejects_orphan_line_counts(tmp_path):
+    """registry 已無任何計數線定義、當日 line_counts.parquet 卻有資料時要擋下。
+
+    與 zone 側同型的錯位，但兩側的判準不同（計數線沒有 participates 旗標，只看
+    `lines` 是否為空），所以要各自釘一條——只驗 zone 側的話，line 側的呼叫點被
+    誤刪或條件寫反都不會讓任何測試變紅。"""
+    bucket_dir, output_dir = _prepare_bucket(tmp_path)
+    _write_registry(
+        bucket_dir / "camera_registry.yaml",
+        zones_by_camera={"cam001": ["entrance"]},
+    )
+    _write_zone_counts(output_dir / "zone_counts.parquet")
+    _write_line_counts(output_dir / "line_counts.parquet")
+
+    with pytest.raises(ValueError, match="已沒有任何參與統計的計數線定義"):
+        _build(tmp_path, bucket_dir)
+
+
 def test_build_report_frames_accepts_orphan_but_empty_counts(tmp_path):
     """0 列的 parquet 不算錯位：那是上游對「這個 bucket 沒有該側定義」的正常產物
     （執行了、沒有東西可算），不該把它當成 registry 被誤改。"""

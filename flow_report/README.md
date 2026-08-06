@@ -135,9 +135,10 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 **`bucket_minutes` 放在 `[input]` 而非 `[report]`**：它描述的是**輸入資料**的粒度（上游
 兩包寫出 parquet 時用的值），不是報表的呈現粒度——後者是 `[report] period_minutes`。
 區域與計數線共用這一個數字，兩包的設定若不一致，這裡只能對上其中一個（見「已知限制」）。
-沿用舊的 `[zone] bucket_minutes` 會直接報錯並指出新位置，環境變數形式
-（`ZONE__BUCKET_MINUTES`）同樣擋下——pydantic-settings 只查已知欄位名，不擋的話這個
-覆寫會變成靜默忽略、`bucket_minutes` 悄悄退回預設值。
+沿用舊的 `[zone] bucket_minutes` 會直接報錯並指出新位置；環境變數形式
+（`ZONE__BUCKET_MINUTES`）則只警告、不擋下——pydantic-settings 只查已知欄位名，這個
+覆寫對本階段是靜默忽略，值得提醒，但同一個變數是 `zone_mapping` 的合法設定，而四包
+設計成同一個 workspace、共用一份環境設定執行，在這裡拋錯會讓本階段連 import 都失敗。
 
 `on_duplicate_date` 三種模式的行為：
 
