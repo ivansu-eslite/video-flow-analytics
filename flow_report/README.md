@@ -173,10 +173,15 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 | 兩者都沒有定義 | 報錯：沒有可彙總的統計 |
 
 反向的一種情況也會報錯：**registry 已沒有某一側的定義，當日對應的 parquet 卻有資料**
-（例如把所有攝影機的 `lines` 都拿掉了，但 `line_counts.parquet` 還在）。這代表 registry
-在產生 parquet 之後被改過，靜默跳過會讓該類統計整批從報表消失，`on_duplicate_date` 為
+（例如把所有攝影機的 `lines` 都拿掉了，但 `line_counts.parquet` 還在；區域那側還包含
+「`zones` 還在、但 `participates_in_zone_mapping` 全被關掉」）。這代表 registry 在產生
+parquet 之後被改過，靜默跳過會讓該類統計整批從報表消失，`on_duplicate_date` 為
 `overwrite` 時還會清掉報表裡既有的舊列。0 列的 parquet 不算——那是上游對「這個 bucket
 沒有該側定義」的正常產物。
+
+確定不再統計某一側時，正當做法是把該日的 parquet 一併移除（本階段不刪上游產物）。要注意
+這之後以 `overwrite` 重跑，報表中該日該側的既有列同樣會被清掉——那正是這道檢查原本要防的
+損失，差別只在於這次是明示同意的。
 
 理由：純看檔案的話，「定義了計數線卻忘了跑 `line_counting`」與「這個 bucket 本來就沒有
 計數線」無法區分，前者會靜默少三頁。**刻意不提供跳過用的設定旗標**——要跳過的正當做法是

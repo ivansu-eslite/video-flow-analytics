@@ -126,7 +126,9 @@ def _reject_unknown_pairs(
         )
 
 
-def _reject_orphan_counts(counts_path: Path, registry_file: Path, kind: str) -> None:
+def _reject_orphan_counts(
+    counts_path: Path, registry_file: Path, kind: str, cause: str
+) -> None:
     """registry 已無該側定義、當日 parquet 卻有資料時 fail-loud。
 
     這是「registry 定義了卻沒跑上游」的反向情況：整側定義被清空（或該側所有攝影機
@@ -139,13 +141,26 @@ def _reject_orphan_counts(counts_path: Path, registry_file: Path, kind: str) -> 
 
     0 列的 parquet 不算：那是上游對「這個 bucket 沒有該側定義」的正常產物
     （執行了、沒有東西可算），不是錯位。
+
+    Args:
+        counts_path: 該側當日的 parquet 路徑。
+        registry_file: 本次讀的 registry 路徑（錯誤訊息要指得出改哪個檔）。
+        kind: 該側的中文稱呼（「區域」／「計數線」），用於組訊息。
+        cause: 該側「沒有定義」的完整判準。zone 那側除了 `zones` 為空，還可能是
+            `participates_in_zone_mapping` 全被關掉——只寫「沒有定義」的話，操作者
+            去 registry 一看 zones 還在，會被訊息帶往錯的方向。
+
+    Raises:
+        ValueError: registry 已無該側定義，但當日 parquet 有資料。
     """
     if not counts_path.exists() or pl.read_parquet(counts_path).height == 0:
         return
     raise ValueError(
-        f"{registry_file} 中已沒有任何攝影機定義{kind}，但 {counts_path} 仍有資料。"
-        f"若是誤刪定義，請把{kind}定義補回 registry；若確定不再統計{kind}，"
-        "請一併移除該日的 parquet（本階段不會自行刪除上游產物）。"
+        f"{registry_file} 中已沒有任何參與統計的{kind}定義（{cause}），"
+        f"但 {counts_path} 仍有資料。若是誤改 registry，請把{kind}改回參與統計；"
+        f"若確定不再統計{kind}，請一併移除該日的 parquet（本階段不會自行刪除上游"
+        "產物）——但注意 on_duplicate_date='overwrite' 重跑時，報表中該日該側的"
+        "既有列也會一併清除。"
     )
 
 
@@ -252,7 +267,10 @@ def _build_report_frames(
         )
     else:
         _reject_orphan_counts(
-            output_dir / ZONE_COUNTS_FILENAME, registry_file, "區域"
+            output_dir / ZONE_COUNTS_FILENAME,
+            registry_file,
+            "區域",
+            "zones 為空，或 participates_in_zone_mapping 全部關閉",
         )
 
     line_hourly = line_peak_in = line_peak_out = None
@@ -262,7 +280,10 @@ def _build_report_frames(
         )
     else:
         _reject_orphan_counts(
-            output_dir / LINE_COUNTS_FILENAME, registry_file, "計數線"
+            output_dir / LINE_COUNTS_FILENAME,
+            registry_file,
+            "計數線",
+            "所有攝影機的 lines 皆為空；計數線沒有參與旗標",
         )
 
     return ReportFrames(

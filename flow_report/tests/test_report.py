@@ -213,7 +213,7 @@ def test_build_report_frames_rejects_orphan_zone_counts(tmp_path):
     _write_line_counts(output_dir / "line_counts.parquet")
     _write_zone_counts(output_dir / "zone_counts.parquet")
 
-    with pytest.raises(ValueError, match="已沒有任何攝影機定義區域"):
+    with pytest.raises(ValueError, match="已沒有任何參與統計的區域定義"):
         _build(tmp_path, bucket_dir)
 
 
