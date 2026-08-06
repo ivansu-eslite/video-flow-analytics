@@ -1,27 +1,24 @@
-"""Zone Mapping 的核心編排：讀檔、逐攝影機/逐 zone 套用演算法、寫檔與快照。
+"""Zone Mapping 的核心編排：讀檔、逐攝影機/逐 zone 套用演算法、寫檔。
 
 讀 `outputs/{bucket}/{date}/tracking_results.parquet`，套上人工維護在
 `camera_registry.yaml` 各攝影機底下的 zone 幾何，輸出每個時段每個區域的人流統計
-到同層的 `zone_counts.parquet`，並把當下套用的 camera_registry.yaml 快照成
-`camera_registry_used.yaml` 以供回溯。
+到同層的 `zone_counts.parquet`。
 
 實際的 point-in-polygon 判定與聚合演算法在 `services/stats.py`。
 """
 
 import datetime
-import shutil
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 from vfa_observability import StructuredLogger
-from vfa_registry import Zone, load_registry, parse_and_validate_zones, registry_path
+from vfa_registry import Zone, load_registry, parse_and_validate_zones
 
 from zone_mapping.config.constants import (
     BASELINE_FRAME_WIDTH,
     DEFAULT_BOUNDARY_BAND_PX_1080P,
     OUTPUT_ROOT,
-    REGISTRY_SNAPSHOT_FILENAME,
     REQUIRED_TRACKING_COLUMNS,
     TMP_SUFFIX,
     TRACKING_RESULTS_FILENAME,
@@ -246,9 +243,6 @@ def map_zones_daily(
     tmp_path = counts_path.with_name(counts_path.name + TMP_SUFFIX)
     result.write_parquet(tmp_path)
     tmp_path.replace(counts_path)
-
-    # 快照當下套用的 camera_registry.yaml，讓這份 zone_counts 自帶當天的 zone 依據可回溯
-    shutil.copyfile(registry_path(bucket_path), output_dir / REGISTRY_SNAPSHOT_FILENAME)
 
     logger.info(
         "Zone 人流統計已寫入",
