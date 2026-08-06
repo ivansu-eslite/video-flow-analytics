@@ -7,7 +7,7 @@
 ## 概述
 
 輸入是區域事件統計 `zone_counts.parquet`、計數線進出統計 `line_counts.parquet`，以及
-產生它們當時的 `camera_registry_used.yaml` 快照；把多個 `bucket_minutes` 併成
+`bucket_dir` 下的 `camera_registry.yaml`；把多個 `bucket_minutes` 併成
 `period_minutes`、算出每日尖峰與用餐時段提醒，**持續 Append** 至同一份
 `outputs/{bucket}/report.xlsx`（而非逐日各產一份），讓 BI 工具對這份不斷累加的資料做長期
 觀測。
@@ -72,7 +72,7 @@ bucket_minutes, output_root=OUTPUT_ROOT) -> Path`（在 `services/report.py`）�
 | `openpyxl` | 讀寫 Excel 報表 |
 | `polars` / `pyarrow` | parquet 讀取與期間彙總 |
 | `pydantic` / `pydantic-settings` | 設定與 registry 的資料模型與驗證，config 從 `config.toml`／環境變數載入 |
-| `pyyaml` | 讀取 `camera_registry_used.yaml` 快照 |
+| `pyyaml` | 讀取 `camera_registry.yaml` |
 | `vfa_registry` | 共用 lib：`camera_registry.yaml` 的模型與 zone／line 驗證 |
 | `vfa_observability` | 共用 lib：單行 JSON 的 `StructuredLogger` |
 
@@ -85,9 +85,9 @@ uv run --package flow_report flow_report
 
 CLI 不接受任何旗標，所有參數都讀自 `config.toml`。執行前需備妥：
 
-1. 當日的 `outputs/{bucket}/{date}/camera_registry_used.yaml` 快照，以及**快照所要求的
-   上游 parquet**：快照中有攝影機定義了區域就要有 `zone_counts.parquet`、有攝影機定義了
-   計數線就要有 `line_counts.parquet`（見下方「哪些輸入是必要的」）。
+1. `bucket_dir` 下的 `camera_registry.yaml`，以及**它所要求的上游 parquet**：registry
+   中有攝影機定義了區域就要有 `zone_counts.parquet`、有攝影機定義了計數線就要有
+   `line_counts.parquet`（見下方「哪些輸入是必要的」）。
 2. `flow_report/config.toml`（指定本次要彙總哪個 bucket、哪一天與報表參數）。
 
 ### 執行位置（cwd 約束）
@@ -160,9 +160,11 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 
 ## 哪些輸入是必要的
 
-**由 `camera_registry_used.yaml` 快照的定義決定，不由檔案是否存在決定**（[ADR-005](../docs/adr/005-report-input-requirement-from-snapshot.md)）：
+**由 `bucket_dir/camera_registry.yaml` 的定義決定，不由檔案是否存在決定**
+（[ADR-005](../docs/adr/005-report-input-requirement-from-snapshot.md)、
+[ADR-007](../docs/adr/007-remove-registry-snapshot.md)）：
 
-| 快照的內容 | 缺對應的 parquet 時 |
+| registry 的內容 | 缺對應的 parquet 時 |
 | --- | --- |
 | 有任一攝影機 `participates_in_zone_mapping` 且 `zones` 非空 | 缺 `zone_counts.parquet` 即報錯，訊息指出要先跑 `zone_mapping` |
 | 有任一攝影機 `lines` 非空 | 缺 `line_counts.parquet` 即報錯，訊息指出要先跑 `line_counting` |
@@ -173,17 +175,18 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 理由：純看檔案的話，「定義了計數線卻忘了跑 `line_counting`」與「這個 bucket 本來就沒有
 計數線」無法區分，前者會靜默少三頁。**刻意不提供跳過用的設定旗標**——要跳過的正當做法是
 把該攝影機的 `lines` 從 registry 拿掉。代價是 `flow_report` 從此被 `line_counting` 綁住：
-快照只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都產不出來。
+registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都產不出來。
 
 不論該 bucket 有沒有計數線，六個分頁的表頭一律建立，讓 BI 端接到的 schema 穩定。
 `line_counts.parquet` 是 **0 列**（當日無任何跨越事件）則是 `line_counting` 的正常產物、
 不是缺資料，不報錯。
 
-## registry 快照的使用限制
+## registry 的使用限制
 
 `camera_registry.yaml`（攝影機清單與區域／計數線定義，放在 `bucket_dir` 根目錄、不進版控）
-的完整格式見根 README。本階段讀的是它在 `outputs/{bucket}/{date}/` 下的快照
-`camera_registry_used.yaml`，相關使用限制（皆為 fail-loud，違反時直接報錯）：
+的完整格式見根 README。本階段讀的是 `bucket_dir` 下當下的那一份（缺檔即報錯；為何不是
+產生 parquet 當時的快照，見 [ADR-007](../docs/adr/007-remove-registry-snapshot.md)），
+相關使用限制（皆為 fail-loud，違反時直接報錯）：
 
 - **`zone` 與 `line` 名稱都須全域唯一**：本階段以區域／計數線名稱、不含 `camera_id`
   分組彙總，同名會讓不同攝影機的數字被合併成同一列，故不只同一攝影機內不可重複，跨攝影機
@@ -195,12 +198,12 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
   下的像素座標。
 - **`participates_in_zone_mapping = false`** 的攝影機不列入上述 zone 名稱唯一性驗證，
   其 `zones` 內容不影響本階段。計數線沒有對應的旗標，`lines` 非空即代表參與。
-- **兩份 parquet 內的 `(camera_id, zone)`／`(camera_id, line)` 組合須全部存在於快照定義
-  內**：出現快照沒有的組合視為資料與定義不一致，直接報錯。正常流程下不會觸發——上游
-  已先用同一份快照過濾出參與的攝影機才產生 parquet。
+- **兩份 parquet 內的 `(camera_id, zone)`／`(camera_id, line)` 組合須全部存在於 registry
+  的定義內**：出現 registry 沒有的組合視為資料與定義不一致，直接報錯。正常流程下不會
+  觸發——上游是用同一份 registry 過濾出參與的攝影機才產生 parquet。
 
-**驗證對象是快照、不是當下的 `camera_registry.yaml`**：兩者之間若改過區域或計數線命名，
-拿當下的檔案驗證會通過，但 parquet 裡其實是舊定義，不同攝影機的數字會被靜默合併。
+**產生 parquet 之後改過 registry 的話**，這道組合驗證正是擋下錯位的地方：區域或計數線
+改名、移除都會在這裡報錯。只改幾何座標（名稱不變）則擋不下來，見「已知限制」。
 
 ## 輸入 / 輸出檔案
 
@@ -208,9 +211,9 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 
 | 路徑 | 讀 / 寫 | 內容 |
 | --- | --- | --- |
-| `outputs/{bucket}/{date}/zone_counts.parquet` | 讀 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries`；快照有區域定義時缺少即報錯 |
-| `outputs/{bucket}/{date}/line_counts.parquet` | 讀 | 每時段每計數線進出人數，欄位 `line_group` / `camera_id` / `line` / `time_bucket` / `in_count` / `out_count`；快照有計數線定義時缺少即報錯 |
-| `outputs/{bucket}/{date}/camera_registry_used.yaml` | 讀 | 產生上述 parquet 當時的 registry 快照；缺少時報錯 |
+| `outputs/{bucket}/{date}/zone_counts.parquet` | 讀 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries`；registry 有區域定義時缺少即報錯 |
+| `outputs/{bucket}/{date}/line_counts.parquet` | 讀 | 每時段每計數線進出人數，欄位 `line_group` / `camera_id` / `line` / `time_bucket` / `in_count` / `out_count`；registry 有計數線定義時缺少即報錯 |
+| `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與區域／計數線定義；缺少時報錯 |
 | `outputs/{bucket}/report.xlsx` | 寫 | 跨日累加的 Excel 報表（六個分頁）；不存在時建立，存在時依 `on_duplicate_date` 更新（缺哪個分頁就補建哪個） |
 
 **時區**：兩份 parquet 的 `time_bucket` 都已是台北在地時間（`Asia/Taipei`），本階段
@@ -231,9 +234,11 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
   驗證，不會被自動抓到。
 - **`line_group` 只是報表的一個維度欄位**：本階段不做範圍層級的加總（例如整個賣場的進出
   合計），出入口三頁都是逐計數線的數字。
-- **快照可能被上游覆蓋**：`zone_mapping` 與 `line_counting` 都把 `camera_registry_used.yaml`
-  寫到同一路徑，後跑的覆蓋先跑的。兩階段之間若改過 registry，本階段只看得到後寫的那份，
-  驗證對象會與其中一份 parquet 的實際定義不一致。屬上游行為，見 ADR-005 的「後果」。
+- **幾何改過但名稱沒變時不會有任何訊號**：本階段讀的是當下的 registry，不是產生 parquet
+  當時的定義。zone／line 改名或移除後拿舊 parquet 彙總仍會 fail-loud（(camera, zone)
+  組合驗證與全域唯一驗證），但只調整多邊形或線段座標的話，報表數字仍是舊幾何算出來的，
+  本階段看不出來。這是移除 registry 快照時接受的代價，見
+  [ADR-007](../docs/adr/007-remove-registry-snapshot.md)。
 
 ## 開發
 

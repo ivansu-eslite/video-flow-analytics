@@ -160,9 +160,10 @@ boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像
   低估、可能誤擋邊緣案例。誤擋時**整天所有攝影機的 `zone_mapping` 都不會產出**，錯誤
   訊息會列出兩條操作路徑（調小 band 或把 zone 多邊形畫寬）。
 - **本階段沒產出時，當日整份報表都不會產出**：`flow_report` 的輸入必要性看
-  `camera_registry_used.yaml` 快照，快照裡有 `zones` 定義就必須有 `zone_counts.parquet`，
-  缺檔會中止整份報表、連出入口三個分頁也不產（見
-  [ADR-005](../docs/adr/005-report-input-requirement-from-snapshot.md)）。上面兩道
+  `bucket_dir/camera_registry.yaml` 的定義，registry 裡有 `zones` 定義就必須有
+  `zone_counts.parquet`，缺檔會中止整份報表、連出入口三個分頁也不產（見
+  [ADR-005](../docs/adr/005-report-input-requirement-from-snapshot.md)、
+  [ADR-007](../docs/adr/007-remove-registry-snapshot.md)）。上面兩道
   fail-loud 誤擋的代價因此不只是區域那兩頁。
 - **跨日報表會混到兩種口徑**：`flow_report` 以 `append` 累加各日的 `zone_counts.parquet`，
   改動前後產出的 `entries` 語義不同。要口徑一致就得重跑歷史日期，否則需在報表註明
@@ -177,7 +178,6 @@ boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像
 | `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（緩衝帶寬度的解析度換算靠它），2026-07 之前產出的舊檔沒有這兩欄，會直接報錯要求重跑 `video_analyze` |
 | `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與區域幾何 |
 | `outputs/{bucket}/{date}/zone_counts.parquet` | 寫 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries` |
-| `outputs/{bucket}/{date}/camera_registry_used.yaml` | 寫 | 本次套用的 `camera_registry.yaml` 快照，供下游以「產生此份資料時的定義」為準做驗證 |
 
 **時區**：`tracking_results.parquet` 的 `timestamp` 已是台北在地時間（`Asia/Taipei`），
 `time_bucket` 沿用之，本階段不做任何時區位移。

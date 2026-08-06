@@ -341,9 +341,9 @@ def registry_path(bucket_dir: Path) -> Path:
 def load_registry_from_path(path: Path) -> CameraRegistry:
     """讀指定路徑的 registry yaml。
 
-    刻意吃任意路徑而非只吃 `bucket_dir`：呼叫端自行決定要讀 bucket 下當下的
-    `camera_registry.yaml`（見 `load_registry`），或是某日輸出目錄下的
-    `camera_registry_used.yaml` 快照——後者才能反映產生該日資料當時的定義。
+    刻意吃任意路徑而非只吃 `bucket_dir`：本 repo 的四包都經 `load_registry` 讀
+    `bucket_dir/camera_registry.yaml`，但部署端把 registry 放在共用目錄（`gs://`
+    URI）、由呼叫端自行組路徑，需要這個不綁 bucket 版面的入口。
 
     Args:
         path: registry yaml 檔案路徑。
