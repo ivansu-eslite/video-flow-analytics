@@ -38,6 +38,7 @@
 | `pyyaml` | `vfa_registry` 讀 `camera_registry.yaml` 用；本包不直接 import，pin 在此是為了與 lib 對齊版本（見根 CLAUDE.md）|
 | `vfa_registry` | 共用 lib：`camera_registry.yaml` 的模型（workspace 成員）|
 | `vfa_observability` | 共用 lib：`StructuredLogger` 結構化 JSON log（workspace 成員）|
+| `vfa_config` | 共用 lib：`[input]` 設定區塊與 `config.toml` 定位（workspace 成員）|
 
 依賴版本以 `==` 釘住，固定推理堆疊。
 
@@ -69,8 +70,8 @@ uv run --package video_analyze video_analyze
 此命令不接受任何旗標，所有參數都讀自 `config.toml`。
 
 > **於倉庫根目錄執行**：`bucket_dir`、輸出根目錄 `outputs/` 與 `model_path` 皆為 **cwd
-> 相對路徑**，`uv run --package` 不改變 cwd。本套件自己的 `config.toml` 則以
-> `find_project_root`（往上找 `pyproject.toml`）定位，不受 cwd 影響。
+> 相對路徑**，`uv run --package` 不改變 cwd。本套件自己的 `config.toml` 則以共用 lib 的
+> `get_toml_path(__file__)`（往上找 `pyproject.toml`）定位，不受 cwd 影響。
 
 ## 設定
 

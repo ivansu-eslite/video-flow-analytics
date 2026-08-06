@@ -242,6 +242,7 @@ cameras:
 | --- | --- | --- |
 | [`libs/vfa_registry/`](libs/vfa_registry/README.md) | `camera_registry.yaml` 的 Pydantic 模型與 zone／line 驗證 | 四包 |
 | [`libs/vfa_observability/`](libs/vfa_observability/README.md) | 輸出單行 JSON 的 `StructuredLogger` | 四包 |
+| [`libs/vfa_config/`](libs/vfa_config/README.md) | `[input]` 設定區塊的單一定義與 `config.toml` 定位 | 四包 |
 
 workspace 為單一 `.venv`，`uv sync --package <pkg>` 只裝該包依賴子樹——`flow_report`／
 `zone_mapping`／`line_counting` 不含 torch，維持 CPU-only；`uv sync --all-packages` 才裝
@@ -251,7 +252,7 @@ workspace 為單一 `.venv`，`uv sync --package <pkg>` 只裝該包依賴子樹
 
 各套件與各 lib 各自 lint 與測試
 （`<pkg>` = `video_analyze` / `zone_mapping` / `line_counting` / `flow_report` /
-`libs/vfa_registry` / `libs/vfa_observability`）：
+`libs/vfa_registry` / `libs/vfa_observability` / `libs/vfa_config`）：
 
 ```bash
 uv run --directory <pkg> ruff check .   # lint（select = ["E", "F", "I", "W"]；line-length 見各包 pyproject）
