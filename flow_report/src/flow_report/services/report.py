@@ -24,6 +24,7 @@ from vfa_registry import (
     load_registry,
     parse_and_validate_lines,
     parse_and_validate_zones,
+    registry_path,
 )
 
 from flow_report.config.constants import (
@@ -125,17 +126,41 @@ def _reject_unknown_pairs(
         )
 
 
+def _reject_orphan_counts(counts_path: Path, registry_file: Path, kind: str) -> None:
+    """registry 已無該側定義、當日 parquet 卻有資料時 fail-loud。
+
+    這是「registry 定義了卻沒跑上游」的反向情況：整側定義被清空（或該側所有攝影機
+    的 `participates_in_zone_mapping` 被關掉），但當日 parquet 還帶著用舊定義算出來
+    的資料。靜默跳過的話，該類統計會整批從報表消失，且 `on_duplicate_date`
+    ＝`overwrite` 時連既有的舊列一併清掉——正是這條 repo 要擋的那種無聲資料損失。
+
+    `_reject_unknown_pairs` 只擋得住「部分定義被移除」（其餘定義還在，該側仍會進到
+    這裡的下游）；整側清空時那條路根本走不到，才需要這道檢查。
+
+    0 列的 parquet 不算：那是上游對「這個 bucket 沒有該側定義」的正常產物
+    （執行了、沒有東西可算），不是錯位。
+    """
+    if not counts_path.exists() or pl.read_parquet(counts_path).height == 0:
+        return
+    raise ValueError(
+        f"{registry_file} 中已沒有任何攝影機定義{kind}，但 {counts_path} 仍有資料。"
+        f"若是誤刪定義，請把{kind}定義補回 registry；若確定不再統計{kind}，"
+        "請一併移除該日的 parquet（本階段不會自行刪除上游產物）。"
+    )
+
+
 def _zone_frames(
     output_dir: Path,
     zone_entries: dict[str, CameraEntry],
     period_minutes: int,
     metric: str,
+    registry_file: Path,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     counts_path = output_dir / ZONE_COUNTS_FILENAME
     if not counts_path.exists():
         raise FileNotFoundError(
-            f"camera_registry.yaml 中有攝影機定義了區域，但找不到區域事件統計 {counts_path}，"
-            "請先執行 map_zones_daily 產生當日 parquet。"
+            f"{registry_file} 中有攝影機定義了區域，但找不到區域事件統計 "
+            f"{counts_path}，請先執行 map_zones_daily 產生當日 parquet。"
         )
 
     # parse_and_validate_zones 順便驗證跨攝影機 zone 名稱唯一性
@@ -156,13 +181,13 @@ def _line_frames(
     output_dir: Path,
     line_entries: dict[str, CameraEntry],
     period_minutes: int,
+    registry_file: Path,
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     counts_path = output_dir / LINE_COUNTS_FILENAME
     if not counts_path.exists():
         raise FileNotFoundError(
-            f"camera_registry.yaml 中有攝影機定義了計數線，但找不到計數線進出統計 "
-            f"{counts_path}，"
-            "請先執行 count_lines_daily 產生當日 parquet。"
+            f"{registry_file} 中有攝影機定義了計數線，但找不到計數線進出統計 "
+            f"{counts_path}，請先執行 count_lines_daily 產生當日 parquet。"
         )
 
     # parse_and_validate_lines 順便驗證跨攝影機 line 名稱唯一性
@@ -199,6 +224,7 @@ def _build_report_frames(
 
     bucket_path = Path(bucket_dir)
     output_dir = output_root / bucket_path.name / date.isoformat()
+    registry_file = registry_path(bucket_path)
     registry = load_registry(bucket_path)
 
     # zone 名稱唯一性的驗證範圍維持既有的 participates_in_zone_mapping 篩選（不加
@@ -216,20 +242,27 @@ def _build_report_frames(
     has_line_defs = bool(line_entries)
     if not has_zone_defs and not has_line_defs:
         raise ValueError(
-            f"{bucket_path} 的 camera_registry.yaml 中沒有任何攝影機定義區域或"
-            "計數線，沒有可彙總的統計。"
+            f"{registry_file} 中沒有任何攝影機定義區域或計數線，沒有可彙總的統計。"
         )
 
     zone_hourly = zone_peak = None
     if has_zone_defs:
         zone_hourly, zone_peak = _zone_frames(
-            output_dir, zone_entries, period_minutes, metric
+            output_dir, zone_entries, period_minutes, metric, registry_file
+        )
+    else:
+        _reject_orphan_counts(
+            output_dir / ZONE_COUNTS_FILENAME, registry_file, "區域"
         )
 
     line_hourly = line_peak_in = line_peak_out = None
     if has_line_defs:
         line_hourly, line_peak_in, line_peak_out = _line_frames(
-            output_dir, line_entries, period_minutes
+            output_dir, line_entries, period_minutes, registry_file
+        )
+    else:
+        _reject_orphan_counts(
+            output_dir / LINE_COUNTS_FILENAME, registry_file, "計數線"
         )
 
     return ReportFrames(
@@ -430,8 +463,9 @@ def export_report_daily(
         ValueError: `period_minutes` 不是 `bucket_minutes` 的倍數、
             `camera_registry.yaml` 中有跨攝影機重複的 zone／line 名稱、
             registry 中沒有任何區域或計數線定義、上游 parquet 出現不在該 registry
-            內的 (camera_id, zone)／(camera_id, line) 組合，或
-            `on_duplicate_date="error"` 時發現日期已存在。
+            內的 (camera_id, zone)／(camera_id, line) 組合、registry 已無某一側的
+            定義但當日對應 parquet 仍有資料，或 `on_duplicate_date="error"` 時
+            發現日期已存在。
         FileNotFoundError: registry 要求的當日 parquet 不存在，或 `bucket_dir`
             底下找不到 `camera_registry.yaml`。
     """

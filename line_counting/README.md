@@ -35,7 +35,7 @@ output_root=OUTPUT_ROOT) -> Path`（在 `services/line_map.py`），CLI 進入�
 | `main.py` | CLI 外殼：讀 `settings` → 組參數 → 呼叫 `count_lines_daily` |
 | `config/constants.py` | 非 Pydantic 靜態常數（輸出根目錄、輸入輸出檔名、parquet schema） |
 | `models/config.py` | pydantic-settings 設定模型與全域單例 `settings` |
-| `services/line_map.py` | 讀檔、逐攝影機/逐計數線套用演算法、寫檔與 registry 快照 |
+| `services/line_map.py` | 讀檔、逐攝影機/逐計數線套用演算法、寫檔 |
 | `services/stats.py` | 計數線跨越判定與進出人數聚合等純函式 |
 
 `camera_registry.yaml` 的模型與計數線驗證（`vfa_registry` 的 `Line`／

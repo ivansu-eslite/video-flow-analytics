@@ -194,8 +194,43 @@ def test_build_report_frames_requires_live_registry(tmp_path):
     bucket_dir, output_dir = _prepare_bucket(tmp_path)
     _write_zone_counts(output_dir / "zone_counts.parquet")
 
-    with pytest.raises(FileNotFoundError, match="找不到設備登錄檔"):
+    # 路徑一併釘住：舊實作缺快照時拋的是同一句話、只有檔名不同，不比對檔名的話
+    # 這支測試在改回讀快照後仍會是綠的
+    with pytest.raises(FileNotFoundError, match=r"找不到設備登錄檔.*camera_registry\.yaml$"):
         _build(tmp_path, bucket_dir)
+
+
+def test_build_report_frames_rejects_orphan_zone_counts(tmp_path):
+    """registry 已無任何區域定義、當日 zone_counts.parquet 卻有資料時要擋下。
+
+    `_reject_unknown_pairs` 只擋得住「部分 zone 被移除」；整側清空時那條路走不到，
+    靜默跳過會讓區域統計整批從報表消失，`overwrite` 重跑還會清掉既有的舊列。"""
+    bucket_dir, output_dir = _prepare_bucket(tmp_path)
+    _write_registry(
+        bucket_dir / "camera_registry.yaml",
+        lines_by_camera={"cam001": ["main_gate"]},
+    )
+    _write_line_counts(output_dir / "line_counts.parquet")
+    _write_zone_counts(output_dir / "zone_counts.parquet")
+
+    with pytest.raises(ValueError, match="已沒有任何攝影機定義區域"):
+        _build(tmp_path, bucket_dir)
+
+
+def test_build_report_frames_accepts_orphan_but_empty_counts(tmp_path):
+    """0 列的 parquet 不算錯位：那是上游對「這個 bucket 沒有該側定義」的正常產物
+    （執行了、沒有東西可算），不該把它當成 registry 被誤改。"""
+    bucket_dir, output_dir = _prepare_bucket(tmp_path)
+    _write_registry(
+        bucket_dir / "camera_registry.yaml",
+        {"cam001": ["entrance"]},
+    )
+    _write_zone_counts(output_dir / "zone_counts.parquet")
+    _write_line_counts(output_dir / "line_counts.parquet", empty=True)
+
+    frames = _build(tmp_path, bucket_dir)
+    assert frames.zone_hourly.height == 1
+    assert frames.line_hourly is None
 
 
 def test_build_report_frames_rejects_live_registry_duplicates(tmp_path):

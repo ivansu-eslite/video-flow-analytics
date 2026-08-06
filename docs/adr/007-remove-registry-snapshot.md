@@ -76,6 +76,16 @@ Negative:
   驗證的是新的 registry，沒有任何訊號。這是本次接受的主要代價。名稱層級的錯位（zone／
   line 改名或移除後拿舊 parquet 彙總）仍會 fail loud，由 `_reject_unknown_pairs` 與
   `parse_and_validate_zones`／`parse_and_validate_lines` 的全域唯一驗證擋下。
+- **「整側定義被清空」需要一道額外的 fail loud**：`_reject_unknown_pairs` 靠的是「該側
+  仍有定義、拿 parquet 的組合去比對」，整側清空時 `_build_report_frames` 直接跳過該側，
+  那條路走不到，該類統計會無聲從報表消失（`on_duplicate_date = "overwrite"` 還會清掉
+  既有的舊列）。因此改讀當下 registry 時一併補上 `_reject_orphan_counts`：registry 已無
+  該側定義、當日 parquet 卻有資料就報錯。0 列的 parquet 不算——那是上游對「這個 bucket
+  沒有該側定義」的正常產物。舊設計不需要這道檢查，快照與 parquet 是同時寫出的。
+- **`flow_report` 從此需要讀得到 `bucket_dir`**：改動前它只用 `Path(bucket_dir).name` 組
+  輸出路徑，完全不碰 bucket 目錄；現在必須讀 `bucket_dir/camera_registry.yaml`。只掛載
+  `outputs/` 的容器或排程會因此失敗。這也正是部署端改用 `--registry-root` 指向共用
+  registry 的原因——它那邊的 registry 本來就不在 bucket 底下。
 - 舊 parquet 無從得知當時的幾何依據。要重建只能靠 registry 自身的版控歷史（它不進版控，
   所以實務上是靠人記得）。
 - `load_registry_from_path` 在本 repo 只剩 `load_registry` 內部與 lib 自己的測試在用。

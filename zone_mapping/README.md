@@ -37,7 +37,7 @@ output_root=OUTPUT_ROOT) -> Path`（在 `services/zone_map.py`），CLI 進入�
 | `main.py` | CLI 外殼：讀 `settings` → 組參數 → 呼叫 `map_zones_daily` |
 | `config/constants.py` | 非 Pydantic 靜態常數（輸出根目錄、輸入輸出檔名、parquet schema） |
 | `models/config.py` | pydantic-settings 設定模型與全域單例 `settings` |
-| `services/zone_map.py` | 讀檔、逐攝影機/逐區域套用演算法、寫檔與 registry 快照 |
+| `services/zone_map.py` | 讀檔、逐攝影機/逐區域套用演算法、寫檔 |
 | `services/stats.py` | point-in-polygon 判定與人流聚合等純函式 |
 
 `camera_registry.yaml` 的模型與 zone 驗證（`vfa_registry`）、單行 JSON 的

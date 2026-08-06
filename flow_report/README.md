@@ -172,6 +172,12 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 | 沒有任何 `lines` 定義 | 不報錯，出入口三頁不寫入資料（表頭仍建立） |
 | 兩者都沒有定義 | 報錯：沒有可彙總的統計 |
 
+反向的一種情況也會報錯：**registry 已沒有某一側的定義，當日對應的 parquet 卻有資料**
+（例如把所有攝影機的 `lines` 都拿掉了，但 `line_counts.parquet` 還在）。這代表 registry
+在產生 parquet 之後被改過，靜默跳過會讓該類統計整批從報表消失，`on_duplicate_date` 為
+`overwrite` 時還會清掉報表裡既有的舊列。0 列的 parquet 不算——那是上游對「這個 bucket
+沒有該側定義」的正常產物。
+
 理由：純看檔案的話，「定義了計數線卻忘了跑 `line_counting`」與「這個 bucket 本來就沒有
 計數線」無法區分，前者會靜默少三頁。**刻意不提供跳過用的設定旗標**——要跳過的正當做法是
 把該攝影機的 `lines` 從 registry 拿掉。代價是 `flow_report` 從此被 `line_counting` 綁住：
@@ -202,8 +208,8 @@ registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都�
   的定義內**：出現 registry 沒有的組合視為資料與定義不一致，直接報錯。正常流程下不會
   觸發——上游是用同一份 registry 過濾出參與的攝影機才產生 parquet。
 
-**產生 parquet 之後改過 registry 的話**，這道組合驗證正是擋下錯位的地方：區域或計數線
-改名、移除都會在這裡報錯。只改幾何座標（名稱不變）則擋不下來，見「已知限制」。
+**產生 parquet 之後改過 registry 的話**，區域或計數線改名、移除會被這道組合驗證擋下；
+整側定義被清空則由上一節的反向檢查擋下。只改幾何座標（名稱不變）擋不下來，見「已知限制」。
 
 ## 輸入 / 輸出檔案
 
