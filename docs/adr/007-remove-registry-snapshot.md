@@ -73,9 +73,15 @@ Positive:
 Negative:
 
 - **「幾何座標被調整、名稱未變」會變成靜默的錯位**：報表數字仍是舊幾何算出來的，但用來
-  驗證的是新的 registry，沒有任何訊號。這是本次接受的主要代價。名稱層級的錯位（zone／
-  line 改名或移除後拿舊 parquet 彙總）仍會 fail loud，由 `_reject_unknown_pairs` 與
+  驗證的是新的 registry，沒有任何訊號。這是本次接受的主要代價。zone／line **名稱**的錯位
+  （改名或移除後拿舊 parquet 彙總）仍會 fail loud，由 `_reject_unknown_pairs` 與
   `parse_and_validate_zones`／`parse_and_validate_lines` 的全域唯一驗證擋下。
+- **`line_group` 的改名同樣是靜默漂移**：`_reject_unknown_pairs` 比對的是
+  `(camera_id, line)`，而報表「群組」欄的值取自 `line_counts.parquet`。registry 只改
+  `line_group`、不改 `line` 名稱時，報表會沿用舊的群組名而沒有訊號。刻意不把
+  `line_group` 納入組合驗證：它跨攝影機同名是正常用途（見 [ADR-002](002-line-group-semantics.md)），
+  納入驗證等於要求「分組不得調整」，代價高於它能擋下的錯誤——`line_group` 是報表的維度
+  欄位，錯了會讓分組看起來怪，不會讓進出人數算錯。
 - **「整側定義被清空」需要一道額外的 fail loud**：`_reject_unknown_pairs` 靠的是「該側
   仍有定義、拿 parquet 的組合去比對」，整側清空時 `_build_report_frames` 直接跳過該側，
   那條路走不到，該類統計會無聲從報表消失（`on_duplicate_date = "overwrite"` 還會清掉

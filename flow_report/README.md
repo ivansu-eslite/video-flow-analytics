@@ -249,7 +249,9 @@ registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都�
 - **幾何改過但名稱沒變時不會有任何訊號**：本階段讀的是當下的 registry，不是產生 parquet
   當時的定義。zone／line 改名或移除後拿舊 parquet 彙總仍會 fail-loud（(camera, zone)
   組合驗證與全域唯一驗證），但只調整多邊形或線段座標的話，報表數字仍是舊幾何算出來的，
-  本階段看不出來。這是移除 registry 快照時接受的代價，見
+  本階段看不出來。**只改 `line_group`、不改 `line` 名稱也屬於這個範圍**：組合驗證不看
+  `line_group`，報表的「群組」欄取自 `line_counts.parquet`，會沿用舊的群組名。這是移除
+  registry 快照時接受的代價，見
   [ADR-007](../docs/adr/007-remove-registry-snapshot.md)。
 
 ## 開發
