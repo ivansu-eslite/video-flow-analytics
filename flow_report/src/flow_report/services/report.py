@@ -4,9 +4,9 @@
 `line_counts.parquet`（計數線進出），彙總成跨日累加更新的
 `outputs/{bucket}/report.xlsx`。實際的期間彙總／尖峰計算在 `services/stats.py`。
 
-**哪些輸入是必要的，由 `camera_registry_used.yaml` 快照的定義決定**，不是「檔案在
+**哪些輸入是必要的，由 `bucket_dir/camera_registry.yaml` 的定義決定**，不是「檔案在
 不在」——後者無法區分「定義了計數線卻忘了跑 `line_counting`」與「這個 bucket 本來
-就沒有計數線」，前者會靜默少三頁。見 ADR-005。
+就沒有計數線」，前者會靜默少三頁。見 ADR-005、ADR-007。
 """
 
 import datetime
@@ -21,7 +21,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from vfa_observability import StructuredLogger
 from vfa_registry import (
     CameraEntry,
-    load_registry_from_path,
+    load_registry,
     parse_and_validate_lines,
     parse_and_validate_zones,
 )
@@ -35,7 +35,6 @@ from flow_report.config.constants import (
     LINE_PEAK_HEADERS,
     LINE_PEAK_SORT_COLUMNS,
     OUTPUT_ROOT,
-    REGISTRY_SNAPSHOT_FILENAME,
     REPORT_FILENAME,
     SHEET_EVENTS,
     SHEET_LINE_HOURLY,
@@ -64,7 +63,7 @@ logger = StructuredLogger(component="report_builder")
 class ReportFrames(NamedTuple):
     """本次要寫入報表的各分頁資料；`None` 代表該類統計在這個 bucket 沒有定義。
 
-    `None` 與「空的 DataFrame」語義不同：前者是快照裡根本沒有區域／計數線定義，
+    `None` 與「空的 DataFrame」語義不同：前者是 registry 裡根本沒有區域／計數線定義，
     本次不產生該類資料（分頁仍會建立、`overwrite` 時仍會清掉該日舊列）；後者是
     有定義但當日沒有事件，是上游的正常產物。
     """
@@ -116,12 +115,12 @@ def _reject_unknown_pairs(
     valid_pairs: set[tuple[str, str]],
     source_path: Path,
 ) -> None:
-    """parquet 出現不在快照定義內的組合時 fail-loud，而非靜默讀入未經驗證的資料。"""
+    """parquet 出現不在 registry 定義內的組合時 fail-loud，而非靜默讀入未經驗證的資料。"""
     actual_pairs = set(df.select(list(columns)).unique(maintain_order=True).iter_rows())
     unknown_pairs = actual_pairs - valid_pairs
     if unknown_pairs:
         raise ValueError(
-            f"{source_path} 出現不在 {REGISTRY_SNAPSHOT_FILENAME} 快照內的 "
+            f"{source_path} 出現不在 camera_registry.yaml 定義內的 "
             f"({columns[0]}, {columns[1]}) 組合: {sorted(unknown_pairs)}"
         )
 
@@ -135,7 +134,7 @@ def _zone_frames(
     counts_path = output_dir / ZONE_COUNTS_FILENAME
     if not counts_path.exists():
         raise FileNotFoundError(
-            f"快照中有攝影機定義了區域，但找不到區域事件統計 {counts_path}，"
+            f"camera_registry.yaml 中有攝影機定義了區域，但找不到區域事件統計 {counts_path}，"
             "請先執行 map_zones_daily 產生當日 parquet。"
         )
 
@@ -161,7 +160,8 @@ def _line_frames(
     counts_path = output_dir / LINE_COUNTS_FILENAME
     if not counts_path.exists():
         raise FileNotFoundError(
-            f"快照中有攝影機定義了計數線，但找不到計數線進出統計 {counts_path}，"
+            f"camera_registry.yaml 中有攝影機定義了計數線，但找不到計數線進出統計 "
+            f"{counts_path}，"
             "請先執行 count_lines_daily 產生當日 parquet。"
         )
 
@@ -199,9 +199,7 @@ def _build_report_frames(
 
     bucket_path = Path(bucket_dir)
     output_dir = output_root / bucket_path.name / date.isoformat()
-    snapshot_path = output_dir / REGISTRY_SNAPSHOT_FILENAME
-    # 為何用快照而非當下 registry：見 export_report_daily 的 docstring 說明
-    registry = load_registry_from_path(snapshot_path)
+    registry = load_registry(bucket_path)
 
     # zone 名稱唯一性的驗證範圍維持既有的 participates_in_zone_mapping 篩選（不加
     # 「zones 非空」條件）；「該不該有 zone_counts.parquet」是另一個判斷，才看 zones。
@@ -218,7 +216,8 @@ def _build_report_frames(
     has_line_defs = bool(line_entries)
     if not has_zone_defs and not has_line_defs:
         raise ValueError(
-            f"{snapshot_path} 快照中沒有任何攝影機定義區域或計數線，沒有可彙總的統計。"
+            f"{bucket_path} 的 camera_registry.yaml 中沒有任何攝影機定義區域或"
+            "計數線，沒有可彙總的統計。"
         )
 
     zone_hourly = zone_peak = None
@@ -405,17 +404,16 @@ def export_report_daily(
 ) -> Path:
     """執行單日人流報表彙總，寫入跨日累加更新的 `report.xlsx`。
 
-    純 CPU 運算，不需重跑偵測、zone mapping 或計數線統計；讀取的 registry 是產生
-    當日 parquet 時的 `camera_registry_used.yaml` 快照（而非當下的
-    `camera_registry.yaml`），以避免同名 zone／line 被靜默合併。
+    純 CPU 運算，不需重跑偵測、zone mapping 或計數線統計；讀取的 registry 是
+    `bucket_dir` 底下當下的 `camera_registry.yaml`（見 ADR-007）。
 
-    **快照同時決定哪些輸入是必要的**：有攝影機定義了區域就必須有
+    **registry 同時決定哪些輸入是必要的**：有攝影機定義了區域就必須有
     `zone_counts.parquet`、有攝影機定義了計數線就必須有 `line_counts.parquet`，
-    缺檔即報錯；快照裡沒有定義的那一側則整批跳過（分頁仍建立、不寫入資料），
+    缺檔即報錯；registry 裡沒有定義的那一側則整批跳過（分頁仍建立、不寫入資料），
     不算錯誤。兩者都沒有定義則沒有東西可彙總，直接報錯。詳見 ADR-005。
 
     Args:
-        date: 要彙總的日期，需已有快照中所要求的當日 parquet。
+        date: 要彙總的日期，需已有 registry 所要求的當日 parquet。
         bucket_dir: 本機模擬 GCS bucket 的根目錄。
         period_minutes: 報表人流彙總的時段粒度（分鐘），需為 `bucket_minutes`
             的倍數。
@@ -430,12 +428,12 @@ def export_report_daily(
 
     Raises:
         ValueError: `period_minutes` 不是 `bucket_minutes` 的倍數、
-            `camera_registry_used.yaml` 中有跨攝影機重複的 zone／line 名稱、
-            快照中沒有任何區域或計數線定義、上游 parquet 出現不在該快照內的
-            (camera_id, zone)／(camera_id, line) 組合，或
+            `camera_registry.yaml` 中有跨攝影機重複的 zone／line 名稱、
+            registry 中沒有任何區域或計數線定義、上游 parquet 出現不在該 registry
+            內的 (camera_id, zone)／(camera_id, line) 組合，或
             `on_duplicate_date="error"` 時發現日期已存在。
-        FileNotFoundError: 快照要求的當日 parquet 不存在，或該日輸出目錄下
-            找不到 `camera_registry_used.yaml` 快照。
+        FileNotFoundError: registry 要求的當日 parquet 不存在，或 `bucket_dir`
+            底下找不到 `camera_registry.yaml`。
     """
     frames = _build_report_frames(
         date, bucket_dir, period_minutes, metric, bucket_minutes, output_root
