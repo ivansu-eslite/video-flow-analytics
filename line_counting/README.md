@@ -41,7 +41,8 @@ output_root=OUTPUT_ROOT) -> Path`（在 `services/line_map.py`），CLI 進入�
 `camera_registry.yaml` 的模型與計數線驗證（`vfa_registry` 的 `Line`／
 `parse_and_validate_lines`）、單行 JSON 的 `StructuredLogger`（`vfa_observability`）由四包
 共用的 lib 提供，為 uv workspace 成員，不在本包內：
-[libs/vfa_registry](../libs/vfa_registry)、[libs/vfa_observability](../libs/vfa_observability)。
+[libs/vfa_registry](../libs/vfa_registry)、[libs/vfa_observability](../libs/vfa_observability)、
+[libs/vfa_config](../libs/vfa_config)（`[input]` 設定區塊與 `config.toml` 定位）。
 
 ## 演算法
 
@@ -123,6 +124,7 @@ output_root=OUTPUT_ROOT) -> Path`（在 `services/line_map.py`），CLI 進入�
 | `pyyaml` | 讀取 `camera_registry.yaml` |
 | `vfa_registry` | 共用 lib：`camera_registry.yaml` 的模型與計數線驗證 |
 | `vfa_observability` | 共用 lib：單行 JSON 的 `StructuredLogger` |
+| `vfa_config` | 共用 lib：`[input]` 設定區塊與 `config.toml` 定位 |
 
 ## 安裝與快速開始
 
@@ -148,8 +150,8 @@ CLI 不接受任何旗標，所有參數都讀自 `config.toml`。執行前需�
 | `OUTPUT_ROOT = outputs/` | `config/constants.py` 常數 | 去 `line_counting/outputs/` 找輸入而 `FileNotFoundError`，產出也落在錯的樹 |
 | `settings.input.bucket_dir` | `config.toml` `[input]` | 對到不存在的 `line_counting/bucket_name1`；實務上不會走到，上一列的輸入檢查會先失敗 |
 
-本套件自己的 `config.toml` 以 `find_project_root`（往上找 `pyproject.toml`）定位，不受
-cwd 影響。
+本套件自己的 `config.toml` 以共用 lib 的 `get_toml_path(__file__)`（往上找
+`pyproject.toml`）定位，不受 cwd 影響。
 
 ## 設定
 
@@ -165,9 +167,9 @@ cwd 影響。
 [input]
 bucket_dir = "bucket_name1"
 date = 2026-05-01
+bucket_minutes = 60          # 事件統計時間粒度（分鐘）
 
 [line]
-bucket_minutes = 60          # 事件統計時間粒度（分鐘）
 crossing_band_px_1080p = 25  # 跨越去抖的線段區域寬度（1080p 基準）；0 = 細線純零交越
 ```
 
@@ -175,8 +177,13 @@ crossing_band_px_1080p = 25  # 跨越去抖的線段區域寬度（1080p 基準�
 | --- | --- | --- | --- |
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（cwd 相對） |
 | | `date` | — | 統計日期；未設定時報錯 |
-| `[line]` | `bucket_minutes` | `60` | 事件統計時間粒度（分鐘），`>= 1` |
-| | `crossing_band_px_1080p` | `25` | 跨越去抖的線段區域寬度，以 1080p（寬 1920）為基準的像素值，`>= 0`；逐攝影機依 `frame_width` 換算成實際像素；`0` = 細線純零交越 |
+| | `bucket_minutes` | `60` | 事件統計時間粒度（分鐘），`>= 1`；與 `zone_mapping`／`flow_report` 的同名欄位是同一個口徑，三包要填一致的值 |
+| `[line]` | `crossing_band_px_1080p` | `25` | 跨越去抖的線段區域寬度，以 1080p（寬 1920）為基準的像素值，`>= 0`；逐攝影機依 `frame_width` 換算成實際像素；`0` = 細線純零交越 |
+
+`[input]` 由共用 lib `vfa_config` 提供、四包同一份定義，故本包也接受 `camera_ids`
+（只有 `video_analyze` 會讀）；`bucket_minutes` 於 issue #79 由 `[line]` 移到這裡，沿用
+舊位置（含 `LINE__BUCKET_MINUTES`）會直接報錯並指出新位置與新的環境變數名
+`INPUT__BUCKET_MINUTES`。理由見 [ADR-008](../docs/adr/008-config-section-namespace.md)。
 
 舊參數名 `crossing_band_px` 已不存在：沿用它會直接報錯並說明新語義，而不是被當成未知欄位
 （值的意義也變了——同一個數字在 4K 攝影機上換算後是兩倍）。

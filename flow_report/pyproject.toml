@@ -15,11 +15,13 @@ dependencies = [
     "pydantic==2.13.4",
     "pydantic-settings[toml]==2.14.2",
     "pyyaml==6.0.3",
+    "vfa_config",
     "vfa_observability",
     "vfa_registry",
 ]
 
 [tool.uv.sources]
+vfa_config = { workspace = true }
 vfa_observability = { workspace = true }
 vfa_registry = { workspace = true }
 

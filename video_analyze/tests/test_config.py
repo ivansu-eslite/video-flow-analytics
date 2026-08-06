@@ -6,23 +6,19 @@
 悄悄退回預設）。
 
 `AppConfig.model_config` 的 `toml_file` 在 class 定義時就求值，事後 monkeypatch
-`_get_toml_path` 不會改變它，故這裡改用指定 `toml_file` 的子類別來測實際載入行為。
+`get_toml_path` 不會改變它，故這裡改用指定 `toml_file` 的子類別來測實際載入行為。
 """
 
 from pathlib import Path
 
 import pytest
+import vfa_config
 from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
+from vfa_config import get_toml_path
 
-from video_analyze.models.config import (
-    AppConfig,
-    ModelConfig,
-    TrackerConfig,
-    _get_toml_path,
-    find_project_root,
-    load_config,
-)
+from video_analyze.models import config as config_module
+from video_analyze.models.config import AppConfig, ModelConfig, TrackerConfig, load_config
 
 # 設定來源含環境變數，且欄位名未加前綴：執行環境剛好有這些變數時會蓋掉 toml 的值，
 # 讓測試結果取決於誰的機器在跑。逐一清掉，測的才是「從這份 toml 載入」的行為。
@@ -37,6 +33,8 @@ _ENV_OVERRIDES = (
     "TRACKER__TRACK_BUFFER",
     "INPUT__BUCKET_DIR",
     "INPUT__DATE",
+    "INPUT__CAMERA_IDS",
+    "INPUT__BUCKET_MINUTES",
 )
 
 
@@ -74,18 +72,56 @@ def test_tracker_config_defaults_unaffected():
     assert TrackerConfig().track_buffer == 30
 
 
-def test_find_project_root_locates_package_root():
-    """find_project_root 取代寫死的 parents[N]，須能定位到含 pyproject.toml 的套件根。"""
-    root = find_project_root(Path(__file__).resolve())
-    assert root is not None
-    assert (root / "pyproject.toml").exists()
+def test_config_sections_match_shared_contract():
+    """釘住本包宣告了哪些頂層區塊、`input` 來自共用 lib（見 ADR-008）。
+
+    頂層區塊名等於一段全域的環境變數命名空間（`env_nested_delimiter="__"`），所以
+    新增區塊會讓這支變紅，逼使用者確認該名稱在其他包沒被用過；把 `input` 改回本地
+    定義同樣變紅——那正是 `INPUT__*` 撞名的來源。
+    """
+    assert set(AppConfig.model_fields) == {"tracker", "model", "output", "input"}
+    assert AppConfig.model_fields["input"].annotation is vfa_config.InputConfig
 
 
-def test_get_toml_path_points_to_existing_config():
-    path = _get_toml_path()
+@pytest.mark.parametrize(
+    ("env_name", "env_value"),
+    [
+        ("INPUT__BUCKET_DIR", "bucket_x"),
+        ("INPUT__DATE", "2026-05-01"),
+        ("INPUT__CAMERA_IDS", '["cam1"]'),
+        ("INPUT__BUCKET_MINUTES", "30"),
+    ],
+)
+def test_shared_input_env_vars_do_not_break_this_package(
+    env_name, env_value, monkeypatch, tmp_path
+):
+    """任一 `INPUT__*` 都不能讓本包載入失敗，包含本包不讀的欄位。
+
+    四包共用一份環境設定執行是常態，而本模組在載入時就 `load_config()`；`[input]`
+    少列一個別包有的欄位，設了該變數的環境會讓本包連 import 都失敗（`bucket_minutes`
+    只有另外三包讀，過去正是這樣打死本包）。
+    """
+    monkeypatch.setenv(env_name, env_value)
+    toml = tmp_path / "config.toml"
+    toml.write_text("[model]\nbatch = 4\n", encoding="utf-8")
+
+    config = _config_class(toml)()
+
+    assert config.model.batch == 4
+
+
+def test_get_toml_path_points_to_this_packages_config():
+    """本包的 config 模組要定位到**自己**的 `config.toml`，不是共用 lib 的目錄。
+
+    `get_toml_path` 抽進 `vfa_config` 後靠呼叫端傳入 `__file__`；傳錯（例如共用 lib
+    自己的檔案）會讓四包都去讀不存在的 `libs/vfa_config/config.toml`，全部靜默退回
+    預設參數。
+    """
+    path = get_toml_path(config_module.__file__)
+
     assert path is not None
-    assert path.endswith("config.toml")
     assert Path(path).exists()
+    assert Path(path) == Path(__file__).resolve().parents[1] / "config.toml"
 
 
 def test_uses_defaults_when_toml_missing(tmp_path):
@@ -144,8 +180,8 @@ def test_unknown_field_in_nested_section_raises(tmp_path):
 def test_load_config_warns_when_toml_missing(monkeypatch, capsys):
     """找不到設定檔時要留下警告，不可靜默啟動。"""
     monkeypatch.setattr(
-        "video_analyze.models.config._get_toml_path",
-        lambda: "/nonexistent/config.toml",
+        "video_analyze.models.config.get_toml_path",
+        lambda _caller_file: "/nonexistent/config.toml",
     )
 
     load_config()

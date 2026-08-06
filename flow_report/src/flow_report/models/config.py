@@ -1,5 +1,3 @@
-import datetime
-import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -10,6 +8,7 @@ from pydantic_settings import (
     SettingsConfigDict,
     TomlConfigSettingsSource,
 )
+from vfa_config import InputConfig, get_toml_path
 from vfa_observability import StructuredLogger
 
 logger = StructuredLogger(component="config")
@@ -33,62 +32,19 @@ class ReportConfig(BaseModel):
     on_duplicate_date: Literal["overwrite", "append", "error"] = "append"
 
 
-class InputConfig(BaseModel):
-    """`export_report_daily` 輸入參數。
-
-    Attributes:
-        bucket_dir: 本機模擬 GCS bucket 的根目錄；本包只取其目錄名來組出
-            `outputs/{bucket}/` 下的輸入與輸出路徑。
-        date: 開發時由 config 指定彙總日期；正式呼叫端可直接以參數呼叫
-            `export_report_daily`。
-        bucket_minutes: 上游 `zone_counts.parquet`／`line_counts.parquet` 的
-            時段粒度（分鐘）。`export_report_daily` 用它驗證
-            `report.period_minutes` 是它的倍數，故須與產生這兩份 parquet 時
-            的設定一致。它描述的是**輸入資料**的粒度（上游兩包寫檔時用的
-            值），不是報表的呈現粒度（後者是 `report.period_minutes`），
-            故放在 `[input]` 而非 `[report]`。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    bucket_dir: str = "bucket_name"
-    date: datetime.date | None = None
-    bucket_minutes: int = Field(default=60, ge=1)
-
-
-def find_project_root(start_path: Path) -> Path | None:
-    """從起始路徑向上搜尋，直到找到包含 `pyproject.toml` 的專案根目錄。"""
-    for parent in start_path.parents:
-        if (parent / "pyproject.toml").exists():
-            return parent
-    return None
-
-
-def _get_toml_path() -> str | None:
-    # 本檔位於 flow_report/models/config.py，比套件根多兩層目錄；改用
-    # find_project_root 往上找 pyproject.toml，避免寫死 parents[N] 在搬移後定位錯。
-    root = find_project_root(Path(__file__).resolve())
-    if root:
-        return str(root / "config.toml")
-    # 容器環境下 pyproject.toml 可能未一併複製，退回以 cwd 尋找 config.toml。
-    cwd_config = Path.cwd() / "config.toml"
-    if cwd_config.exists():
-        return str(cwd_config)
-    return None
-
-
 class AppConfig(BaseSettings):
     """`config.toml` 與環境變數對應的完整設定，模組載入時組成全域單例 `settings`。
 
     Attributes:
-        input: `export_report_daily` 輸入參數。
+        input: 共用的 `[input]` 輸入參數（本包讀 `bucket_dir`／`date`／
+            `bucket_minutes`）。
         report: Excel 報表參數。
     """
 
     # extra="forbid" 是 BaseSettings 的預設值，這裡明寫出來讓行為可見：`config.toml`
     # 出現未知的頂層區塊會直接報錯（拼錯的區塊名不會被靜默忽略）。
     model_config = SettingsConfigDict(
-        toml_file=_get_toml_path(),
+        toml_file=get_toml_path(__file__),
         env_nested_delimiter="__",
         extra="forbid",
     )
@@ -102,23 +58,12 @@ class AppConfig(BaseSettings):
         額外欄位，看不出 `bucket_minutes` 該搬到哪個區塊；沿用舊設定的人需要知道
         下一步怎麼改。
 
-        `ZONE__` 開頭的環境變數則只警告、不擋下。pydantic-settings 的 env source 只查
-        已知欄位名，`ZONE__BUCKET_MINUTES` 不會進到 `data` 裡，也不會被 `extra="forbid"`
-        擋下，對本包而言是靜默忽略的覆寫，值得提醒；但同一個變數是 `zone_mapping` 的
-        合法設定（該包的 `bucket_minutes` 就在它自己的 `[zone]` 底下），而四包設計成
-        同一個 workspace、共用一份環境設定執行，在這裡拋錯會讓本包連 import 都失敗
-        （模組層就會 `load_config()`）。大小寫都掃，因為 pydantic-settings 預設不分
-        大小寫。
+        環境變數那側不需要對稱的守衛：`ZONE__BUCKET_MINUTES` 現在對 `zone_mapping`
+        也已不是合法設定（該包的 `bucket_minutes` 同樣移到了 `[input]`），會由該包
+        的搬家提示擋下——前提是該包有被執行。只補跑本階段時這個變數確實無訊號，但本包
+        本來就不讀它、值也不會變，屬 ADR-008 已接受的無訊號範圍，不值得為它保留一份
+        會在每次載入都印出來的警告。
         """
-        legacy_env_keys = sorted(
-            key for key in os.environ if key.upper().startswith("ZONE__")
-        )
-        if legacy_env_keys:
-            logger.warning(
-                "偵測到 ZONE__ 開頭的環境變數，本包不讀取它們；若原意是覆寫本包的"
-                "上游時段粒度，請改用 INPUT__BUCKET_MINUTES",
-                keys=legacy_env_keys,
-            )
         if isinstance(data, dict) and "zone" in data:
             raise ValueError(
                 "config.toml 的 [zone] 已移除，bucket_minutes 改放 [input]，由區域統計與"
@@ -159,7 +104,7 @@ def load_config() -> AppConfig:
     Raises:
         ValidationError: `config.toml` 或環境變數提供的值不合法。
     """
-    toml_path = _get_toml_path()
+    toml_path = get_toml_path(__file__)
     if toml_path is None or not Path(toml_path).exists():
         logger.warning("找不到 config.toml，將使用預設參數啟動", path=toml_path)
     return AppConfig()

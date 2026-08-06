@@ -44,6 +44,8 @@ uv run --directory libs/vfa_registry pytest        # 共用 lib 的測試（4 �
 uv run --directory libs/vfa_registry ruff check .
 uv run --directory libs/vfa_observability pytest   # （1 支）
 uv run --directory libs/vfa_observability ruff check .
+uv run --directory libs/vfa_config pytest          # （1 支）
+uv run --directory libs/vfa_config ruff check .
 ```
 
 **torch 隔離**：workspace 為單一 `.venv`，但 `uv sync --package <pkg>` 只裝該包依賴子樹
@@ -75,7 +77,9 @@ Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態�
 幾何不可統一，並修訂 ADR-004 的「舊 parquet 不對稱」條款；ADR-007：移除
 `camera_registry_used.yaml` 快照機制，`flow_report` 改讀 `bucket_dir` 當下的
 `camera_registry.yaml`，說明為何不補回溯替代方案、以及被接受的靜默錯位範圍（修訂 ADR-005
-的資料來源）。
+的資料來源）；ADR-008：設定的頂層區塊名是跨四包的全域環境變數命名空間，`[input]` 因此
+由 `libs/vfa_config` 提供單一定義、欄位取聯集，說明為何不改用套件前綴、為何否決把
+`bucket_minutes` 寫進 parquet metadata，並修訂「各包只保留自己讀到的區塊」那條。
 
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
 
@@ -103,12 +107,29 @@ Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態�
   `CameraEntry.lines` 欄位、`parse_and_validate_lines` 跨攝影機全域唯一驗證）於 issue #41
   加在此 lib，registry 只改這裡——三包經 workspace 依賴自動吃到 `lines` 忽略欄位相容，
   本身無需改碼。
-- **`config.py`：仍刻意各包分開**，各包只保留自己 `run_*` 實際讀到的區塊（`video_analyze`
-  保留 `tracker`/`model`/`output`/`input`；`zone_mapping` 保留 `input`/`zone`；`line_counting`
-  保留 `input`/`line`；`flow_report` 保留 `input`（含 `bucket_minutes`）/`report`）。四包皆已
-  DDD 重構（`flow_report` issue #42、`zone_mapping` issue #46、`video_analyze` issue #50、
-  `line_counting` issue #41 沿用 `zone_mapping` 的結構建立），config 都在 `models/config.py` 並改用
-  pydantic-settings（`config.toml`＋環境變數覆寫）、以 `find_project_root` 定位設定檔。
+- **`config.py`：私有區塊各包分開，`[input]` 抽成 `libs/vfa_config`（issue #79）。**
+  各包只保留自己 `run_*` 實際讀到的**私有**區塊（`video_analyze` 的
+  `tracker`/`model`/`output`；`zone_mapping` 的 `zone`；`line_counting` 的 `line`；
+  `flow_report` 的 `report`）；四包都有的 `[input]` 則由 `libs/vfa_config` 提供單一
+  `InputConfig`，欄位取四包需求的**聯集**（`bucket_dir`/`date`/`camera_ids`/`bucket_minutes`），
+  `find_project_root`／`get_toml_path` 一併抽在此 lib。四包皆已 DDD 重構（`flow_report`
+  issue #42、`zone_mapping` issue #46、`video_analyze` issue #50、`line_counting` issue #41
+  沿用 `zone_mapping` 的結構建立），config 都在 `models/config.py` 並改用 pydantic-settings
+  （`config.toml`＋環境變數覆寫）、以 `get_toml_path(__file__)` 定位設定檔。
+
+  **`[input]` 為何不能比照私有區塊各包裁剪**：`env_nested_delimiter="__"` 讓頂層區塊名
+  等於一段**全域**的環境變數命名空間——`INPUT__CAMERA_IDS` 對四包都是「`[input]` 的
+  `camera_ids`」，而四包共用一份環境設定執行是常態、`models/config.py` 又在模組層就
+  `load_config()`。裁剪的後果是別包連 import 都以 `extra_forbidden` 崩潰（抽出前
+  `INPUT__CAMERA_IDS` 打死另外三包、`INPUT__BUCKET_MINUTES` 打死另外三包）。因此
+  `InputConfig` 刻意含各包用不到的欄位（`video_analyze` 不讀 `bucket_minutes`、
+  `flow_report` 不讀 `camera_ids`），四包各有一支區塊契約測試釘住這件事。新增頂層區塊前
+  要確認該名稱在其他三包沒被用過。規則、否決過的替代方案與已知缺口見
+  [ADR-008](docs/adr/008-config-section-namespace.md)。
+
+  `bucket_minutes` 一併從 `zone_mapping` 的 `[zone]`、`line_counting` 的 `[line]` 移進
+  `[input]`（issue #79），三包共用單一環境變數 `INPUT__BUCKET_MINUTES`。**三份
+  `config.toml` 仍各填一次，填不一致沒有訊號**——這是 ADR-008 明列已接受的缺口，不是待辦。
 
 **共用 lib 存在的理由**：抽出前，`load_registry_from_path` 的 yaml 型別防呆補丁三包各自
 維護、版本各自漂移——flow_report 先補（PR #45），zone_mapping 隔一個工作單元才補
@@ -189,6 +210,6 @@ fail loud；沒有任何 `lines` 定義則整批跳過出入口三個分頁、�
 - 四包版本 pin 成彼此一致（`torch`/`ultralytics`/`numpy`/`opencv` 等推理堆疊、
   `polars`/`pyarrow`/`openpyxl` 等輸出格式相關套件），避免函式庫版本漂移造成非邏輯性的
   輸出差異；`line_counting` 的 `numpy`/`polars`/`pyarrow`/`pydantic`/`pyyaml` 與 `zone_mapping`
-  pin 成同版，`libs/` 底下兩個 lib 的 `pydantic`／`pyyaml` 也在此範圍內。單一 root `uv.lock`
+  pin 成同版，`libs/` 底下三個 lib 的 `pydantic`／`pyyaml` 也在此範圍內。單一 root `uv.lock`
   下版本一致由 `uv lock` 自動把關——`==` pin 彼此衝突會直接讓 `uv lock` 解析失敗；新增或
   升級依賴時留意是否需要四包同步。
