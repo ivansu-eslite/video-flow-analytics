@@ -19,11 +19,13 @@ dependencies = [
     "polars==1.42.0",
     "pyarrow==24.0.0",
     "lap==0.5.13",
+    "vfa_config",
     "vfa_observability",
     "vfa_registry",
 ]
 
 [tool.uv.sources]
+vfa_config = { workspace = true }
 vfa_observability = { workspace = true }
 vfa_registry = { workspace = true }
 
