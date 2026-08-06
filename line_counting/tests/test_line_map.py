@@ -103,8 +103,13 @@ def test_count_lines_daily_counts_crossing_and_ignores_camera_without_lines(tmp_
     assert result["out_count"].to_list() == [0]
     assert result["time_bucket"].to_list() == [base]
 
-    # 快照有寫出，供下游以「產生此份資料時的計數線定義」為準
-    assert (output_dir / "camera_registry_used.yaml").exists()
+    # 輸出目錄只留 parquet：本階段不再複製 registry 快照，下游改讀 bucket_dir 當下
+    # 的 camera_registry.yaml（見 ADR-007）
+    assert not (output_dir / "camera_registry_used.yaml").exists()
+    assert sorted(p.name for p in output_dir.iterdir()) == [
+        "line_counts.parquet",
+        "tracking_results.parquet",
+    ]
 
 
 def test_count_lines_daily_maps_line_group_to_its_own_line(tmp_path):
