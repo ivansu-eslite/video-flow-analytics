@@ -35,7 +35,7 @@ output_root=OUTPUT_ROOT) -> Path`（在 `services/line_map.py`），CLI 進入�
 | `main.py` | CLI 外殼：讀 `settings` → 組參數 → 呼叫 `count_lines_daily` |
 | `config/constants.py` | 非 Pydantic 靜態常數（輸出根目錄、輸入輸出檔名、parquet schema） |
 | `models/config.py` | pydantic-settings 設定模型與全域單例 `settings` |
-| `services/line_map.py` | 讀檔、逐攝影機/逐計數線套用演算法、寫檔與 registry 快照 |
+| `services/line_map.py` | 讀檔、逐攝影機/逐計數線套用演算法、寫檔 |
 | `services/stats.py` | 計數線跨越判定與進出人數聚合等純函式 |
 
 `camera_registry.yaml` 的模型與計數線驗證（`vfa_registry` 的 `Line`／
@@ -238,7 +238,6 @@ lines:
 | `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（線段區域寬度的解析度換算靠它），2026-07 之前產出的舊檔沒有這兩欄，會直接報錯要求重跑 `video_analyze` |
 | `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與計數線幾何 |
 | `outputs/{bucket}/{date}/line_counts.parquet` | 寫 | 每時段每計數線進出人數，欄位 `line_group` / `camera_id` / `line` / `time_bucket` / `in_count` / `out_count` |
-| `outputs/{bucket}/{date}/camera_registry_used.yaml` | 寫 | 本次套用的 `camera_registry.yaml` 快照，供下游以「產生此份資料時的定義」為準做驗證 |
 
 **時區**：`tracking_results.parquet` 的 `timestamp` 已是台北在地時間（`Asia/Taipei`），
 `time_bucket` 沿用之，本階段不做任何時區位移。

@@ -1,20 +1,18 @@
-"""Line Counting 的核心編排：讀檔、逐攝影機/逐計數線套用演算法、寫檔與快照。
+"""Line Counting 的核心編排：讀檔、逐攝影機/逐計數線套用演算法、寫檔。
 
 讀 `outputs/{bucket}/{date}/tracking_results.parquet`，套上人工維護在
 `camera_registry.yaml` 各攝影機底下的計數線幾何，輸出每個時段每條計數線的進出人數
-到同層的 `line_counts.parquet`，並把當下套用的 camera_registry.yaml 快照成
-`camera_registry_used.yaml` 以供回溯。
+到同層的 `line_counts.parquet`。
 
 實際的跨越判定與聚合演算法在 `services/stats.py`。
 """
 
 import datetime
-import shutil
 from pathlib import Path
 
 import polars as pl
 from vfa_observability import StructuredLogger
-from vfa_registry import load_registry, parse_and_validate_lines, registry_path
+from vfa_registry import load_registry, parse_and_validate_lines
 
 from line_counting.config.constants import (
     BASELINE_FRAME_WIDTH,
@@ -22,7 +20,6 @@ from line_counting.config.constants import (
     LINE_COUNTS_FILENAME,
     LINE_COUNTS_SCHEMA,
     OUTPUT_ROOT,
-    REGISTRY_SNAPSHOT_FILENAME,
     REQUIRED_TRACKING_COLUMNS,
     TMP_SUFFIX,
     TRACKING_RESULTS_FILENAME,
@@ -171,9 +168,6 @@ def count_lines_daily(
     tmp_path = counts_path.with_name(counts_path.name + TMP_SUFFIX)
     result.write_parquet(tmp_path)
     tmp_path.replace(counts_path)
-
-    # 快照當下套用的 camera_registry.yaml，讓這份 line_counts 自帶當天的計數線依據可回溯
-    shutil.copyfile(registry_path(bucket_path), output_dir / REGISTRY_SNAPSHOT_FILENAME)
 
     logger.info(
         "計數線進出人數統計已寫入",

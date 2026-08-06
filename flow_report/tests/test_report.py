@@ -42,7 +42,7 @@ def _write_registry(
     zones_by_camera: dict[str, list[str]] | None = None,
     lines_by_camera: dict[str, list[str]] | None = None,
 ) -> None:
-    """寫出 registry（或其快照）；zones／lines 皆以 camera_id -> 名稱清單 指定。"""
+    """寫出 registry；zones／lines 皆以 camera_id -> 名稱清單 指定。"""
     zones_by_camera = zones_by_camera or {}
     lines_by_camera = lines_by_camera or {}
     camera_ids = sorted({*zones_by_camera, *lines_by_camera})
@@ -162,68 +162,114 @@ def _build(tmp_path: Path, bucket_dir: Path, **kwargs) -> ReportFrames:
     return _build_report_frames(**params)
 
 
-def test_build_report_frames_validates_snapshot_registry_not_live(tmp_path):
-    """_build_report_frames 應該驗證產生 zone_counts.parquet 當時的 registry 快照
-    （camera_registry_used.yaml），而不是「當下」的 camera_registry.yaml。"""
+def test_build_report_frames_uses_live_registry_not_leftover_snapshot(tmp_path):
+    """registry 來源是 `bucket_dir` 當下的 camera_registry.yaml；舊版留在輸出目錄
+    下的 camera_registry_used.yaml 不再被讀取（見 ADR-007）。
+
+    刻意讓兩份內容不同：當下的 registry 只有 cam001，殘留快照多了一台 cam002。
+    若還在讀快照，(loc_cam002, lobby) 這組會被視為合法而不報錯。"""
     bucket_dir, output_dir = _prepare_bucket(tmp_path)
-    # 即時 registry：已經修正成不重複
     _write_registry(
         bucket_dir / "camera_registry.yaml",
-        {"cam001": ["entrance"], "cam002": ["entrance_2"]},
+        {"cam001": ["entrance"]},
     )
-    _write_zone_counts(output_dir / "zone_counts.parquet")
-    # 快照：產生 parquet 當時兩台攝影機都叫 entrance（重複）
+    # 舊版遺留的快照：內容與當下的 registry 不同，不該影響結果
     _write_registry(
         output_dir / "camera_registry_used.yaml",
+        {"cam001": ["entrance"], "cam002": ["lobby"]},
+    )
+    _write_zone_counts(
+        output_dir / "zone_counts.parquet", camera_id="loc_cam002", zone="lobby"
+    )
+
+    with pytest.raises(ValueError, match="不在.*定義"):
+        _build(tmp_path, bucket_dir)
+
+
+def test_build_report_frames_requires_live_registry(tmp_path):
+    """`bucket_dir` 下沒有 camera_registry.yaml 時 fail-loud。
+
+    上游 parquet 都在也不能退回「看檔案在不在」——那正是 ADR-005 要避免的靜默少頁。
+    """
+    bucket_dir, output_dir = _prepare_bucket(tmp_path)
+    _write_zone_counts(output_dir / "zone_counts.parquet")
+
+    # 路徑一併釘住：舊實作缺快照時拋的是同一句話、只有檔名不同，不比對檔名的話
+    # 這支測試在改回讀快照後仍會是綠的
+    with pytest.raises(FileNotFoundError, match=r"找不到設備登錄檔.*camera_registry\.yaml$"):
+        _build(tmp_path, bucket_dir)
+
+
+def test_build_report_frames_rejects_orphan_zone_counts(tmp_path):
+    """registry 已無任何區域定義、當日 zone_counts.parquet 卻有資料時要擋下。
+
+    `_reject_unknown_pairs` 只擋得住「部分 zone 被移除」；整側清空時那條路走不到，
+    靜默跳過會讓區域統計整批從報表消失，`overwrite` 重跑還會清掉既有的舊列。"""
+    bucket_dir, output_dir = _prepare_bucket(tmp_path)
+    _write_registry(
+        bucket_dir / "camera_registry.yaml",
+        lines_by_camera={"cam001": ["main_gate"]},
+    )
+    _write_line_counts(output_dir / "line_counts.parquet")
+    _write_zone_counts(output_dir / "zone_counts.parquet")
+
+    with pytest.raises(ValueError, match="已沒有任何參與統計的區域定義"):
+        _build(tmp_path, bucket_dir)
+
+
+def test_build_report_frames_accepts_orphan_but_empty_counts(tmp_path):
+    """0 列的 parquet 不算錯位：那是上游對「這個 bucket 沒有該側定義」的正常產物
+    （執行了、沒有東西可算），不該把它當成 registry 被誤改。"""
+    bucket_dir, output_dir = _prepare_bucket(tmp_path)
+    _write_registry(
+        bucket_dir / "camera_registry.yaml",
+        {"cam001": ["entrance"]},
+    )
+    _write_zone_counts(output_dir / "zone_counts.parquet")
+    _write_line_counts(output_dir / "line_counts.parquet", empty=True)
+
+    frames = _build(tmp_path, bucket_dir)
+    assert frames.zone_hourly.height == 1
+    assert frames.line_hourly is None
+
+
+def test_build_report_frames_rejects_live_registry_duplicates(tmp_path):
+    """當下的 camera_registry.yaml 有跨攝影機重複的 zone 名稱時要擋下。
+
+    改讀當下 registry 後，這正是要 fail-loud 的情況：報表以 zone 名稱（不含
+    camera_id）分組，同名會讓兩台攝影機的人流被靜默合併。"""
+    bucket_dir, output_dir = _prepare_bucket(tmp_path)
+    _write_registry(
+        bucket_dir / "camera_registry.yaml",
         {"cam001": ["entrance"], "cam002": ["entrance"]},
     )
+    _write_zone_counts(output_dir / "zone_counts.parquet")
 
     with pytest.raises(ValueError, match="全域唯一"):
         _build(tmp_path, bucket_dir)
 
 
-def test_build_report_frames_ignores_live_registry_duplicates(tmp_path):
-    """即時 camera_registry.yaml 目前有重複也不該擋下報表，只要產生資料當時的
-    快照是唯一的就該正常執行。"""
-    bucket_dir, output_dir = _prepare_bucket(tmp_path)
-    # 即時 registry 目前有重複（尚未修正），但不該影響驗證結果
-    _write_registry(
-        bucket_dir / "camera_registry.yaml",
-        {"cam001": ["entrance"], "cam002": ["entrance"]},
-    )
-    _write_zone_counts(output_dir / "zone_counts.parquet")
-    # 快照：產生 parquet 當時是全域唯一的
-    _write_registry(
-        output_dir / "camera_registry_used.yaml",
-        {"cam001": ["entrance"], "cam002": ["entrance_2"]},
-    )
-
-    frames = _build(tmp_path, bucket_dir)
-    assert frames.zone_hourly.height == 1
-    assert frames.zone_peak.height == 1
-
-
 def test_build_report_frames_rejects_unknown_camera_zone_pair(tmp_path):
-    """zone_counts.parquet 出現不在 camera_registry_used.yaml 快照內的
+    """zone_counts.parquet 出現不在 camera_registry.yaml 定義內的
     (camera, zone) 組合時應 fail-loud，而非靜默讀入未經驗證的資料。"""
     bucket_dir, output_dir = _prepare_bucket(tmp_path)
-    # parquet 裡的 zone 是 "checkout"，但快照的 cam001 只定義了 "entrance"
+    # parquet 裡的 zone 是 "checkout"，但 registry 的 cam001 只定義了 "entrance"
     _write_zone_counts(output_dir / "zone_counts.parquet", zone="checkout")
     _write_registry(
-        output_dir / "camera_registry_used.yaml", {"cam001": ["entrance"]}
+        bucket_dir / "camera_registry.yaml", {"cam001": ["entrance"]}
     )
 
-    with pytest.raises(ValueError, match="不在.*快照"):
+    with pytest.raises(ValueError, match="不在.*定義"):
         _build(tmp_path, bucket_dir)
 
 
-def test_build_report_frames_skips_lines_when_snapshot_defines_none(tmp_path):
-    """快照沒有任何計數線定義時，缺 line_counts.parquet 不是錯誤——這個 bucket
+def test_build_report_frames_skips_lines_when_registry_defines_none(tmp_path):
+    """registry 沒有任何計數線定義時，缺 line_counts.parquet 不是錯誤——這個 bucket
     本來就沒有計數線，出入口三頁沒有資料可寫（分頁仍會建立）。"""
     bucket_dir, output_dir = _prepare_bucket(tmp_path)
     _write_zone_counts(output_dir / "zone_counts.parquet")
     _write_registry(
-        output_dir / "camera_registry_used.yaml", {"cam001": ["entrance"]}
+        bucket_dir / "camera_registry.yaml", {"cam001": ["entrance"]}
     )
 
     frames = _build(tmp_path, bucket_dir)
@@ -233,12 +279,12 @@ def test_build_report_frames_skips_lines_when_snapshot_defines_none(tmp_path):
     assert frames.line_peak_out is None
 
 
-def test_build_report_frames_skips_zones_when_snapshot_defines_none(tmp_path):
-    """反向亦然：快照只定義計數線時，缺 zone_counts.parquet 不是錯誤。"""
+def test_build_report_frames_skips_zones_when_registry_defines_none(tmp_path):
+    """反向亦然：registry 只定義計數線時，缺 zone_counts.parquet 不是錯誤。"""
     bucket_dir, output_dir = _prepare_bucket(tmp_path)
     _write_line_counts(output_dir / "line_counts.parquet")
     _write_registry(
-        output_dir / "camera_registry_used.yaml",
+        bucket_dir / "camera_registry.yaml",
         lines_by_camera={"cam001": ["main_gate"]},
     )
 
@@ -248,13 +294,13 @@ def test_build_report_frames_skips_zones_when_snapshot_defines_none(tmp_path):
     assert frames.line_hourly.height == 1
 
 
-def test_build_report_frames_requires_line_counts_when_snapshot_defines_lines(tmp_path):
-    """快照定義了計數線卻沒有 line_counts.parquet：這是「忘了跑 line_counting」，
+def test_build_report_frames_requires_line_counts_when_registry_defines_lines(tmp_path):
+    """registry 定義了計數線卻沒有 line_counts.parquet：這是「忘了跑 line_counting」，
     不是「本來就沒有計數線」，必須 fail-loud 而非靜默少三頁。"""
     bucket_dir, output_dir = _prepare_bucket(tmp_path)
     _write_zone_counts(output_dir / "zone_counts.parquet")
     _write_registry(
-        output_dir / "camera_registry_used.yaml",
+        bucket_dir / "camera_registry.yaml",
         {"cam001": ["entrance"]},
         {"cam001": ["main_gate"]},
     )
@@ -263,11 +309,11 @@ def test_build_report_frames_requires_line_counts_when_snapshot_defines_lines(tm
         _build(tmp_path, bucket_dir)
 
 
-def test_build_report_frames_requires_zone_counts_when_snapshot_defines_zones(tmp_path):
+def test_build_report_frames_requires_zone_counts_when_registry_defines_zones(tmp_path):
     bucket_dir, output_dir = _prepare_bucket(tmp_path)
     _write_line_counts(output_dir / "line_counts.parquet")
     _write_registry(
-        output_dir / "camera_registry_used.yaml",
+        bucket_dir / "camera_registry.yaml",
         {"cam001": ["entrance"]},
         {"cam001": ["main_gate"]},
     )
@@ -276,10 +322,10 @@ def test_build_report_frames_requires_zone_counts_when_snapshot_defines_zones(tm
         _build(tmp_path, bucket_dir)
 
 
-def test_build_report_frames_rejects_snapshot_without_any_definition(tmp_path):
-    """快照裡既沒有區域也沒有計數線：沒有任何東西可彙總，不該產出空報表。"""
+def test_build_report_frames_rejects_registry_without_any_definition(tmp_path):
+    """registry 裡既沒有區域也沒有計數線：沒有任何東西可彙總，不該產出空報表。"""
     bucket_dir, output_dir = _prepare_bucket(tmp_path)
-    _write_registry(output_dir / "camera_registry_used.yaml", {"cam001": []})
+    _write_registry(bucket_dir / "camera_registry.yaml", {"cam001": []})
 
     with pytest.raises(ValueError, match="沒有可彙總的統計"):
         _build(tmp_path, bucket_dir)
@@ -287,14 +333,14 @@ def test_build_report_frames_rejects_snapshot_without_any_definition(tmp_path):
 
 def test_build_report_frames_rejects_unknown_camera_line_pair(tmp_path):
     bucket_dir, output_dir = _prepare_bucket(tmp_path)
-    # parquet 裡的計數線是 "side_gate"，但快照的 cam001 只定義了 "main_gate"
+    # parquet 裡的計數線是 "side_gate"，但 registry 的 cam001 只定義了 "main_gate"
     _write_line_counts(output_dir / "line_counts.parquet", line="side_gate")
     _write_registry(
-        output_dir / "camera_registry_used.yaml",
+        bucket_dir / "camera_registry.yaml",
         lines_by_camera={"cam001": ["main_gate"]},
     )
 
-    with pytest.raises(ValueError, match="不在.*快照"):
+    with pytest.raises(ValueError, match="不在.*定義"):
         _build(tmp_path, bucket_dir)
 
 
@@ -305,7 +351,7 @@ def test_build_report_frames_rejects_duplicate_line_names_across_cameras(tmp_pat
     _write_zone_counts(output_dir / "zone_counts.parquet")
     _write_line_counts(output_dir / "line_counts.parquet")
     _write_registry(
-        output_dir / "camera_registry_used.yaml",
+        bucket_dir / "camera_registry.yaml",
         {"cam001": ["entrance"]},
         {"cam001": ["main_gate"], "cam002": ["main_gate"]},
     )
@@ -320,7 +366,7 @@ def test_build_report_frames_accepts_empty_line_counts(tmp_path):
     bucket_dir, output_dir = _prepare_bucket(tmp_path)
     _write_line_counts(output_dir / "line_counts.parquet", empty=True)
     _write_registry(
-        output_dir / "camera_registry_used.yaml",
+        bucket_dir / "camera_registry.yaml",
         lines_by_camera={"cam001": ["main_gate"]},
     )
 

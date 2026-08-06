@@ -69,10 +69,13 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 真的穿過有限線段」的閘門（修正 ADR-001 的無限直線前提），並說明為何不採逐格有效性閘門；
 ADR-004：線段區域參數的尺規與影像尺寸來源，決定像素參數改以 1080p 為基準依 `frame_width`
 換算，尺寸由上游寫進 parquet（而非人工填 registry 或下游讀影片 header）；ADR-005：
-`flow_report` 的輸入必要性改由 `camera_registry_used.yaml` 快照的定義決定（不看檔案在
-不在），說明為何刻意不留跳過用的旗標；ADR-006：`zone_mapping` 的 `entries` 由時間去抖
-改為區域邊界緩衝帶＋Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態、
-為何 zone 與 line 的幾何不可統一，並修訂 ADR-004 的「舊 parquet 不對稱」條款。
+`flow_report` 的輸入必要性改由 registry 的定義決定（不看檔案在不在），說明為何刻意不留
+跳過用的旗標；ADR-006：`zone_mapping` 的 `entries` 由時間去抖改為區域邊界緩衝帶＋
+Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態、為何 zone 與 line 的
+幾何不可統一，並修訂 ADR-004 的「舊 parquet 不對稱」條款；ADR-007：移除
+`camera_registry_used.yaml` 快照機制，`flow_report` 改讀 `bucket_dir` 當下的
+`camera_registry.yaml`，說明為何不補回溯替代方案、以及被接受的靜默錯位範圍（修訂 ADR-005
+的資料來源）。
 
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
 
@@ -125,16 +128,16 @@ ADR-004：線段區域參數的尺規與影像尺寸來源，決定像素參數�
 `camera_registry.yaml` 的 zone 名稱**跨攝影機也不可重複**（非僅同一攝影機內）。此驗證
 的實作是共用 lib `vfa_registry` 的 `parse_and_validate_zones`——`zone_mapping` 與
 `flow_report` 都會呼叫（`video_analyze` 不呼叫），**即使當天不會產生報表，`zone_mapping`
-本身也會擋下跨攝影機重複的 zone 命名**。`flow_report` 驗證的對象是產生該日 `zone_counts.parquet` 當時的
-`camera_registry_used.yaml` **快照**，而非「當下」的 `camera_registry.yaml`——若兩者之間
-改過 zone 名稱，用即時檔案驗證會通過，但 parquet 裡的 zone 名稱其實是舊定義，可能讓不同
-攝影機的人流被靜默合併。
+本身也會擋下跨攝影機重複的 zone 命名**。`flow_report` 驗證的對象是 `bucket_dir` 下當下的
+`camera_registry.yaml`（ADR-007 之前是產生該日 parquet 時的快照）——產生 parquet 之後
+改過 zone 名稱的話，`_reject_unknown_pairs` 的 (camera, zone) 組合驗證會擋下；只改幾何
+座標則不會有訊號，這是移除快照時接受的代價。
 
 `line_counting` 的計數線名稱有**同樣**的約束：下游同樣以 line 名稱（不含 `camera_id`）
 分組彙總，故 line 名稱跨攝影機也不可重複，由 `vfa_registry` 的 `parse_and_validate_lines`
 擋下——**即使當天不會產生報表，`line_counting` 本身也會擋下跨攝影機重複的 line 命名**。
-`flow_report` 於 issue #69 串接 `line_counts.parquet` 後，也對同一份快照呼叫
-`parse_and_validate_lines`，與 zone 那側是同型驗證（同樣驗快照、不驗當下的檔案）。
+`flow_report` 於 issue #69 串接 `line_counts.parquet` 後，也對同一份 registry 呼叫
+`parse_and_validate_lines`，與 zone 那側是同型驗證。
 
 `Line` 另帶一個 `line_group` 欄位（issue #59），標示一條計數線屬於哪個範圍（例如同一
 賣場的數個出入口）。**`line_group` 是與上述規則刻意相反的例外**：跨攝影機同名不但不
@@ -142,17 +145,18 @@ ADR-004：線段區域參數的尺規與影像尺寸來源，決定像素參數�
 唯一，故 `(line_group, line)` 組合天然唯一。取捨與「為何不能順手補上同型驗證」見
 [ADR-002](docs/adr/002-line-group-semantics.md)。
 
-### `flow_report` 的輸入必要性看快照，不看檔案（跨套件契約）
+### `flow_report` 的輸入必要性看 registry，不看檔案（跨套件契約）
 
-`flow_report` 有兩個上游輸入，**該有哪幾份由 `camera_registry_used.yaml` 快照的定義決定**：
-快照裡有攝影機定義了非空 `lines` 就必須有 `line_counts.parquet`，缺檔即 fail loud；沒有
-任何 `lines` 定義則整批跳過出入口三個分頁、不算錯誤（zone 那側同理，判準是
+`flow_report` 有兩個上游輸入，**該有哪幾份由 `bucket_dir/camera_registry.yaml` 的定義
+決定**：registry 裡有攝影機定義了非空 `lines` 就必須有 `line_counts.parquet`，缺檔即
+fail loud；沒有任何 `lines` 定義則整批跳過出入口三個分頁、不算錯誤（zone 那側同理，判準是
 `participates_in_zone_mapping` 且 `zones` 非空）。這是**這條 repo 唯一不照「下游看上游輸出
 檔是否存在」原則的階段**，根 README 的階段相依原則那段已寫明這個例外；`zone_mapping`／
 `line_counting` 只有單一上游、沒有這個歧義，維持看檔案。取捨與「為何刻意不留跳過用的
-旗標」見 [ADR-005](docs/adr/005-report-input-requirement-from-snapshot.md)。
+旗標」見 [ADR-005](docs/adr/005-report-input-requirement-from-snapshot.md)；資料來源
+為何由快照改成當下的檔案見 [ADR-007](docs/adr/007-remove-registry-snapshot.md)。
 
-後果是 `flow_report` 從此被 `line_counting` 綁住：快照只要有任一 `lines`，沒跑
+後果是 `flow_report` 從此被 `line_counting` 綁住：registry 只要有任一 `lines`，沒跑
 `line_counting` 就連 zone 兩頁都產不出來（整個 `export_report_daily` 中止）。排程上
 `zone_mapping` 與 `line_counting` 都要排在 `flow_report` 之前。
 

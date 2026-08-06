@@ -41,9 +41,9 @@ flowchart LR
     A["video_analyze<br/>YOLO + ByteTrack"]
     T["tracking_results.parquet<br/>追蹤明細"]
     Z["zone_mapping<br/>zone 幾何 + 事件統計"]
-    C["zone_counts.parquet<br/>每時段每區域事件<br/>(+ camera_registry_used.yaml 快照)"]
+    C["zone_counts.parquet<br/>每時段每區域事件"]
     L["line_counting<br/>line 幾何 + 跨越判定"]
-    N["line_counts.parquet<br/>每時段每計數線進出人數<br/>(+ camera_registry_used.yaml 快照)"]
+    N["line_counts.parquet<br/>每時段每計數線進出人數"]
     R["flow_report<br/>跨期彙總與分析"]
     X["report.xlsx<br/>跨日累加的 BI 報表"]
 
@@ -59,13 +59,15 @@ flowchart LR
 - **階段獨立、可分別重跑**：各段的成本與觸發條件差異很大。只調整區域或計數線幾何時，
   僅需重跑 `zone_mapping`／`line_counting`；只調整報表參數時，僅需重跑 `flow_report`
   ——都不必重跑昂貴的 GPU 偵測。這讓日常迭代維持在純 CPU 的低成本路徑上。
-- **只靠檔案交接相依**：階段之間不透過記憶體或回傳值傳資料，而是靠 parquet 與 yaml 快照
-  交接。因此任何排程器都能個別重跑其中一個階段，只要對應的輸入檔還在。相依是否滿足的判定
+- **只靠檔案交接相依**：階段之間不透過記憶體或回傳值傳資料，而是靠 parquet 交接。因此
+  任何排程器都能個別重跑其中一個階段，只要對應的輸入檔還在。相依是否滿足的判定
   分兩種：只有單一上游輸入的階段看「上游輸出檔是否存在」（例如 `zone_mapping` 檢查
   `tracking_results.parquet`）；`flow_report` 有兩個上游輸入，改由
-  `camera_registry_used.yaml` **快照的定義**決定該有哪幾份輸入——純看檔案無法區分「定義了
+  `bucket_dir/camera_registry.yaml` **的定義**決定該有哪幾份輸入——純看檔案無法區分「定義了
   計數線卻忘了跑 `line_counting`」與「這個 bucket 本來就沒有計數線」，前者會讓報表靜默
-  少三個分頁。取捨見 [ADR-005](docs/adr/005-report-input-requirement-from-snapshot.md)。
+  少三個分頁。取捨見 [ADR-005](docs/adr/005-report-input-requirement-from-snapshot.md)
+  與 [ADR-007](docs/adr/007-remove-registry-snapshot.md)（後者把資料來源由當日輸出目錄
+  下的 registry 快照改為 `bucket_dir` 當下的檔案）。
 - **重跑冪等**：所有輸出都先寫入 `.tmp` 暫存檔、完成後再 `rename` 成正式檔名，藉由
   `rename` 的原子性，確保過程中斷時不會在正式檔名下留下半成品。`flow_report` 對同一天重跑
   是否冪等，取決於 `on_duplicate_date`（見該套件 README）。
@@ -222,7 +224,6 @@ cameras:
 | `outputs/{bucket}/{date}/…`（鏡射輸入路徑） | video_analyze | 逐片段標註影片，`save_video = true` 時才產出（開發 / 偵錯輔助） |
 | `outputs/{bucket}/{date}/zone_counts.parquet` | zone_mapping | 每時段每區域事件統計 |
 | `outputs/{bucket}/{date}/line_counts.parquet` | line_counting | 每時段每計數線進出人數，欄位 `line_group`／`camera_id`／`line`／`time_bucket`／`in_count`／`out_count` |
-| `outputs/{bucket}/{date}/camera_registry_used.yaml` | zone_mapping／line_counting | 產生當日資料時的 registry 快照；兩包寫入同一路徑，同日都跑時後跑者覆蓋 |
 | `outputs/{bucket}/report.xlsx` | flow_report | 跨日累加的 Excel 報表（六個分頁：區域兩頁、出入口三頁、活動事件一頁） |
 
 **`tracking_results.parquet` 的影像尺寸欄位是跨套件的硬性契約**：`frame_width`／

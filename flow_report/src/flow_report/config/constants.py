@@ -12,7 +12,6 @@ OUTPUT_ROOT = Path("outputs")
 # 輸入／輸出檔名。
 ZONE_COUNTS_FILENAME = "zone_counts.parquet"
 LINE_COUNTS_FILENAME = "line_counts.parquet"
-REGISTRY_SNAPSHOT_FILENAME = "camera_registry_used.yaml"
 REPORT_FILENAME = "report.xlsx"
 # 寫檔採「先寫 .tmp 再 rename」以避免半寫入的檔案。
 TMP_SUFFIX = ".tmp"

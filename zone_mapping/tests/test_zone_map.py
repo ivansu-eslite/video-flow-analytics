@@ -97,6 +97,45 @@ def test_map_zones_daily_ignores_missing_data_for_camera_without_zones(tmp_path)
     assert result["zone"].to_list() == ["zone_a"]
 
 
+def test_map_zones_daily_writes_only_parquet(tmp_path):
+    """輸出目錄只留 parquet：本階段不再複製 registry 快照（見 ADR-007）。
+
+    下游 `flow_report` 改讀 `bucket_dir` 當下的 `camera_registry.yaml`，這裡再寫
+    `camera_registry_used.yaml` 只會留下沒人讀的檔案，且與部署端的輸出結構不一致。
+    """
+    bucket_dir = tmp_path / "bucket_test"
+    bucket_dir.mkdir()
+    _write_registry(
+        bucket_dir / "camera_registry.yaml",
+        [
+            {
+                "camera_id": "cam001",
+                "location": "loc",
+                "ip": "127.0.0.1",
+                "zones": [{"name": "zone_a", "polygon": _SQUARE_200}],
+            },
+        ],
+    )
+
+    output_root = tmp_path / "outputs"
+    output_dir = output_root / "bucket_test" / "2026-05-01"
+    output_dir.mkdir(parents=True)
+    _write_tracking_results(output_dir / "tracking_results.parquet", "loc_cam001")
+
+    map_zones_daily(
+        date=datetime.date(2026, 5, 1),
+        bucket_dir=str(bucket_dir),
+        bucket_minutes=60,
+        output_root=output_root,
+    )
+
+    assert not (output_dir / "camera_registry_used.yaml").exists()
+    assert sorted(p.name for p in output_dir.iterdir()) == [
+        "tracking_results.parquet",
+        "zone_counts.parquet",
+    ]
+
+
 def test_map_zones_daily_still_fails_loud_for_camera_with_zones_missing_data(
     tmp_path,
 ):

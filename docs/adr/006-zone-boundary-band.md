@@ -130,8 +130,9 @@ Negative
 - **舊 parquet 全面失效**：`zone_mapping` 從此擋下缺影像尺寸欄位的 parquet，原本能跑的
   舊資料會停跑，需以現行 `video_analyze` 重跑（GPU）。
 - **`zone_mapping` 擋下的那一天，整份報表都產不出來**：ADR-005 起 `flow_report` 的輸入
-  必要性看 `camera_registry_used.yaml` 快照——快照裡有 `zones` 定義就必須有
-  `zone_counts.parquet`，缺檔即中止整個 `export_report_daily`，出入口三個分頁也不會產出。
+  必要性看 registry 的定義（[ADR-007](007-remove-registry-snapshot.md) 起是
+  `bucket_dir/camera_registry.yaml`，原為當日輸出目錄下的快照）——裡面有 `zones` 定義就
+  必須有 `zone_counts.parquet`，缺檔即中止整個 `export_report_daily`，出入口三個分頁也不會產出。
   因此本 ADR 新增的兩道 fail loud（缺影像尺寸欄位、窄區域）不只影響區域兩頁，誤擋的代價
   是該日沒有報表。
 - **跨日報表會混到兩種口徑**：`flow_report` 的 `on_duplicate_date = "append"` 會把新舊

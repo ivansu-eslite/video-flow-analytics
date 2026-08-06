@@ -4,9 +4,9 @@
 `line_counts.parquet`（計數線進出），彙總成跨日累加更新的
 `outputs/{bucket}/report.xlsx`。實際的期間彙總／尖峰計算在 `services/stats.py`。
 
-**哪些輸入是必要的，由 `camera_registry_used.yaml` 快照的定義決定**，不是「檔案在
+**哪些輸入是必要的，由 `bucket_dir/camera_registry.yaml` 的定義決定**，不是「檔案在
 不在」——後者無法區分「定義了計數線卻忘了跑 `line_counting`」與「這個 bucket 本來
-就沒有計數線」，前者會靜默少三頁。見 ADR-005。
+就沒有計數線」，前者會靜默少三頁。見 ADR-005、ADR-007。
 """
 
 import datetime
@@ -21,9 +21,10 @@ from openpyxl.worksheet.worksheet import Worksheet
 from vfa_observability import StructuredLogger
 from vfa_registry import (
     CameraEntry,
-    load_registry_from_path,
+    load_registry,
     parse_and_validate_lines,
     parse_and_validate_zones,
+    registry_path,
 )
 
 from flow_report.config.constants import (
@@ -35,7 +36,6 @@ from flow_report.config.constants import (
     LINE_PEAK_HEADERS,
     LINE_PEAK_SORT_COLUMNS,
     OUTPUT_ROOT,
-    REGISTRY_SNAPSHOT_FILENAME,
     REPORT_FILENAME,
     SHEET_EVENTS,
     SHEET_LINE_HOURLY,
@@ -64,7 +64,7 @@ logger = StructuredLogger(component="report_builder")
 class ReportFrames(NamedTuple):
     """本次要寫入報表的各分頁資料；`None` 代表該類統計在這個 bucket 沒有定義。
 
-    `None` 與「空的 DataFrame」語義不同：前者是快照裡根本沒有區域／計數線定義，
+    `None` 與「空的 DataFrame」語義不同：前者是 registry 裡根本沒有區域／計數線定義，
     本次不產生該類資料（分頁仍會建立、`overwrite` 時仍會清掉該日舊列）；後者是
     有定義但當日沒有事件，是上游的正常產物。
     """
@@ -116,14 +116,52 @@ def _reject_unknown_pairs(
     valid_pairs: set[tuple[str, str]],
     source_path: Path,
 ) -> None:
-    """parquet 出現不在快照定義內的組合時 fail-loud，而非靜默讀入未經驗證的資料。"""
+    """parquet 出現不在 registry 定義內的組合時 fail-loud，而非靜默讀入未經驗證的資料。"""
     actual_pairs = set(df.select(list(columns)).unique(maintain_order=True).iter_rows())
     unknown_pairs = actual_pairs - valid_pairs
     if unknown_pairs:
         raise ValueError(
-            f"{source_path} 出現不在 {REGISTRY_SNAPSHOT_FILENAME} 快照內的 "
+            f"{source_path} 出現不在 camera_registry.yaml 定義內的 "
             f"({columns[0]}, {columns[1]}) 組合: {sorted(unknown_pairs)}"
         )
+
+
+def _reject_orphan_counts(
+    counts_path: Path, registry_file: Path, kind: str, cause: str
+) -> None:
+    """registry 已無該側定義、當日 parquet 卻有資料時 fail-loud。
+
+    這是「registry 定義了卻沒跑上游」的反向情況：整側定義被清空（或該側所有攝影機
+    的 `participates_in_zone_mapping` 被關掉），但當日 parquet 還帶著用舊定義算出來
+    的資料。靜默跳過的話，該類統計會整批從報表消失，且 `on_duplicate_date`
+    ＝`overwrite` 時連既有的舊列一併清掉——正是這條 repo 要擋的那種無聲資料損失。
+
+    `_reject_unknown_pairs` 只擋得住「部分定義被移除」（其餘定義還在，該側仍會進到
+    這裡的下游）；整側清空時那條路根本走不到，才需要這道檢查。
+
+    0 列的 parquet 不算：那是上游對「這個 bucket 沒有該側定義」的正常產物
+    （執行了、沒有東西可算），不是錯位。
+
+    Args:
+        counts_path: 該側當日的 parquet 路徑。
+        registry_file: 本次讀的 registry 路徑（錯誤訊息要指得出改哪個檔）。
+        kind: 該側的中文稱呼（「區域」／「計數線」），用於組訊息。
+        cause: 該側「沒有定義」的完整判準。zone 那側除了 `zones` 為空，還可能是
+            `participates_in_zone_mapping` 全被關掉——只寫「沒有定義」的話，操作者
+            去 registry 一看 zones 還在，會被訊息帶往錯的方向。
+
+    Raises:
+        ValueError: registry 已無該側定義，但當日 parquet 有資料。
+    """
+    if not counts_path.exists() or pl.read_parquet(counts_path).height == 0:
+        return
+    raise ValueError(
+        f"{registry_file} 中已沒有任何參與統計的{kind}定義（{cause}），"
+        f"但 {counts_path} 仍有資料。若是誤改 registry，請把{kind}改回參與統計；"
+        f"若確定不再統計{kind}，請一併移除該日的 parquet（本階段不會自行刪除上游"
+        "產物）——但注意 on_duplicate_date='overwrite' 重跑時，報表中該日該側的"
+        "既有列也會一併清除。"
+    )
 
 
 def _zone_frames(
@@ -131,12 +169,13 @@ def _zone_frames(
     zone_entries: dict[str, CameraEntry],
     period_minutes: int,
     metric: str,
+    registry_file: Path,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     counts_path = output_dir / ZONE_COUNTS_FILENAME
     if not counts_path.exists():
         raise FileNotFoundError(
-            f"快照中有攝影機定義了區域，但找不到區域事件統計 {counts_path}，"
-            "請先執行 map_zones_daily 產生當日 parquet。"
+            f"{registry_file} 中有攝影機定義了區域，但找不到區域事件統計 "
+            f"{counts_path}，請先執行 map_zones_daily 產生當日 parquet。"
         )
 
     # parse_and_validate_zones 順便驗證跨攝影機 zone 名稱唯一性
@@ -157,12 +196,13 @@ def _line_frames(
     output_dir: Path,
     line_entries: dict[str, CameraEntry],
     period_minutes: int,
+    registry_file: Path,
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     counts_path = output_dir / LINE_COUNTS_FILENAME
     if not counts_path.exists():
         raise FileNotFoundError(
-            f"快照中有攝影機定義了計數線，但找不到計數線進出統計 {counts_path}，"
-            "請先執行 count_lines_daily 產生當日 parquet。"
+            f"{registry_file} 中有攝影機定義了計數線，但找不到計數線進出統計 "
+            f"{counts_path}，請先執行 count_lines_daily 產生當日 parquet。"
         )
 
     # parse_and_validate_lines 順便驗證跨攝影機 line 名稱唯一性
@@ -199,9 +239,8 @@ def _build_report_frames(
 
     bucket_path = Path(bucket_dir)
     output_dir = output_root / bucket_path.name / date.isoformat()
-    snapshot_path = output_dir / REGISTRY_SNAPSHOT_FILENAME
-    # 為何用快照而非當下 registry：見 export_report_daily 的 docstring 說明
-    registry = load_registry_from_path(snapshot_path)
+    registry_file = registry_path(bucket_path)
+    registry = load_registry(bucket_path)
 
     # zone 名稱唯一性的驗證範圍維持既有的 participates_in_zone_mapping 篩選（不加
     # 「zones 非空」條件）；「該不該有 zone_counts.parquet」是另一個判斷，才看 zones。
@@ -218,19 +257,33 @@ def _build_report_frames(
     has_line_defs = bool(line_entries)
     if not has_zone_defs and not has_line_defs:
         raise ValueError(
-            f"{snapshot_path} 快照中沒有任何攝影機定義區域或計數線，沒有可彙總的統計。"
+            f"{registry_file} 中沒有任何攝影機定義區域或計數線，沒有可彙總的統計。"
         )
 
     zone_hourly = zone_peak = None
     if has_zone_defs:
         zone_hourly, zone_peak = _zone_frames(
-            output_dir, zone_entries, period_minutes, metric
+            output_dir, zone_entries, period_minutes, metric, registry_file
+        )
+    else:
+        _reject_orphan_counts(
+            output_dir / ZONE_COUNTS_FILENAME,
+            registry_file,
+            "區域",
+            "zones 為空，或 participates_in_zone_mapping 全部關閉",
         )
 
     line_hourly = line_peak_in = line_peak_out = None
     if has_line_defs:
         line_hourly, line_peak_in, line_peak_out = _line_frames(
-            output_dir, line_entries, period_minutes
+            output_dir, line_entries, period_minutes, registry_file
+        )
+    else:
+        _reject_orphan_counts(
+            output_dir / LINE_COUNTS_FILENAME,
+            registry_file,
+            "計數線",
+            "所有攝影機的 lines 皆為空；計數線沒有參與旗標",
         )
 
     return ReportFrames(
@@ -405,17 +458,16 @@ def export_report_daily(
 ) -> Path:
     """執行單日人流報表彙總，寫入跨日累加更新的 `report.xlsx`。
 
-    純 CPU 運算，不需重跑偵測、zone mapping 或計數線統計；讀取的 registry 是產生
-    當日 parquet 時的 `camera_registry_used.yaml` 快照（而非當下的
-    `camera_registry.yaml`），以避免同名 zone／line 被靜默合併。
+    純 CPU 運算，不需重跑偵測、zone mapping 或計數線統計；讀取的 registry 是
+    `bucket_dir` 底下當下的 `camera_registry.yaml`（見 ADR-007）。
 
-    **快照同時決定哪些輸入是必要的**：有攝影機定義了區域就必須有
+    **registry 同時決定哪些輸入是必要的**：有攝影機定義了區域就必須有
     `zone_counts.parquet`、有攝影機定義了計數線就必須有 `line_counts.parquet`，
-    缺檔即報錯；快照裡沒有定義的那一側則整批跳過（分頁仍建立、不寫入資料），
+    缺檔即報錯；registry 裡沒有定義的那一側則整批跳過（分頁仍建立、不寫入資料），
     不算錯誤。兩者都沒有定義則沒有東西可彙總，直接報錯。詳見 ADR-005。
 
     Args:
-        date: 要彙總的日期，需已有快照中所要求的當日 parquet。
+        date: 要彙總的日期，需已有 registry 所要求的當日 parquet。
         bucket_dir: 本機模擬 GCS bucket 的根目錄。
         period_minutes: 報表人流彙總的時段粒度（分鐘），需為 `bucket_minutes`
             的倍數。
@@ -430,12 +482,13 @@ def export_report_daily(
 
     Raises:
         ValueError: `period_minutes` 不是 `bucket_minutes` 的倍數、
-            `camera_registry_used.yaml` 中有跨攝影機重複的 zone／line 名稱、
-            快照中沒有任何區域或計數線定義、上游 parquet 出現不在該快照內的
-            (camera_id, zone)／(camera_id, line) 組合，或
-            `on_duplicate_date="error"` 時發現日期已存在。
-        FileNotFoundError: 快照要求的當日 parquet 不存在，或該日輸出目錄下
-            找不到 `camera_registry_used.yaml` 快照。
+            `camera_registry.yaml` 中有跨攝影機重複的 zone／line 名稱、
+            registry 中沒有任何區域或計數線定義、上游 parquet 出現不在該 registry
+            內的 (camera_id, zone)／(camera_id, line) 組合、registry 已無某一側的
+            定義但當日對應 parquet 仍有資料，或 `on_duplicate_date="error"` 時
+            發現日期已存在。
+        FileNotFoundError: registry 要求的當日 parquet 不存在，或 `bucket_dir`
+            底下找不到 `camera_registry.yaml`。
     """
     frames = _build_report_frames(
         date, bucket_dir, period_minutes, metric, bucket_minutes, output_root

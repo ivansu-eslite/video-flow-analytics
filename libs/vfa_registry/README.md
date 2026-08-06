@@ -14,7 +14,7 @@
 | `Line` / `parsed_lines()` | 計數線模型（`points` polyline ＋ `inside_point` 方向參考點 ＋ `line_group`）；幾何驗證同樣延後到呼叫端 |
 | `parse_and_validate_lines` | 驗證 line 名稱**跨攝影機全域唯一**，理由同 zone；**`line_group` 刻意不驗**，跨攝影機同名正是分組用途（見 ADR-002）|
 | `StorageConfig` | bucket 內影片片段的儲存格式參數 |
-| `load_registry` / `load_registry_from_path` / `registry_path` | 讀檔；後者吃任意路徑，供讀取 `camera_registry_used.yaml` 快照 |
+| `load_registry` / `load_registry_from_path` / `registry_path` | 讀檔；四包一律用 `load_registry(bucket_dir)`，`load_registry_from_path` 吃任意路徑，供 registry 不在 `bucket_dir` 底下的呼叫端（例如部署端的共用 registry 目錄）|
 
 ## 使用方式
 

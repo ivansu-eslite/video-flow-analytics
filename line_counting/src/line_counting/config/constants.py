@@ -29,7 +29,6 @@ REQUIRED_TRACKING_COLUMNS = ("frame_width", "frame_height")
 # 輸入／輸出檔名。
 TRACKING_RESULTS_FILENAME = "tracking_results.parquet"
 LINE_COUNTS_FILENAME = "line_counts.parquet"
-REGISTRY_SNAPSHOT_FILENAME = "camera_registry_used.yaml"
 # 寫檔採「先寫 .tmp 再 rename」以避免半寫入的檔案。
 TMP_SUFFIX = ".tmp"
 

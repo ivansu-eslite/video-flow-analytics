@@ -2,7 +2,12 @@
 
 ## Status
 
-Accepted
+Accepted（資料來源已由 [ADR-007](007-remove-registry-snapshot.md) 修訂）
+
+判準本身仍成立：輸入的必要性由 registry 的定義決定，不由檔案是否存在決定。改變的只是
+讀哪一份 registry——快照機制已移除，`flow_report` 改讀 `bucket_dir` 當下的
+`camera_registry.yaml`。以下正文提到「快照」之處，除另行標註者外，都要改讀成這份當下的
+registry。
 
 ## Context
 
@@ -91,7 +96,8 @@ Negative:
 - `flow_report` 對 `line_counting` 產生硬相依。快照只要有任一 `lines`，沒跑
   `line_counting` 就整個 `export_report_daily` 中止，區域兩頁也產不出來。排程上要把
   `zone_mapping`／`line_counting` 都排在 `flow_report` 之前。
-- **快照被覆蓋的既有問題會傳導到這個判斷**：`zone_mapping` 與 `line_counting` 都把
+- **快照被覆蓋的既有問題會傳導到這個判斷**（**已由 [ADR-007](007-remove-registry-snapshot.md)
+  消解**：快照已移除，不再有兩包寫同一路徑的問題）：`zone_mapping` 與 `line_counting` 都把
   `camera_registry_used.yaml` 寫到同一路徑，後跑的覆蓋先跑的。正常流程下兩者是同一份
   `camera_registry.yaml` 的複製、內容相同；但若兩階段之間改過 registry，`flow_report`
   只看得到後寫的那份，判斷與驗證的對象會與其中一份 parquet 的實際定義不一致。這屬上游
