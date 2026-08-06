@@ -2,8 +2,8 @@
 # 能相容 `participates_in_zone_mapping` 欄位——現有兩份真實 fixture
 # （bucket_name／bucket_name1）都缺此欄位，只用真實 yaml 驗會假性通過。
 #
-# 三包（video-analyze／zone-mapping／flow-report）各自複製一份「內容相同」的此檔進
-# 自己的 tests/；任一支的 registry 模型欄位漂移都會在該包自己的相容性測試爆出來。
+# 全 workspace 只有這一份，由本 lib 的測試使用；四包經 workspace 依賴共用同一個
+# registry 模型，欄位漂移會在這裡爆出來。
 bucket_name: synthetic_bucket
 storage:
   file_ext: mkv
