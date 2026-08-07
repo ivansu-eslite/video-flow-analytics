@@ -101,9 +101,9 @@ def count_lines_daily(
     Raises:
         FileNotFoundError: 當日 `tracking_results.parquet` 不存在，或
             `bucket_dir` 底下找不到 `camera_registry.yaml`。
-        ValueError: 追蹤結果缺少影像尺寸欄位（舊版 `video_analyze` 的產物）、
-            `camera_registry.yaml` 定義了計數線的攝影機在當天追蹤結果中查無
-            資料，或任一計數線定義不合法。
+        ValueError: 追蹤結果缺少影像尺寸或落腳點欄位（舊版 `video_analyze` 的
+            產物）、`camera_registry.yaml` 定義了計數線的攝影機在當天追蹤結果中
+            查無資料，或任一計數線定義不合法。
     """
     output_dir = output_root / Path(bucket_dir).name / date.isoformat()
     results_path = output_dir / TRACKING_RESULTS_FILENAME
@@ -123,9 +123,11 @@ def count_lines_daily(
     missing = [c for c in REQUIRED_TRACKING_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(
-            f"{results_path} 缺少欄位 {missing}：這是舊版 video_analyze 的產物，"
-            "沒有影像尺寸就無法把 crossing_band_px_1080p 換算成各攝影機的實際像素。"
-            "請以現行版本的 video_analyze 重跑該日產生新的 tracking_results.parquet。"
+            f"{results_path} 缺少欄位 {missing}：這是舊版 video_analyze 的產物。"
+            "沒有影像尺寸就無法把 crossing_band_px_1080p 換算成各攝影機的實際像素；"
+            "沒有 foot_x／foot_y 就沒有落腳點可判定（本套件不再自行從 bbox 推算，"
+            "見 ADR-008）。請以現行版本的 video_analyze 重跑該日產生新的 "
+            "tracking_results.parquet。"
         )
     # 先驗證 camera 對得上當天資料再解析計數線，避免陳舊定義打錯字蓋過更根本錯誤
     validate_line_cameras(
@@ -134,9 +136,8 @@ def count_lines_daily(
     )
     line_cameras = parse_and_validate_lines(line_entries)
 
+    # 落腳點直接讀上游欄位——推算需要 head 框，而 head 不在追蹤結果裡（見 ADR-008）
     df = df.with_columns(
-        ((pl.col("x1") + pl.col("x2")) / 2).alias("foot_x"),
-        pl.col("y2").alias("foot_y"),
         pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("time_bucket"),
     )
 

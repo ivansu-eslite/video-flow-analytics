@@ -4,16 +4,20 @@
 每個 track 跨越計數線的次數與方向，轉換成「每時段、每計數線」的進出人數。
 
 `line_counting` 與 [`zone_mapping`](../zone_mapping) 的輸入相同
-（`tracking_results.parquet` ＋ `camera_registry.yaml`），都以腳底點做純 CPU 向量化判定，
-差別在幾何：zone 判「腳底是否落在多邊形內」（區域佔用），line 判「腳底是否跨越計數線
+（`tracking_results.parquet` ＋ `camera_registry.yaml`），都以落腳點做純 CPU 向量化判定，
+差別在幾何：zone 判「落腳點是否落在多邊形內」（區域佔用），line 判「落腳點是否跨越計數線
 及其方向」（方向性進出）。
 
 ## 概述
 
 輸入是追蹤明細 `tracking_results.parquet` 與 `camera_registry.yaml` 的計數線定義；以每個
-track 的腳底中心點 `((x1 + x2) / 2, y2)` 對計數線算帶號垂直距離，用「帶線段區域的
+track 的落腳點 `(foot_x, foot_y)` 對計數線算帶號垂直距離，用「帶線段區域的
 Schmitt-trigger」偵測側別翻轉（跨越）與方向，再依 `time_bucket` 聚合出兩項指標，輸出
 `line_counts.parquet`：
+
+落腳點是上游 `video_analyze` 算好寫進 `tracking_results.parquet` 的欄位（由 head 框推算，
+推不出來才退回 bbox 底邊中點），本套件不自行從 bbox 推算；缺這兩欄的舊 parquet 直接
+fail loud。理由見 [ADR-008](../docs/adr/008-head-based-foot-point.md)。
 
 | 指標 | 定義 |
 | --- | --- |

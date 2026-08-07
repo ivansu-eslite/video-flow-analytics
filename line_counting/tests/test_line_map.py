@@ -36,6 +36,10 @@ def _write_tracking_results(
     """寫出追蹤明細；`frame_width`／`frame_height` 逐列補成同一個值（上游即如此寫）。
 
     預設 1920×1080 = 基準解析度，換算係數 1，讓不測換算的案例維持原本的判定尺度。
+
+    各案例的 `rows` 刻意**只給 `foot_x`／`foot_y`、不給 bbox 欄位**：落腳點改由上游
+    算好寫進 parquet 後（ADR-008），本套件只讀這兩欄；若有人把判定改回從 bbox 現算，
+    這些測試會因為缺欄位而爆，而不是靜默沿用舊公式。
     """
     n = len(next(iter(rows.values())))
     pl.DataFrame(
@@ -47,7 +51,7 @@ def test_count_lines_daily_counts_crossing_and_ignores_camera_without_lines(tmp_
     """happy path：定義了計數線且當天有資料的攝影機正確算出跨越；沒有 `lines` 的
     攝影機（不在參與集合）不因當天無資料而中止。
 
-    track 由外側（y2=50，y<100）跨到內側（y2=150，往 inside_point 那側）→ in=1。
+    track 由外側（foot_y=50，y<100）跨到內側（foot_y=150，往 inside_point 那側）→ in=1。
     """
     bucket_dir = tmp_path / "bucket_test"
     bucket_dir.mkdir()
@@ -81,10 +85,8 @@ def test_count_lines_daily_counts_crossing_and_ignores_camera_without_lines(tmp_
             "camera_id": ["loc_cam001", "loc_cam001"],
             "timestamp": [base, base + datetime.timedelta(seconds=1)],
             "track_id": [1, 1],
-            "x1": [90.0, 90.0],
-            "y1": [40.0, 140.0],
-            "x2": [110.0, 110.0],
-            "y2": [50.0, 150.0],  # 腳底 y：50（外側）→ 150（內側）
+            "foot_x": [100.0, 100.0],
+            "foot_y": [50.0, 150.0],  # 腳底 y：50（外側）→ 150（內側）
         },
     )
 
@@ -151,11 +153,9 @@ def test_count_lines_daily_maps_line_group_to_its_own_line(tmp_path):
                 base + datetime.timedelta(seconds=3),
             ],
             "track_id": [1, 1, 2, 2],
-            "x1": [90.0, 90.0, 90.0, 90.0],
-            "y1": [40.0, 140.0, 440.0, 640.0],
-            "x2": [110.0, 110.0, 110.0, 110.0],
+            "foot_x": [100.0, 100.0, 100.0, 100.0],
             # track 1 跨 door（y=100）；track 2 跨 door_b（y=500）
-            "y2": [50.0, 150.0, 450.0, 650.0],
+            "foot_y": [50.0, 150.0, 450.0, 650.0],
         },
     )
 
@@ -220,10 +220,8 @@ def test_crossing_band_scales_with_each_camera_frame_width(tmp_path):
                 base + datetime.timedelta(seconds=1),
             ],
             "track_id": [1, 1, 2, 2],
-            "x1": [90.0, 90.0, 90.0, 90.0],
-            "y1": [75.0, 105.0, 75.0, 105.0],
-            "x2": [110.0, 110.0, 110.0, 110.0],
-            "y2": [85.0, 115.0, 85.0, 115.0],  # 腳底離線 15 px（外側 → 內側）
+            "foot_x": [100.0, 100.0, 100.0, 100.0],
+            "foot_y": [85.0, 115.0, 85.0, 115.0],  # 腳底離線 15 px（外側 → 內側）
             "frame_width": [1920, 1920, 3840, 3840],
             "frame_height": [1080, 1080, 2160, 2160],
         }
@@ -277,10 +275,8 @@ def test_zero_band_stays_zero_at_any_resolution(tmp_path):
             "camera_id": ["loc_cam001", "loc_cam001"],
             "timestamp": [base, base + datetime.timedelta(seconds=1)],
             "track_id": [1, 1],
-            "x1": [90.0, 90.0],
-            "y1": [89.0, 91.0],
-            "x2": [110.0, 110.0],
-            "y2": [99.0, 101.0],  # 腳底離線僅 1 px
+            "foot_x": [100.0, 100.0],
+            "foot_y": [99.0, 101.0],  # 腳底離線僅 1 px
         },
         frame_width=3840,
         frame_height=2160,
@@ -324,10 +320,8 @@ def test_tracking_results_without_frame_size_fails_loud(tmp_path):
             "camera_id": ["loc_cam001"],
             "timestamp": [base],
             "track_id": [1],
-            "x1": [90.0],
-            "y1": [140.0],
-            "x2": [110.0],
-            "y2": [150.0],
+            "foot_x": [100.0],
+            "foot_y": [150.0],
         }
     ).write_parquet(output_dir / "tracking_results.parquet")
 
@@ -366,10 +360,8 @@ def test_multiple_frame_widths_for_one_camera_fails_loud(tmp_path):
             "camera_id": ["loc_cam001", "loc_cam001"],
             "timestamp": [base, base + datetime.timedelta(seconds=1)],
             "track_id": [1, 1],
-            "x1": [90.0, 90.0],
-            "y1": [40.0, 140.0],
-            "x2": [110.0, 110.0],
-            "y2": [50.0, 150.0],
+            "foot_x": [100.0, 100.0],
+            "foot_y": [50.0, 150.0],
             "frame_width": [1920, 3840],
             "frame_height": [1080, 2160],
         }
@@ -414,10 +406,8 @@ def test_count_lines_daily_still_fails_loud_for_camera_with_lines_missing_data(
             "camera_id": ["loc_other"],
             "timestamp": [base],
             "track_id": [1],
-            "x1": [90.0],
-            "y1": [140.0],
-            "x2": [110.0],
-            "y2": [150.0],
+            "foot_x": [100.0],
+            "foot_y": [150.0],
         },
     )
 
