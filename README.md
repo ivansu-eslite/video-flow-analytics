@@ -17,8 +17,8 @@
 | [`line_counting/`](line_counting/README.md) | 把追蹤明細對映到計數線幾何，轉成每時段每計數線的方向性進出人數 | 純 CPU 向量化 | `count_lines_daily` | [README](line_counting/README.md) |
 | [`flow_report/`](flow_report/README.md) | 跨期間彙總分析，持續寫入單一 Excel 報表供 BI 工具接手 | 純 CPU | `export_report_daily` | [README](flow_report/README.md) |
 
-`zone_mapping` 與 `line_counting` 的輸入相同，都以腳底點做純 CPU 向量化判定，差別在
-幾何：zone 判「腳底是否落在多邊形內」（區域佔用），line 判「腳底是否跨越計數線及其
+`zone_mapping` 與 `line_counting` 的輸入相同，都以落腳點做純 CPU 向量化判定，差別在
+幾何：zone 判「落腳點是否落在多邊形內」（區域佔用），line 判「落腳點是否跨越計數線及其
 方向」（方向性進出）。
 
 本 repo 原為單一套件 `src/video_flow_analytics/`，2026-07 拆成 `video_analyze`／
@@ -220,7 +220,7 @@ cameras:
 
 | 路徑 | 產出階段 | 內容 |
 | --- | --- | --- |
-| `outputs/{bucket}/{date}/tracking_results.parquet` | video_analyze | 追蹤明細；含 `frame_width`／`frame_height`（見下） |
+| `outputs/{bucket}/{date}/tracking_results.parquet` | video_analyze | 追蹤明細；含 `foot_x`／`foot_y` 與 `frame_width`／`frame_height`（見下） |
 | `outputs/{bucket}/{date}/…`（鏡射輸入路徑） | video_analyze | 逐片段標註影片，`save_video = true` 時才產出（開發 / 偵錯輔助） |
 | `outputs/{bucket}/{date}/zone_counts.parquet` | zone_mapping | 每時段每區域事件統計 |
 | `outputs/{bucket}/{date}/line_counts.parquet` | line_counting | 每時段每計數線進出人數，欄位 `line_group`／`camera_id`／`line`／`time_bucket`／`in_count`／`out_count` |
@@ -232,6 +232,12 @@ cameras:
 從這裡取得尺寸。缺這兩欄的舊 parquet 會被兩包直接擋下（不給「當成 1080p」的 fallback）。
 取捨見 [ADR-004](docs/adr/004-band-resolution-scaling.md)；`zone_mapping` 何時開始依賴
 這兩欄見 [ADR-006](docs/adr/006-zone-boundary-band.md)。
+
+**落腳點欄位同樣是硬性契約**：`foot_x`／`foot_y`（人站在地面的位置）由 `video_analyze`
+用 head 框推算後逐列寫入，`line_counting`／`zone_mapping` 與疊圖工具一律讀這兩欄、不再
+各自從 bbox 現算——推算需要 head 框，而 head 不進追蹤結果（它若進 tracker，同一個人會多
+出一條頭部軌跡）。缺這兩欄的舊 parquet 同樣被兩包擋下。公式、配對條件與多候選時的選法
+見 [ADR-008](docs/adr/008-head-based-foot-point.md)。
 
 ## 共用 lib
 

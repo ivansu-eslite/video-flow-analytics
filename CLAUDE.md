@@ -75,7 +75,9 @@ Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態�
 幾何不可統一，並修訂 ADR-004 的「舊 parquet 不對稱」條款；ADR-007：移除
 `camera_registry_used.yaml` 快照機制，`flow_report` 改讀 `bucket_dir` 當下的
 `camera_registry.yaml`，說明為何不補回溯替代方案、以及被接受的靜默錯位範圍（修訂 ADR-005
-的資料來源）。
+的資料來源）；ADR-008：落腳點由 head 框推算並上移成 `tracking_results.parquet` 的欄位，
+記錄多候選 head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能進 tracker，以及
+ADR-001／003／004／006 的判定輸入點定義隨之改變。
 
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
 
@@ -92,6 +94,24 @@ Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態�
 - `video_analyze` 日後改 `TRACKING_RESULTS_SCHEMA` 要一併考慮 `line_counting` 與
   `zone_mapping` 會不會直接崩；換算與檢查的位置、以及為何不改用「人形肩寬百分比」當尺規，
   見 ADR-004。
+
+### 落腳點是資料欄位，不是各包各自算的公式（跨套件硬性契約）
+
+`tracking_results.parquet` 帶 `foot_x`／`foot_y`（issue #72）：人站在地面的位置，由
+`video_analyze` 用 head 框對 fbody 框中心做點反射推算（`foot = 2 × C_fbody − H`，
+`H` 為 head 框頂邊中點），推算不出來才退回舊定義 `((x1+x2)/2, y2)`。改動前這條公式由各
+消費端從 bbox 現算，散在 `line_map.py`／`zone_map.py` 與 overlay 五個模組共十餘處。
+
+- **只能在上游算**：推算需要 head 框，而 head **不進 tracker**——送進去的話同一個人會多
+  出一條頭部軌跡，`track_id` 的語義從「一個人」變成「一個偵測目標」，下游的不重複訪客與
+  進出人數直接翻倍，而輸出檔本身完全正常。偵測 `classes` 因此是 `[0, 2]`，但
+  `services/inference.py` 只把 fbody 子集餵給 ByteTracker。
+- 缺這兩欄的舊 parquet 被 `line_counting` 與 `zone_mapping` 兩包 fail loud 擋下，與影像
+  尺寸欄位同一道檢查。`[foot_point].method = "bbox_bottom"` 可切回舊定義；此時
+  `classes` 不必含 head，但 `method = "head"` 卻少了 head 會直接拋錯（否則每列都退回
+  框底邊中點，改動靜默失效）。
+- 配對條件、多候選 head 的選法（實測推翻了規劃階段的直覺判準）與被否決的替代方案
+  （OBB／pose／ground plane）見 [ADR-008](docs/adr/008-head-based-foot-point.md)。
 
 ### 四包共用碼的處理方式
 
