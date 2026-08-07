@@ -43,6 +43,7 @@ class TrackingResultCollector:
         camera_id: str,
         packet: FramePacket,
         tracks: np.ndarray,
+        foot_points: np.ndarray,
         frame_width: int,
         frame_height: int,
     ) -> None:
@@ -53,12 +54,23 @@ class TrackingResultCollector:
             packet: 該影格的來源資訊（frame_index、timestamp）。
             tracks: `MultiStreamByteTracker.update` 的輸出（列格式定義見該
                 函式的 Returns 說明）；空陣列時不新增任何列。
+            foot_points: `[N, 2]` 的落腳點，逐列對應 `tracks`（見
+                `services/foot_point.py`）。
             frame_width: 該路的影像寬度（像素）。呼叫端的 `frame_shapes` 存的是
                 `(height, width)`，順序傳反不會有型別錯誤，只會讓下游的解析度
                 換算靜默算錯。
             frame_height: 該路的影像高度（像素）。
+
+        Raises:
+            ValueError: `foot_points` 與 `tracks` 的列數不一致——錯位會讓每一列的
+                落腳點配到別條軌跡，是下游查不出來的靜默錯誤。
         """
-        for track in tracks:
+        if len(foot_points) != len(tracks):
+            raise ValueError(
+                f"落腳點列數（{len(foot_points)}）與追蹤結果列數（{len(tracks)}）"
+                "不一致，兩者必須逐列對應。"
+            )
+        for track, foot in zip(tracks, foot_points, strict=True):
             x1, y1, x2, y2, track_id = track[:5]
             cols = self._columns
             cols["camera_id"].append(camera_id)
@@ -69,6 +81,8 @@ class TrackingResultCollector:
             cols["y1"].append(float(y1))
             cols["x2"].append(float(x2))
             cols["y2"].append(float(y2))
+            cols["foot_x"].append(float(foot[0]))
+            cols["foot_y"].append(float(foot[1]))
             cols["frame_width"].append(int(frame_width))
             cols["frame_height"].append(int(frame_height))
             self._pending_rows += 1

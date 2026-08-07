@@ -95,7 +95,11 @@ gmc_method = "none"
 [model]
 model_path = "20260714-153811_yolo26m_baseline.pt"
 batch = 8
-classes = [2]              # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
+classes = [0, 2]           # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
+                           # fbody 是追蹤目標；head 只用來推算落腳點，不進 tracker
+
+[foot_point]
+method = "head"            # "head" = 由頭部位置推算；"bbox_bottom" = 框底邊中點（舊做法）
 
 [output]
 save_video = false         # 是否輸出標註影片（開發 / 偵錯輔助）
@@ -113,7 +117,8 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 | `[tracker]` | ByteTrack 各項閾值 | 見範例 | `*_thresh` 皆介於 0–1，`track_buffer >= 1` |
 | `[model]` | `model_path` | `"20260714-153811_yolo26m_baseline.pt"` | 權重檔路徑（CrowdHuman 微調權重） |
 | | `batch` | `1` | YOLO 推理湊批目標，`>= 1`（範例用 `8`）；實際單次推理批次為此值的 2 倍 |
-| | `classes` | `[2]` | 要保留的偵測類別 id；權重類別為 `0=head, 1=vbody, 2=fbody`；至少 1 個元素。載入時會驗證此清單與已載入權重的 `model.names` 相符，不符（如指定的權重檔遺失、fallback 下載到別的模型）直接拋錯 |
+| | `classes` | `[0, 2]` | 要保留的偵測類別 id；權重類別為 `0=head, 1=vbody, 2=fbody`；至少 1 個元素。載入時會驗證此清單與已載入權重的 `model.names` 相符，不符（如指定的權重檔遺失、fallback 下載到別的模型）直接拋錯。**必須含 fbody**（追蹤目標）；`method = "head"` 時**還必須含 head**，否則直接拋錯——少了 head 每一列都會退回框底邊中點，改動靜默失效 |
+| `[foot_point]` | `method` | `"head"` | 落腳點的推算方式：`"head"` 由頭部位置推算（修正斜向視角下框底邊中點落在人體外的偏移），`"bbox_bottom"` 為改動前的框底邊中點，保留供對照與回退。見 [ADR-008](../docs/adr/008-head-based-foot-point.md) |
 | `[output]` | `save_video` | `false` | 是否輸出標註影片（開發 / 偵錯用途） |
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（範例用 `bucket_name1`） |
 | | `date` | — | 分析日期 |
@@ -218,6 +223,7 @@ bucket 呼叫。
 | `timestamp` | datetime（`Asia/Taipei`） | 該片段檔名時間 ＋ 片段內幀序 / fps |
 | `track_id` | int | ByteTrack 指派的追蹤編號，跨片段延續 |
 | `x1` / `y1` / `x2` / `y2` | float | 追蹤框的像素座標 |
+| `foot_x` / `foot_y` | float | 落腳點（人站在地面的位置）的像素座標；由 head 框推算，推不出來時退回 `((x1+x2)/2, y2)` |
 | `frame_width` / `frame_height` | int | 該路的影像尺寸（`probe_frame_shape` 探測首格所得，整天固定）；逐列重複同一個值 |
 
 `frame_width` / `frame_height` 是為下游而存的：`line_counting` 與 `zone_mapping` 都是純
@@ -226,6 +232,11 @@ CPU 套件、部署時不掛載影片，拿不到影像尺寸，卻需要它把�
 （見 [ADR-004](../docs/adr/004-band-resolution-scaling.md) 與
 [ADR-006](../docs/adr/006-zone-boundary-band.md)）。缺這兩欄的舊 parquet 會被這兩包
 **都**直接擋下，需以本套件重跑產生。
+
+`foot_x` / `foot_y` 同樣是為下游而存：推算需要 head 框，而 head 不進追蹤結果（它若進
+tracker，同一個人會多出一條頭部軌跡），因此只能在本套件算。下游一律讀這兩欄、不再自行
+從 bbox 推算，缺欄位同樣 fail loud。公式、配對條件與多候選時的選法見
+[ADR-008](../docs/adr/008-head-based-foot-point.md)。
 
 ## 架構
 

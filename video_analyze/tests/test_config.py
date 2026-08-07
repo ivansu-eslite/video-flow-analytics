@@ -17,6 +17,7 @@ from pydantic_settings import SettingsConfigDict
 
 from video_analyze.models.config import (
     AppConfig,
+    FootPointConfig,
     ModelConfig,
     TrackerConfig,
     _get_toml_path,
@@ -31,6 +32,8 @@ _ENV_OVERRIDES = (
     "MODEL",
     "OUTPUT",
     "INPUT",
+    "FOOT_POINT",
+    "FOOT_POINT__METHOD",
     "MODEL__CLASSES",
     "MODEL__BATCH",
     "MODEL__MODEL_PATH",
@@ -61,8 +64,9 @@ def _config_class(toml_path) -> type[AppConfig]:
     return _ScopedConfig
 
 
-def test_model_config_classes_defaults_to_fbody():
-    assert ModelConfig().classes == [2]
+def test_model_config_classes_defaults_to_head_and_fbody():
+    """head 也要偵測：它不進 tracker，只供落腳點推算（見 ADR-008）。"""
+    assert ModelConfig().classes == [0, 2]
 
 
 def test_model_config_classes_rejects_empty_list():
@@ -92,7 +96,7 @@ def test_uses_defaults_when_toml_missing(tmp_path):
     """找不到設定檔時以預設值啟動，而非中止。"""
     config = _config_class(tmp_path / "nope.toml")()
 
-    assert config.model.classes == [2]
+    assert config.model.classes == [0, 2]
     assert config.tracker.track_buffer == 30
     assert config.input.bucket_dir == "bucket_name"
     assert config.output.save_video is False
@@ -119,6 +123,49 @@ def test_invalid_value_in_toml_raises_instead_of_silently_defaulting(tmp_path):
     toml.write_text("[model]\nclasses = []\n", encoding="utf-8")
 
     with pytest.raises(ValidationError):
+        _config_class(toml)()
+
+
+def test_foot_point_method_defaults_to_head():
+    assert FootPointConfig().method == "head"
+
+
+def test_foot_point_method_rejects_unknown_value():
+    with pytest.raises(ValidationError):
+        FootPointConfig(method="pose")
+
+
+def test_head_method_without_head_class_is_rejected(tmp_path):
+    """`method="head"` 卻沒偵測 head，每列都會退回框底邊中點——改動靜默失效，須擋下。"""
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        "[model]\nclasses = [2]\n[foot_point]\nmethod = \"head\"\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValidationError, match="head"):
+        _config_class(toml)()
+
+
+def test_bbox_bottom_method_without_head_class_is_allowed(tmp_path):
+    """切回舊算法時不需要 head，classes 只留 fbody 是合法組合。"""
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        "[model]\nclasses = [2]\n[foot_point]\nmethod = \"bbox_bottom\"\n",
+        encoding="utf-8",
+    )
+
+    config = _config_class(toml)()
+
+    assert config.foot_point.method == "bbox_bottom"
+    assert config.model.classes == [2]
+
+
+def test_classes_without_fbody_is_rejected(tmp_path):
+    """少了追蹤目標，整天的 parquet 會是空的，卻不會有任何錯誤訊息。"""
+    toml = tmp_path / "config.toml"
+    toml.write_text("[model]\nclasses = [0]\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="fbody"):
         _config_class(toml)()
 
 
