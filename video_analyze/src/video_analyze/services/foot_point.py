@@ -102,6 +102,17 @@ def _match_head(body: np.ndarray, heads: np.ndarray) -> int | None:
     return int(np.argmin(np.where(ok, tilt, np.inf)))
 
 
+def _reflect(body: np.ndarray, head: np.ndarray) -> np.ndarray:
+    """`foot = 2 × C_body − H`，`H` 取 head 框的頂邊中點。
+
+    公式只寫這一份：無狀態的 `estimate_from_heads` 與帶跨幀延續的 `FootPointEstimator`
+    都呼叫它，兩條路徑才不可能各自漂移（例如其中一邊被改成用 head 中心當基準）。
+    """
+    center = np.array([(body[0] + body[2]) / 2, (body[1] + body[3]) / 2])
+    head_top_mid = np.array([(head[0] + head[2]) / 2, head[1]])
+    return 2 * center - head_top_mid
+
+
 def estimate_from_heads(boxes: np.ndarray, heads: np.ndarray) -> np.ndarray:
     """對每個框配一顆 head 並推算落腳點，配不到的退回框底邊中點。
 
@@ -118,12 +129,8 @@ def estimate_from_heads(boxes: np.ndarray, heads: np.ndarray) -> np.ndarray:
     points = bbox_bottom_center(boxes)
     for i, body in enumerate(boxes):
         j = _match_head(body, heads)
-        if j is None:
-            continue
-        head = heads[j]
-        center = np.array([(body[0] + body[2]) / 2, (body[1] + body[3]) / 2])
-        head_top_mid = np.array([(head[0] + head[2]) / 2, head[1]])
-        points[i] = 2 * center - head_top_mid
+        if j is not None:
+            points[i] = _reflect(body, heads[j])
     return points
 
 
@@ -169,8 +176,11 @@ class FootPointEstimator:
     寬高。距上次成功推算超過 `_OFFSET_TTL_FRAMES` 格才放棄沿用、退回框底邊中點——姿勢
     早就變了，舊偏移不再有代表性。
 
-    狀態以 `(stream_id, track_id)` 為鍵：每一路各有獨立的 `BYTETracker`，`track_id`
-    跨路會重複，少了 `stream_id` 會讓不同攝影機的軌跡互相汙染。
+    狀態以 `(stream_id, track_id)` 為鍵。實測（ultralytics 8.4.75）`track_id` 由
+    `BaseTrack._count` 這個 class 變數發放，同一進程內所有 `BYTETracker` 實例共用，
+    跨路不會撞號——所以 `stream_id` 目前是多餘的。**刻意保留**：那是 ultralytics 的
+    實作細節，若改成 per-tracker 計數，不同攝影機的軌跡會共用同一份偏移量，而且不會
+    有任何錯誤訊息。
     """
 
     def __init__(self, method: str):
@@ -224,10 +234,7 @@ class FootPointEstimator:
             bottom = points[i].copy()  # 覆寫前先留著，偏移量是相對它算的
             j = _match_head(body, heads)
             if j is not None:
-                head = heads[j]
-                center = np.array([(body[0] + body[2]) / 2, (body[1] + body[3]) / 2])
-                head_top_mid = np.array([(head[0] + head[2]) / 2, head[1]])
-                points[i] = 2 * center - head_top_mid
+                points[i] = _reflect(body, heads[j])
                 self._offsets[key] = ((points[i] - bottom) / size, tick)
                 continue
             remembered = self._offsets.get(key)

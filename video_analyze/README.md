@@ -223,7 +223,7 @@ bucket 呼叫。
 | `timestamp` | datetime（`Asia/Taipei`） | 該片段檔名時間 ＋ 片段內幀序 / fps |
 | `track_id` | int | ByteTrack 指派的追蹤編號，跨片段延續 |
 | `x1` / `y1` / `x2` / `y2` | float | 追蹤框的像素座標 |
-| `foot_x` / `foot_y` | float | 落腳點（人站在地面的位置）的像素座標；由 head 框推算，推不出來時退回 `((x1+x2)/2, y2)` |
+| `foot_x` / `foot_y` | float | 落腳點（人站在地面的位置）的像素座標；由 head 框推算，配不到頭時沿用該軌跡上次的偏移量，連偏移量都沒有才退回 `((x1+x2)/2, y2)` |
 | `frame_width` / `frame_height` | int | 該路的影像尺寸（`probe_frame_shape` 探測首格所得，整天固定）；逐列重複同一個值 |
 
 `frame_width` / `frame_height` 是為下游而存的：`line_counting` 與 `zone_mapping` 都是純
@@ -234,7 +234,9 @@ CPU 套件、部署時不掛載影片，拿不到影像尺寸，卻需要它把�
 **都**直接擋下，需以本套件重跑產生。
 
 `foot_x` / `foot_y` 同樣是為下游而存：推算需要 head 框，而 head 不進追蹤結果（它若進
-tracker，同一個人會多出一條頭部軌跡），因此只能在本套件算。下游一律讀這兩欄、不再自行
+tracker，同一個人會多出一條頭部軌跡），因此只能在本套件算。**推算帶跨幀狀態**：配不到
+頭的那幾格沿用該軌跡上次成功推算的偏移量（超過 60 格才放棄），避免落腳點在兩種算法之間
+彈跳——代價是同一份 detection 在不同歷史下會得到不同的落腳點。下游一律讀這兩欄、不再自行
 從 bbox 推算，缺欄位同樣 fail loud。公式、配對條件與多候選時的選法見
 [ADR-008](../docs/adr/008-head-based-foot-point.md)。
 

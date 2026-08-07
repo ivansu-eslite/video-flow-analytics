@@ -215,7 +215,12 @@ def test_offset_expires_after_ttl():
 
 
 def test_same_track_id_on_different_streams_does_not_leak():
-    """每一路各有獨立的 tracker，`track_id` 跨路會重複——狀態不可互相汙染。"""
+    """不同路的同號軌跡不可共用偏移量。
+
+    ultralytics 目前的 `track_id` 是全域計數器、跨路不會撞號，所以這個情境在產線上
+    不會發生；測的是「改成 per-tracker 計數也不會壞」——那是別人的實作細節，而它一旦
+    改變，這裡沒有 stream_id 就會靜默共用偏移量。
+    """
     est = FootPointEstimator("head")
     est.estimate(0, _TILTED_BODY, _TILTED_HEAD)
 
@@ -258,3 +263,28 @@ def test_expired_state_is_pruned():
         est.estimate(0, other, empty)
 
     assert (0, 7) not in est._offsets
+
+
+def test_prune_keeps_live_state_on_this_and_other_streams():
+    """清理只能掃掉過期的那些。
+
+    清過頭沒有任何訊號：被誤刪的軌跡下一格靜默彈回框底邊中點，parquet 完全正常，
+    正是這個機制要防的那種跳動。這裡讓清理觸發時同時存在三種狀態，斷言只有過期的
+    那一筆消失。
+    """
+    est = FootPointEstimator("head")
+    empty = np.empty((0, 4))
+    stale = np.array([[0.0, 0.0, 400.0, 800.0, 1]])
+    fresh_other_stream = np.array([[0.0, 0.0, 400.0, 800.0, 2]])
+    fresh_same_stream = np.array([[0.0, 0.0, 400.0, 800.0, 3]])
+
+    est.estimate(0, stale, _TILTED_HEAD)  # 這一筆之後不再更新，會過期
+    for _ in range(fp._PRUNE_EVERY_FRAMES - 2):
+        est.estimate(0, stale, empty)
+    # 清理觸發的前一格，讓另一路與本路各存一筆新鮮的偏移量
+    est.estimate(1, fresh_other_stream, _TILTED_HEAD)
+    est.estimate(0, fresh_same_stream, _TILTED_HEAD)  # 這一格觸發 prune
+
+    assert (0, 1) not in est._offsets  # 過期，該刪
+    assert (1, 2) in est._offsets  # 另一路的新鮮狀態不可被掃到
+    assert (0, 3) in est._offsets  # 本路的新鮮狀態也不可被掃到

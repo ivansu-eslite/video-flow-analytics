@@ -13,8 +13,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `uv.lock`／`.venv`。
 
 `zone_mapping` 與 `line_counting` 的輸入相同（`tracking_results.parquet` ＋
-`camera_registry.yaml`），都以腳底點做純 CPU 向量化判定，差別在幾何——zone 判「腳底是否
-落在多邊形內」（區域佔用），line 判「腳底是否跨越計數線及其方向」（方向性進出）。
+`camera_registry.yaml`），都以落腳點做純 CPU 向量化判定，差別在幾何——zone 判「落腳點是否
+落在多邊形內」（區域佔用），line 判「落腳點是否跨越計數線及其方向」（方向性進出）。
 
 本 repo 原為單一套件 `src/video_flow_analytics/`，2026-07 拆成 `video_analyze`／`zone_mapping`／
 `flow_report` 三包（issue #18），同月再收斂成 uv workspace（issue #56），其後新增
@@ -75,7 +75,8 @@ Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態�
 幾何不可統一，並修訂 ADR-004 的「舊 parquet 不對稱」條款；ADR-007：移除
 `camera_registry_used.yaml` 快照機制，`flow_report` 改讀 `bucket_dir` 當下的
 `camera_registry.yaml`，說明為何不補回溯替代方案、以及被接受的靜默錯位範圍（修訂 ADR-005
-的資料來源）；ADR-008：落腳點由 head 框推算並上移成 `tracking_results.parquet` 的欄位，
+的資料來源）；ADR-008（**Proposed**，計數變動待需求方確認後才會轉 Accepted）：落腳點由 head 框推算並
+上移成 `tracking_results.parquet` 的欄位，
 記錄多候選 head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能進 tracker，以及
 ADR-001／003／004／006 的判定輸入點定義隨之改變。
 

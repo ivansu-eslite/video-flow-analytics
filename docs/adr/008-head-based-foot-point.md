@@ -135,8 +135,10 @@ cam003（`bucket_20260801`，`061001.764Z`）一名站在平擺桌前挑書的�
 原本的 1/9），而不是「修正計數」。計數變動是否可接受，仍要由需求方就幾何修正本身判斷，
 見 Consequences。
 
-狀態以 `(stream_id, track_id)` 為鍵：每一路各有獨立的 `BYTETracker`，`track_id` 跨路
-會重複，少了 `stream_id` 不同攝影機的軌跡會互相汙染。
+狀態以 `(stream_id, track_id)` 為鍵。實測 ultralytics 8.4.75 的 `track_id` 由
+`BaseTrack._count` 這個 class 變數發放、同一進程內所有 `BYTETracker` 共用，跨路其實不會
+撞號——`stream_id` 目前是多餘的，刻意保留是因為那屬於 ultralytics 的實作細節，改成
+per-tracker 計數會讓不同攝影機的軌跡靜默共用同一份偏移量。
 
 代價是**落腳點不再是逐幀無狀態的函式**：同一份 detection 在不同的歷史下會得到不同的
 落腳點，重現得連著整條軌跡從頭跑。純函式 `estimate_from_heads` 仍保留給測試與不需要
@@ -153,7 +155,9 @@ ADR-004 的影像尺寸欄位同一道檢查。
 
 偵測 `classes` 改為 `[0, 2]`，但只有 fbody 子集餵給 ByteTracker——head 也送進去的話同一
 個人會多出一條頭部軌跡，`track_id` 的語義從「一個人」變成「一個偵測目標」，下游的不重複
-訪客與進出人數直接翻倍，而輸出檔本身完全正常。這條契約由 `test_inference_split.py` 釘住。
+訪客與進出人數直接翻倍，而輸出檔本身完全正常。拆分函式 `split_detections` 的行為由
+`test_inference_split.py` 釘住；**主迴圈把哪一份餵給 tracker 這條接線目前沒有自動測試**
+（迴圈需要多進程佇列與環形緩衝才跑得起來），改那一行不會有測試變紅。
 
 **配對必須在 tracker 之後、對 tracker 輸出的框做，不可用 tracker 回傳的 `idx` 回填。**
 `idx` 並非傳入陣列的索引：`byte_tracker.py::_split_detections` 先依 `track_high_thresh`
@@ -169,9 +173,13 @@ head 放進 `classes` 時 fail loud——那個組合會讓每一列都配不到
 完整、改動靜默失效。
 
 切回後之所以能與改動前逐列一致，前提是「`classes` 多一個 head 不會動到 fbody 框本身」。
-ultralytics 的類別過濾在 NMS 內、且 NMS 非 class-agnostic，理論上不受影響；實測 cam003
-＋cam008 共 3155 個 fbody 框，`classes=[2]` 與 `classes=[0,2]` 的座標**逐值相同、最大差
-0.0**（`overlay/analysis/head_class_no_side_effect.py`）。
+實測 cam003 ＋ cam008 共 3155 個 fbody 框，`classes=[2]` 與 `classes=[0,2]` 的座標
+**逐值相同、最大差 0.0**（`overlay/analysis/head_class_no_side_effect.py`）。
+
+**這個結論綁在現用權重是 end2end 上**（`YOLO(...).model.end2end` 為 True）：該路徑先
+`[:max_det]` 截斷、之後才套 `classes` 過濾，多帶一個類別動不到 fbody。換成非 end2end
+權重時，`classes` 過濾會排在 NMS 與 `max_det` 截斷**之前**，多出來的 head 框就可能透過
+`max_det`（預設 300）的上限擠掉 fbody 框——換權重要重跑這支驗證腳本，不能沿用本結論。
 
 ### 對 ADR-001／ADR-003 前提的影響
 
@@ -208,6 +216,10 @@ Negative
   演算法的固有限制。
 - **多候選的選法只在兩台攝影機、各 400 幀上比較過**，目視樣本 6 個。換場域或換權重後
   結論不保證成立，重測用 `overlay/analysis/head_pick_track.py`。
+- **同一顆 head 可以同時被多個 fbody 採用**：配對是逐 body 獨立挑頭、沒有全域指派。
+  甲站在乙後方而乙彎腰或蹲下、使乙的框上緣低於甲的頭時，甲的頭會同時滿足乙的四項條件，
+  兩條軌跡由同一顆頭推出落腳點。更麻煩的是這算「成功推算」，錯誤的偏移量會被存起來、
+  之後最多再沿用 60 格。要修得引入全域指派或處理順序相依，代價高於收益，列為已知限制。
 - **框被畫面邊緣截斷（約 15%）與陳列結構遮擋下半身**都不在本方案的修正範圍：前者是
   detection 品質問題，後者造成的是縱向偏移，與本方案修的橫向偏移是不同問題。
 - **舊 parquet 全面失效**：`line_counting`／`zone_mapping` 從此擋下缺 `foot_x`／`foot_y`
