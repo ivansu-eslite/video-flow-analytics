@@ -32,17 +32,19 @@ def _write_tracking_results(
     """寫出追蹤明細；`frame_width`／`frame_height` 逐列補成同一個值（上游即如此寫）。
 
     預設 1920×1080 = 基準解析度，換算係數 1，讓不測換算的案例維持原本的判定尺度。
-    腳底點 (100, 100) 在 `_SQUARE_200` 的正中央，離邊界 100 px。
+    落腳點 (100, 100) 在 `_SQUARE_200` 的正中央，離邊界 100 px。
+
+    各案例刻意**只給 `foot_x`／`foot_y`、不給 bbox 欄位**：落腳點改由上游算好寫進
+    parquet 後（ADR-008），本套件只讀這兩欄；若有人把判定改回從 bbox 現算，這些
+    測試會因為缺欄位而爆，而不是靜默沿用舊公式。
     """
     df = pl.DataFrame(
         {
             "camera_id": [camera_id],
             "timestamp": [datetime.datetime(2026, 5, 1, 9, 0, tzinfo=_TAIPEI)],
             "track_id": [1],
-            "x1": [99.0],
-            "y1": [98.0],
-            "x2": [101.0],
-            "y2": [100.0],
+            "foot_x": [100.0],
+            "foot_y": [100.0],
             "frame_width": [frame_width],
             "frame_height": [frame_height],
         }
@@ -216,10 +218,8 @@ def test_boundary_band_scales_with_each_camera_frame_width(tmp_path):
             "camera_id": ["loc_cam001", "loc_cam002"],
             "timestamp": [base, base],
             "track_id": [1, 2],
-            "x1": [5.0, 5.0],
-            "y1": [90.0, 90.0],
-            "x2": [25.0, 25.0],
-            "y2": [100.0, 100.0],  # 腳底 (15, 100)：離左邊界 15 px（區內）
+            "foot_x": [15.0, 15.0],
+            "foot_y": [100.0, 100.0],  # 腳底 (15, 100)：離左邊界 15 px（區內）
             "frame_width": [1920, 3840],
             "frame_height": [1080, 2160],
         }
@@ -276,10 +276,8 @@ def test_zero_band_stays_zero_at_any_resolution(tmp_path):
             "camera_id": ["loc_cam001"],
             "timestamp": [base],
             "track_id": [1],
-            "x1": [-9.0],
-            "y1": [90.0],
-            "x2": [10.0],
-            "y2": [100.0],  # 腳底 (0.5, 100)：僅離邊界 0.5 px
+            "foot_x": [0.5],
+            "foot_y": [100.0],  # 腳底 (0.5, 100)：僅離邊界 0.5 px
             "frame_width": [3840],
             "frame_height": [2160],
         }
@@ -364,10 +362,8 @@ def test_tracking_results_without_frame_size_fails_loud(tmp_path):
             "camera_id": ["loc_cam001"],
             "timestamp": [base],
             "track_id": [1],
-            "x1": [99.0],
-            "y1": [98.0],
-            "x2": [101.0],
-            "y2": [100.0],
+            "foot_x": [100.0],
+            "foot_y": [100.0],
         }
     ).write_parquet(output_dir / "tracking_results.parquet")
 
@@ -406,10 +402,8 @@ def test_multiple_frame_widths_for_one_camera_fails_loud(tmp_path):
             "camera_id": ["loc_cam001", "loc_cam001"],
             "timestamp": [base, base + datetime.timedelta(seconds=1)],
             "track_id": [1, 1],
-            "x1": [99.0, 99.0],
-            "y1": [98.0, 98.0],
-            "x2": [101.0, 101.0],
-            "y2": [100.0, 100.0],
+            "foot_x": [100.0, 100.0],
+            "foot_y": [100.0, 100.0],
             "frame_width": [1920, 3840],
             "frame_height": [1080, 2160],
         }

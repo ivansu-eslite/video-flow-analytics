@@ -20,11 +20,12 @@ BASELINE_FRAME_WIDTH = 1920
 # 有兩個意思；`config.toml` 無法引用常數，那一份由 tests/test_config.py 鎖住一致性。
 DEFAULT_BOUNDARY_BAND_PX_1080P = 25
 
-# 追蹤結果 parquet 必須具備的欄位；缺任一欄代表是舊版 video_analyze 的產物，
-# 無法換算像素參數，直接 fail-loud（見 ADR-004、ADR-006）。`frame_height` 本次的換算
-# 用不到，仍列為必要：兩欄同時寫入，只有其中一欄代表產物不完整，此時放行等於接受一份
-# 來源不明的 parquet。
-REQUIRED_TRACKING_COLUMNS = ("frame_width", "frame_height")
+# 追蹤結果 parquet 必須具備的欄位；缺任一欄代表是舊版 video_analyze 的產物，直接
+# fail-loud。`frame_width`／`frame_height` 用來換算像素參數（見 ADR-004、ADR-006）
+# ——`frame_height` 本次的換算用不到，仍列為必要：兩欄同時寫入，只有其中一欄代表產物
+# 不完整，此時放行等於接受一份來源不明的 parquet。`foot_x`／`foot_y` 是上游算好的
+# 落腳點（見 ADR-008），本套件不再自己從 bbox 推算。
+REQUIRED_TRACKING_COLUMNS = ("frame_width", "frame_height", "foot_x", "foot_y")
 
 # 輸入／輸出檔名。
 TRACKING_RESULTS_FILENAME = "tracking_results.parquet"
