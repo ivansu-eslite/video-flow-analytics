@@ -75,10 +75,11 @@ Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態�
 幾何不可統一，並修訂 ADR-004 的「舊 parquet 不對稱」條款；ADR-007：移除
 `camera_registry_used.yaml` 快照機制，`flow_report` 改讀 `bucket_dir` 當下的
 `camera_registry.yaml`，說明為何不補回溯替代方案、以及被接受的靜默錯位範圍（修訂 ADR-005
-的資料來源）；ADR-008（**Proposed**，計數變動待需求方確認後才會轉 Accepted）：落腳點由 head 框推算並
-上移成 `tracking_results.parquet` 的欄位，
-記錄多候選 head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能進 tracker，以及
-ADR-001／003／004／006 的判定輸入點定義隨之改變。
+的資料來源）；ADR-008：落腳點由 head 框推算並上移成 `tracking_results.parquet` 的欄位，
+記錄多候選 head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能進 tracker、
+ADR-001／003／004／006 的判定輸入點定義隨之改變，以及**計數會大幅上升**（本機重跑
+zone entries 最多 74 → 264）——方向是否正確只能靠疊圖目視，正式環境上線前需求方要
+自行判斷。
 
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
 
