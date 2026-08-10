@@ -376,6 +376,52 @@ def test_tracking_results_without_frame_size_fails_loud(tmp_path):
         )
 
 
+def test_tracking_results_without_foot_point_fails_loud(tmp_path):
+    """有影像尺寸、但只有 bbox 沒有落腳點欄位（issue #63 之後、#72 之前的產物）：
+    同樣要報錯中止。這種 parquet 通過了尺寸那道檢查，若不擋下就會走到判定時才因
+    缺欄位炸在 polars 層，或被日後補上的 bbox fallback 靜默套回舊公式。"""
+    bucket_dir = tmp_path / "bucket_test"
+    bucket_dir.mkdir()
+    _write_registry(
+        bucket_dir / "camera_registry.yaml",
+        [
+            {
+                "camera_id": "cam001",
+                "location": "loc",
+                "ip": "127.0.0.1",
+                "zones": [{"name": "zone_a", "polygon": _SQUARE_200}],
+            },
+        ],
+    )
+
+    output_root = tmp_path / "outputs"
+    output_dir = output_root / "bucket_test" / "2026-05-01"
+    output_dir.mkdir(parents=True)
+    base = datetime.datetime(2026, 5, 1, 9, 0, tzinfo=_TAIPEI)
+    # 刻意不經 _write_tracking_results：這裡要的正是「有 bbox、無 foot」的舊格式
+    pl.DataFrame(
+        {
+            "camera_id": ["loc_cam001"],
+            "timestamp": [base],
+            "track_id": [1],
+            "x1": [80.0],
+            "y1": [20.0],
+            "x2": [120.0],
+            "y2": [100.0],
+            "frame_width": [1920],
+            "frame_height": [1080],
+        }
+    ).write_parquet(output_dir / "tracking_results.parquet")
+
+    with pytest.raises(ValueError, match="foot_x"):
+        map_zones_daily(
+            date=datetime.date(2026, 5, 1),
+            bucket_dir=str(bucket_dir),
+            bucket_minutes=60,
+            output_root=output_root,
+        )
+
+
 def test_multiple_frame_widths_for_one_camera_fails_loud(tmp_path):
     """同一台攝影機出現多個 frame_width：靜默取其中一個會讓半天的緩衝帶用錯尺度，
     須報錯（上游整天解析度固定，出現這種資料代表 parquet 是拼接出來的）。"""
