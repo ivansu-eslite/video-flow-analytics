@@ -256,10 +256,11 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | --- | --- |
 | `main.py` | 薄 CLI 外殼：進入點 `main`，讀 `settings` 組參數後呼叫 `analyze_daily` |
 | `models/config.py` | Pydantic-settings 設定模型（`config.toml`＋環境變數）與全域 `settings` 單例 |
-| `config/constants.py` | 非 Pydantic 靜態常數（`OUTPUT_ROOT`、輸出檔名與 parquet schema） |
+| `config/constants.py` | 非 Pydantic 靜態常數（`OUTPUT_ROOT`、輸出檔名與 parquet schema、CrowdHuman 類別 id `HEAD_CLASS_ID`／`FBODY_CLASS_ID`） |
 | `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理子進程生命週期） |
 | `services/inference.py` | 推理迴圈（湊批、偵測、追蹤、寫檔） |
 | `services/detector.py` | YOLO 偵測 |
+| `services/foot_point.py` | `FootPointEstimator`：head 框配對與落腳點推算，本套件唯一帶跨幀狀態的服務 |
 | `services/tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |
 | `services/tracking_results.py` | 追蹤明細累積與 parquet 寫出 |
 | `services/fps_meter.py` | 處理 FPS 統計 |
