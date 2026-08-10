@@ -246,7 +246,7 @@ lines:
 
 | 路徑 | 讀 / 寫 | 內容 |
 | --- | --- | --- |
-| `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（線段區域寬度的解析度換算靠它），2026-07 之前產出的舊檔沒有這兩欄，會直接報錯要求重跑 `video_analyze` |
+| `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（線段區域寬度的解析度換算靠它，issue #63 起才有）與 `foot_x`／`foot_y`（落腳點，本階段不自行從 bbox 推算，issue #72 起才有）四欄，缺任一欄都直接報錯要求重跑 `video_analyze`——只有 issue #72 之後產出的檔案才同時具備 |
 | `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與計數線幾何 |
 | `outputs/{bucket}/{date}/line_counts.parquet` | 寫 | 每時段每計數線進出人數，欄位 `line_group` / `camera_id` / `line` / `time_bucket` / `in_count` / `out_count` |
 

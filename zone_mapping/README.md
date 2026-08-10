@@ -185,7 +185,7 @@ boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像
 
 | 路徑 | 讀 / 寫 | 內容 |
 | --- | --- | --- |
-| `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（緩衝帶寬度的解析度換算靠它），2026-07 之前產出的舊檔沒有這兩欄，會直接報錯要求重跑 `video_analyze` |
+| `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（緩衝帶寬度的解析度換算靠它，issue #63 起才有）與 `foot_x`／`foot_y`（落腳點，本階段不自行從 bbox 推算，issue #72 起才有）四欄，缺任一欄都直接報錯要求重跑 `video_analyze`——只有 issue #72 之後產出的檔案才同時具備 |
 | `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與區域幾何 |
 | `outputs/{bucket}/{date}/zone_counts.parquet` | 寫 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries` |
 

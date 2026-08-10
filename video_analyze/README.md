@@ -260,7 +260,7 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理子進程生命週期） |
 | `services/inference.py` | 推理迴圈（湊批、偵測、追蹤、寫檔） |
 | `services/detector.py` | YOLO 偵測 |
-| `services/foot_point.py` | `FootPointEstimator`：head 框配對與落腳點推算，本套件唯一帶跨幀狀態的服務 |
+| `services/foot_point.py` | `FootPointEstimator`：head 框配對與落腳點推算；自行維護跨幀狀態（每條軌跡上次成功推算的偏移量） |
 | `services/tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |
 | `services/tracking_results.py` | 追蹤明細累積與 parquet 寫出 |
 | `services/fps_meter.py` | 處理 FPS 統計 |
@@ -289,7 +289,8 @@ zone 與 line 幾何都不會被驗證。
 - **讀取進程**：無空 slot 時阻塞，形成對推理進程的天然背壓。**時間戳 = 該片段檔名時間 ＋
   片段內幀序 / fps**（逐段計算，不能用全日累計幀數推算）。
 - **推理進程**：非阻塞輪詢各路 queue 湊批，維持 GPU 批次效率；每個 packet 依序經
-  偵測 → 追蹤 → 累積追蹤結果 → 畫框 → 寫檔。
+  偵測 → 拆出 fbody／head（只有 fbody 進 tracker）→ 追蹤 → 推算落腳點 → 累積追蹤結果
+  → 畫框 → 寫檔。
 - **mp4v 編碼在背景執行緒**，與下一批 GPU 推理重疊。關檔順序有講究：某路尾端影格常與
   該路結束訊號同批出現，必須等這批全部寫完才關檔，否則背景緒會先收尾、之後補寫的影格
   會把檔案截斷。
