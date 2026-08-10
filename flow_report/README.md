@@ -129,7 +129,7 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 
 | 區塊 | 欄位 | 預設 | 約束 / 說明 |
 | --- | --- | --- | --- |
-| `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（cwd 相對）；本階段只取其目錄名來組出 `outputs/{bucket}/` 路徑 |
+| `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（cwd 相對）；本階段有兩種用法——讀 `camera_registry.yaml` 吃**完整路徑**，組 `outputs/{bucket}/` 則只取其目錄名（見上方「執行位置」） |
 | | `date` | — | 彙總日期；未設定時報錯 |
 | | `bucket_minutes` | `60` | 上游 `zone_counts.parquet`／`line_counts.parquet` 的時段粒度（分鐘），`>= 1`；須與產生這兩份 parquet 時的 `zone_mapping`／`line_counting` 設定一致 |
 | `[report]` | `period_minutes` | `60` | 報表彙總粒度（分鐘），`>= 1`，且**須為 `input.bucket_minutes` 的倍數**（否則 fail-loud 報錯） |
