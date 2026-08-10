@@ -124,7 +124,7 @@ uv run --package flow_report   flow_report     # 報表彙總 → report.xlsx
 ### `camera_registry.yaml`（資料樣貌 ＋ 區域與計數線定義）
 
 放在每個 `bucket_dir` 根目錄下，描述該 bucket 的攝影機清單與各攝影機的區域、計數線幾何。
-**此檔不進版控**（隨 `bucket_name*/` 一起被 `.gitignore` 排除），需依實際部署環境人工維護。
+**此檔不進版控**（隨 `bucket_*/` 一起被 `.gitignore` 排除），需依實際部署環境人工維護。
 
 攝影機片段的目錄結構為：
 
