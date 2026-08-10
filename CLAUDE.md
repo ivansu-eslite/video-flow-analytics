@@ -131,8 +131,8 @@ head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能
   本身無需改碼。
 - **`config.py`：私有區塊各包分開，`[input]` 抽成 `libs/vfa_config`（issue #79）。**
   各包只保留自己 `run_*` 實際讀到的**私有**區塊（`video_analyze` 的
-  `tracker`/`model`/`output`；`zone_mapping` 的 `zone`；`line_counting` 的 `line`；
-  `flow_report` 的 `report`）；四包都有的 `[input]` 則由 `libs/vfa_config` 提供單一
+  `tracker`/`model`/`foot_point`/`output`；`zone_mapping` 的 `zone`；`line_counting` 的
+  `line`；`flow_report` 的 `report`）；四包都有的 `[input]` 則由 `libs/vfa_config` 提供單一
   `InputConfig`，欄位取四包需求的**聯集**（`bucket_dir`/`date`/`camera_ids`/`bucket_minutes`），
   `find_project_root`／`get_toml_path` 一併抽在此 lib。四包皆已 DDD 重構（`flow_report`
   issue #42、`zone_mapping` issue #46、`video_analyze` issue #50、`line_counting` issue #41
