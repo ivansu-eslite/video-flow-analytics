@@ -98,8 +98,11 @@ CLI 不接受任何旗標，所有參數都讀自 `config.toml`。執行前需�
 
 | 路徑 | 來源 | 在 `flow_report/` 內執行時 |
 | --- | --- | --- |
-| `OUTPUT_ROOT = outputs/` | `config/constants.py` 常數 | 去 `flow_report/outputs/` 找輸入而 `FileNotFoundError`，報表也落在錯的樹 |
-| `settings.input.bucket_dir` | `config.toml` `[input]` | 只取其目錄名來組路徑，故實務上不會走到；上一列的輸入檢查會先失敗 |
+| `settings.input.bucket_dir` | `config.toml` `[input]` | **最先失敗的就是這個**：`load_registry` 吃完整路徑，去 `flow_report/bucket_name1/` 找 registry 而 `FileNotFoundError: 找不到設備登錄檔` |
+| `OUTPUT_ROOT = outputs/` | `config/constants.py` 常數 | 會去 `flow_report/outputs/` 找輸入、報表也落在錯的樹，但上一列已先拋錯，實務上走不到這裡 |
+
+`bucket_dir` 在本階段有兩種用法，只有前者受 cwd 影響：`registry_path`／`load_registry`
+吃**完整路徑**（故 cwd 錯了就找不到 registry），輸出目錄則只取 `bucket_path.name`。
 
 本套件自己的 `config.toml` 以共用 lib 的 `get_toml_path(__file__)`（往上找
 `pyproject.toml`）定位，不受 cwd 影響。
