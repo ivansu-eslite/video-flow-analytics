@@ -35,7 +35,7 @@ def _write_tracking_results(
     落腳點 (100, 100) 在 `_SQUARE_200` 的正中央，離邊界 100 px。
 
     各案例刻意**只給 `foot_x`／`foot_y`、不給 bbox 欄位**：落腳點改由上游算好寫進
-    parquet 後（ADR-008），本套件只讀這兩欄；若有人把判定改回從 bbox 現算，這些
+    parquet 後（ADR-009），本套件只讀這兩欄；若有人把判定改回從 bbox 現算，這些
     測試會因為缺欄位而爆，而不是靜默沿用舊公式。
     """
     df = pl.DataFrame(

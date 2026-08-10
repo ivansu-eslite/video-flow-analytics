@@ -126,7 +126,7 @@ def count_lines_daily(
             f"{results_path} 缺少欄位 {missing}：這是舊版 video_analyze 的產物。"
             "沒有影像尺寸就無法把 crossing_band_px_1080p 換算成各攝影機的實際像素；"
             "沒有 foot_x／foot_y 就沒有落腳點可判定（本套件不再自行從 bbox 推算，"
-            "見 ADR-008）。請以現行版本的 video_analyze 重跑該日產生新的 "
+            "見 ADR-009）。請以現行版本的 video_analyze 重跑該日產生新的 "
             "tracking_results.parquet。"
         )
     # 先驗證 camera 對得上當天資料再解析計數線，避免陳舊定義打錯字蓋過更根本錯誤
@@ -136,7 +136,7 @@ def count_lines_daily(
     )
     line_cameras = parse_and_validate_lines(line_entries)
 
-    # 落腳點直接讀上游欄位——推算需要 head 框，而 head 不在追蹤結果裡（見 ADR-008）
+    # 落腳點直接讀上游欄位——推算需要 head 框，而 head 不在追蹤結果裡（見 ADR-009）
     df = df.with_columns(
         pl.col("timestamp").dt.truncate(f"{bucket_minutes}m").alias("time_bucket"),
     )

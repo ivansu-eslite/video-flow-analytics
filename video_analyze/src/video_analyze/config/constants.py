@@ -34,7 +34,7 @@ TRACKING_RESULTS_SCHEMA = {
     # 落腳點（人站在地面的位置）：由 head 框推算；配不到頭時先沿用該軌跡上次的偏移量，
     # 連偏移量都沒有（或已過期）才退回 `((x1+x2)/2, y2)`。
     # 算在這裡而非讓下游各自從 bbox 現算，是因為推算需要 head 框，而 head 不進追蹤
-    # 結果；下游（line_counting／zone_mapping／overlay）一律讀這兩欄，見 ADR-008。
+    # 結果；下游（line_counting／zone_mapping／overlay）一律讀這兩欄，見 ADR-009。
     "foot_x": pl.Float64,
     "foot_y": pl.Float64,
     # 該路影像尺寸（整天固定，見 services/video_reader.py 的 probe_frame_shape）。

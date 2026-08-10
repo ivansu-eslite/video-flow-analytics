@@ -21,7 +21,7 @@ def main() -> None:
     count_lines_daily(
         date=settings.input.date,
         bucket_dir=settings.input.bucket_dir,
-        bucket_minutes=settings.line.bucket_minutes,
+        bucket_minutes=settings.input.bucket_minutes,
         crossing_band_px_1080p=settings.line.crossing_band_px_1080p,
     )
 

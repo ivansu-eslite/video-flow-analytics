@@ -38,7 +38,7 @@ def _write_tracking_results(
     預設 1920×1080 = 基準解析度，換算係數 1，讓不測換算的案例維持原本的判定尺度。
 
     各案例的 `rows` 刻意**只給 `foot_x`／`foot_y`、不給 bbox 欄位**：落腳點改由上游
-    算好寫進 parquet 後（ADR-008），本套件只讀這兩欄；若有人把判定改回從 bbox 現算，
+    算好寫進 parquet 後（ADR-009），本套件只讀這兩欄；若有人把判定改回從 bbox 現算，
     這些測試會因為缺欄位而爆，而不是靜默沿用舊公式。
     """
     n = len(next(iter(rows.values())))

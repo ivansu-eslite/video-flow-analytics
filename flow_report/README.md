@@ -52,10 +52,10 @@ bucket_minutes, output_root=OUTPUT_ROOT) -> Path`（在 `services/report.py`）�
 | `services/report.py` | 報表 orchestration、I/O 與 Excel 讀寫 |
 | `services/stats.py` | 時區轉換、期間彙總、尖峰計算等純函式 |
 
-`camera_registry.yaml` 的模型與 zone／line 驗證（`vfa_registry`）、單行 JSON 的
-`StructuredLogger`（`vfa_observability`）由四包共用的 lib 提供，以 workspace 成員引用，
-不在本包內：[libs/vfa_registry](../libs/vfa_registry)、
-[libs/vfa_observability](../libs/vfa_observability)。
+下列三者由四包共用的 lib 提供，以 workspace 成員引用，不在本包內：`camera_registry.yaml`
+的模型與 zone／line 驗證（[libs/vfa_registry](../libs/vfa_registry)）、單行 JSON 的
+`StructuredLogger`（[libs/vfa_observability](../libs/vfa_observability)）、`[input]` 設定
+區塊與 `config.toml` 定位（[libs/vfa_config](../libs/vfa_config)）。
 
 ## 環境需求
 
@@ -75,6 +75,7 @@ bucket_minutes, output_root=OUTPUT_ROOT) -> Path`（在 `services/report.py`）�
 | `pyyaml` | 讀取 `camera_registry.yaml` |
 | `vfa_registry` | 共用 lib：`camera_registry.yaml` 的模型與 zone／line 驗證 |
 | `vfa_observability` | 共用 lib：單行 JSON 的 `StructuredLogger` |
+| `vfa_config` | 共用 lib：`[input]` 設定區塊與 `config.toml` 定位 |
 
 ## 安裝與快速開始
 
@@ -100,8 +101,8 @@ CLI 不接受任何旗標，所有參數都讀自 `config.toml`。執行前需�
 | `OUTPUT_ROOT = outputs/` | `config/constants.py` 常數 | 去 `flow_report/outputs/` 找輸入而 `FileNotFoundError`，報表也落在錯的樹 |
 | `settings.input.bucket_dir` | `config.toml` `[input]` | 只取其目錄名來組路徑，故實務上不會走到；上一列的輸入檢查會先失敗 |
 
-本套件自己的 `config.toml` 以 `find_project_root`（往上找 `pyproject.toml`）定位，不受
-cwd 影響。
+本套件自己的 `config.toml` 以共用 lib 的 `get_toml_path(__file__)`（往上找
+`pyproject.toml`）定位，不受 cwd 影響。
 
 ## 設定
 
@@ -135,10 +136,14 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 **`bucket_minutes` 放在 `[input]` 而非 `[report]`**：它描述的是**輸入資料**的粒度（上游
 兩包寫出 parquet 時用的值），不是報表的呈現粒度——後者是 `[report] period_minutes`。
 區域與計數線共用這一個數字，兩包的設定若不一致，這裡只能對上其中一個（見「已知限制」）。
-沿用舊的 `[zone] bucket_minutes` 會直接報錯並指出新位置；環境變數形式
-（`ZONE__BUCKET_MINUTES`）則只警告、不擋下——pydantic-settings 只查已知欄位名，這個
-覆寫對本階段是靜默忽略，值得提醒，但同一個變數是 `zone_mapping` 的合法設定，而四包
-設計成同一個 workspace、共用一份環境設定執行，在這裡拋錯會讓本階段連 import 都失敗。
+沿用舊的 `[zone] bucket_minutes` 會直接報錯並指出新位置。環境變數那側**不再有對稱的
+警告**（issue #79 移除）：`ZONE__BUCKET_MINUTES` 現在對 `zone_mapping` 也已不是合法設定
+（該包的 `bucket_minutes` 同樣移到了 `[input]`），會由該包的搬家提示擋下，本階段不必再
+警告一份。三包現在共用單一環境變數 `INPUT__BUCKET_MINUTES`。
+
+`[input]` 由共用 lib `vfa_config` 提供、四包同一份定義，故本階段也接受 `camera_ids`
+（只有 `video_analyze` 會讀）。為何不能各包裁剪見
+[ADR-008](../docs/adr/008-config-section-namespace.md)。
 
 `on_duplicate_date` 三種模式的行為：
 
@@ -243,7 +248,10 @@ registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都�
   `in_count`／`out_count` 本身即為可疊加的事件次數，不受此影響。
 - **`bucket_minutes` 仍靠人工同步**：本階段只有一個數字，卻要對應 `zone_mapping` 與
   `line_counting` 兩包各自的設定。三者不一致時，`period_minutes` 的倍數檢查會拿錯的數字
-  驗證，不會被自動抓到。
+  驗證，不會被自動抓到。issue #79 讓三包的欄位路徑一致（都在 `[input]`，可用單一
+  `INPUT__BUCKET_MINUTES` 一次覆寫），但三份 `config.toml` 仍各填一次；唯一能消除手抄的
+  做法（寫進 parquet 檔級 metadata）已在 [ADR-008](../docs/adr/008-config-section-namespace.md)
+  否決，**這是已接受的最終狀態，不是待辦**。
 - **`line_group` 只是報表的一個維度欄位**：本階段不做範圍層級的加總（例如整個賣場的進出
   合計），出入口三頁都是逐計數線的數字。
 - **幾何改過但名稱沒變時不會有任何訊號**：本階段讀的是當下的 registry，不是產生 parquet

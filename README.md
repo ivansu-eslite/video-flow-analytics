@@ -237,7 +237,7 @@ cameras:
 用 head 框推算後逐列寫入，`line_counting`／`zone_mapping` 與疊圖工具一律讀這兩欄、不再
 各自從 bbox 現算——推算需要 head 框，而 head 不進追蹤結果（它若進 tracker，同一個人會多
 出一條頭部軌跡）。缺這兩欄的舊 parquet 同樣被兩包擋下。公式、配對條件與多候選時的選法
-見 [ADR-008](docs/adr/008-head-based-foot-point.md)。
+見 [ADR-009](docs/adr/009-head-based-foot-point.md)。
 
 ## 共用 lib
 
@@ -248,6 +248,7 @@ cameras:
 | --- | --- | --- |
 | [`libs/vfa_registry/`](libs/vfa_registry/README.md) | `camera_registry.yaml` 的 Pydantic 模型與 zone／line 驗證 | 四包 |
 | [`libs/vfa_observability/`](libs/vfa_observability/README.md) | 輸出單行 JSON 的 `StructuredLogger` | 四包 |
+| [`libs/vfa_config/`](libs/vfa_config/README.md) | `[input]` 設定區塊的單一定義與 `config.toml` 定位 | 四包 |
 
 workspace 為單一 `.venv`，`uv sync --package <pkg>` 只裝該包依賴子樹——`flow_report`／
 `zone_mapping`／`line_counting` 不含 torch，維持 CPU-only；`uv sync --all-packages` 才裝
@@ -257,7 +258,7 @@ workspace 為單一 `.venv`，`uv sync --package <pkg>` 只裝該包依賴子樹
 
 各套件與各 lib 各自 lint 與測試
 （`<pkg>` = `video_analyze` / `zone_mapping` / `line_counting` / `flow_report` /
-`libs/vfa_registry` / `libs/vfa_observability`）：
+`libs/vfa_registry` / `libs/vfa_observability` / `libs/vfa_config`）：
 
 ```bash
 uv run --directory <pkg> ruff check .   # lint（select = ["E", "F", "I", "W"]；line-length 見各包 pyproject）

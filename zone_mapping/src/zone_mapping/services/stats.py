@@ -13,7 +13,7 @@
 跨越（見 `docs/adr/001-line-crossing-detection.md`）。
 
 判定「人是否在區域內」用落腳點 (foot_x, foot_y)。落腳點由上游 `video_analyze` 算好寫進
-`tracking_results.parquet`（由 head 框推算，推不出來才退回 bbox 底邊中點，見 ADR-008），
+`tracking_results.parquet`（由 head 框推算，推不出來才退回 bbox 底邊中點，見 ADR-009），
 本套件不自己從 bbox 推算。
 """
 

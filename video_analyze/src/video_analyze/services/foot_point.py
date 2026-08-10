@@ -10,7 +10,7 @@ H 取**頂邊中點**而非 head 框中心，是為了退化性質：人站直�
 [頭頂, 腳底]、框中心是兩者中點，`2 × C_y − 頭頂` 精確等於 `y2`，推算結果與改動前
 一致。若改用 head 中心，站直的人會系統性上偏半顆頭。
 
-配對與選法的取捨（含被實測推翻的直覺）見 docs/adr/008-head-based-foot-point.md。
+配對與選法的取捨（含被實測推翻的直覺）見 docs/adr/009-head-based-foot-point.md。
 """
 
 import numpy as np
@@ -69,7 +69,7 @@ def _match_head(body: np.ndarray, heads: np.ndarray) -> int | None:
     12–16%（cam003／cam008 實測），最常見的成因是框同時罩住前後兩個人；透視下後方
     的人在畫面中更高、更靠近框頂邊，因此「離框頂最近」這個直覺的判準會系統性挑中
     後方那個人，主軸判準則因為後方的人多半偏在框的左右上角而能排除他。實測比較與
-    被否決的判準見 ADR-008。
+    被否決的判準見 ADR-009。
 
     Args:
         body: 單一 fbody 框 `[x1, y1, x2, y2]`。

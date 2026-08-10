@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "flow-report",
     "line-counting",
+    "vfa-config",
     "vfa-observability",
     "vfa-registry",
     "video-analyze",
@@ -274,6 +275,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings", extra = ["toml"] },
     { name = "pyyaml" },
+    { name = "vfa-config" },
     { name = "vfa-observability" },
     { name = "vfa-registry" },
 ]
@@ -292,6 +294,7 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.13.4" },
     { name = "pydantic-settings", extras = ["toml"], specifier = "==2.14.2" },
     { name = "pyyaml", specifier = "==6.0.3" },
+    { name = "vfa-config", editable = "libs/vfa_config" },
     { name = "vfa-observability", editable = "libs/vfa_observability" },
     { name = "vfa-registry", editable = "libs/vfa_registry" },
 ]
@@ -514,6 +517,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings", extra = ["toml"] },
     { name = "pyyaml" },
+    { name = "vfa-config" },
     { name = "vfa-observability" },
     { name = "vfa-registry" },
 ]
@@ -532,6 +536,7 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.13.4" },
     { name = "pydantic-settings", extras = ["toml"], specifier = "==2.14.2" },
     { name = "pyyaml", specifier = "==6.0.3" },
+    { name = "vfa-config", editable = "libs/vfa_config" },
     { name = "vfa-observability", editable = "libs/vfa_observability" },
     { name = "vfa-registry", editable = "libs/vfa_registry" },
 ]
@@ -1634,6 +1639,29 @@ wheels = [
 ]
 
 [[package]]
+name = "vfa-config"
+version = "0.1.0"
+source = { editable = "libs/vfa_config" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = "==2.13.4" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "ruff", specifier = ">=0.15.20" },
+]
+
+[[package]]
 name = "vfa-observability"
 version = "0.1.0"
 source = { editable = "libs/vfa_observability" }
@@ -1699,6 +1727,7 @@ dependencies = [
     { name = "torch" },
     { name = "torchvision" },
     { name = "ultralytics" },
+    { name = "vfa-config" },
     { name = "vfa-observability" },
     { name = "vfa-registry" },
 ]
@@ -1722,6 +1751,7 @@ requires-dist = [
     { name = "torch", specifier = "==2.12.1" },
     { name = "torchvision", specifier = "==0.27.1" },
     { name = "ultralytics", specifier = "==8.4.75" },
+    { name = "vfa-config", editable = "libs/vfa_config" },
     { name = "vfa-observability", editable = "libs/vfa_observability" },
     { name = "vfa-registry", editable = "libs/vfa_registry" },
 ]
@@ -1743,6 +1773,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings", extra = ["toml"] },
     { name = "pyyaml" },
+    { name = "vfa-config" },
     { name = "vfa-observability" },
     { name = "vfa-registry" },
 ]
@@ -1761,6 +1792,7 @@ requires-dist = [
     { name = "pydantic", specifier = "==2.13.4" },
     { name = "pydantic-settings", extras = ["toml"], specifier = "==2.14.2" },
     { name = "pyyaml", specifier = "==6.0.3" },
+    { name = "vfa-config", editable = "libs/vfa_config" },
     { name = "vfa-observability", editable = "libs/vfa_observability" },
     { name = "vfa-registry", editable = "libs/vfa_registry" },
 ]

@@ -10,7 +10,7 @@ Accepted（「無限直線」前提已由 [ADR-003](003-finite-line-segment.md) 
 取最近段、仍用該段的無限直線定號，Schmitt trigger 與「勿改成全域 signed-side」的告誡
 都繼續有效。
 
-判定所用的那個點，其**定義**另由 [ADR-008](008-head-based-foot-point.md) 改變：本 ADR
+判定所用的那個點，其**定義**另由 [ADR-009](009-head-based-foot-point.md) 改變：本 ADR
 寫成「腳底點 `((x1+x2)/2, y2)`」之處，現在是上游用 head 框推算後寫進
 `tracking_results.parquet` 的落腳點欄位（推算不出來才退回框底邊中點）。判定演算法本身
 不變。

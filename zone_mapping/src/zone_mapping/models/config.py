@@ -1,4 +1,3 @@
-import datetime
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +8,7 @@ from pydantic_settings import (
     SettingsConfigDict,
     TomlConfigSettingsSource,
 )
+from vfa_config import InputConfig, get_toml_path
 from vfa_observability import StructuredLogger
 
 from zone_mapping.config.constants import DEFAULT_BOUNDARY_BAND_PX_1080P
@@ -20,8 +20,6 @@ class ZoneConfig(BaseModel):
     """Zone 人流統計參數。
 
     Attributes:
-        bucket_minutes: 人流統計的時段粒度（分鐘），time_bucket 依此在台北
-            時間上向下取整。
         boundary_band_px_1080p: entry 判定的區域邊界緩衝帶寬度，以 1080p
             （寬 1920）為基準的像素值；執行時依各攝影機的 `frame_width` 換算成
             實際像素。`0` = 純內外判定（每次跨越邊界都計），且 0 換算後仍是 0。
@@ -30,10 +28,28 @@ class ZoneConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    bucket_minutes: int = Field(default=60, ge=1)
     boundary_band_px_1080p: float = Field(
         default=DEFAULT_BOUNDARY_BAND_PX_1080P, ge=0
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_moved_bucket_minutes(cls, data: Any) -> Any:
+        """`bucket_minutes` 已從 `[zone]` 移到 `[input]`，要報出新位置。
+
+        `extra="forbid"` 本來就會擋下，但訊息只說不允許額外欄位，看不出該搬到哪個
+        區塊；而環境變數形式 `ZONE__BUCKET_MINUTES` 過去是本包的合法設定，沿用舊設定
+        的人需要知道改用 `INPUT__BUCKET_MINUTES`。`mode="before"` 先於
+        `extra="forbid"` 觸發，toml 與環境變數兩條路徑都會走到這裡。
+        """
+        if isinstance(data, dict) and "bucket_minutes" in data:
+            raise ValueError(
+                "[zone] 的 bucket_minutes 已移到 [input]：時段粒度是四包共用的輸入"
+                "參數，`flow_report` 也要對得上同一個值，故收斂成單一區塊。請把它移到"
+                " [input] 底下（環境變數由 ZONE__BUCKET_MINUTES 改為 "
+                "INPUT__BUCKET_MINUTES）。見 ADR-008。"
+            )
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -56,55 +72,19 @@ class ZoneConfig(BaseModel):
         return data
 
 
-class InputConfig(BaseModel):
-    """`map_zones_daily` 輸入參數。
-
-    Attributes:
-        bucket_dir: 本機模擬 GCS bucket 的根目錄（內含 camera_registry.yaml，
-            zone 幾何定義在各攝影機底下）。
-        date: 開發時由 config 指定統計日期；正式呼叫端可直接以參數呼叫
-            `map_zones_daily`。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    bucket_dir: str = "bucket_name"
-    date: datetime.date | None = None
-
-
-def find_project_root(start_path: Path) -> Path | None:
-    """從起始路徑向上搜尋，直到找到包含 `pyproject.toml` 的專案根目錄。"""
-    for parent in start_path.parents:
-        if (parent / "pyproject.toml").exists():
-            return parent
-    return None
-
-
-def _get_toml_path() -> str | None:
-    # 本檔位於 zone_mapping/models/config.py，比套件根多兩層目錄；改用
-    # find_project_root 往上找 pyproject.toml，避免寫死 parents[N] 在搬移後定位錯。
-    root = find_project_root(Path(__file__).resolve())
-    if root:
-        return str(root / "config.toml")
-    # 容器環境下 pyproject.toml 可能未一併複製，退回以 cwd 尋找 config.toml。
-    cwd_config = Path.cwd() / "config.toml"
-    if cwd_config.exists():
-        return str(cwd_config)
-    return None
-
-
 class AppConfig(BaseSettings):
     """`config.toml` 與環境變數對應的完整設定，模組載入時組成全域單例 `settings`。
 
     Attributes:
-        input: `map_zones_daily` 輸入參數。
+        input: 共用的 `[input]` 輸入參數（本包讀 `bucket_dir`／`date`／
+            `bucket_minutes`）。
         zone: Zone 人流統計參數。
     """
 
     # extra="forbid" 是 BaseSettings 的預設值，這裡明寫出來讓行為可見：`config.toml`
     # 出現未知的頂層區塊會直接報錯（拼錯的區塊名不會被靜默忽略）。
     model_config = SettingsConfigDict(
-        toml_file=_get_toml_path(),
+        toml_file=get_toml_path(__file__),
         env_nested_delimiter="__",
         extra="forbid",
     )
@@ -141,7 +121,7 @@ def load_config() -> AppConfig:
     Raises:
         ValidationError: `config.toml` 或環境變數提供的值不合法。
     """
-    toml_path = _get_toml_path()
+    toml_path = get_toml_path(__file__)
     if toml_path is None or not Path(toml_path).exists():
         logger.warning("找不到 config.toml，將使用預設參數啟動", path=toml_path)
     return AppConfig()

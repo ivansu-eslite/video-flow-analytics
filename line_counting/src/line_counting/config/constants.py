@@ -24,7 +24,7 @@ DEFAULT_CROSSING_BAND_PX_1080P = 25
 # fail-loud。`frame_width`／`frame_height` 用來換算像素參數（見 ADR-004）——
 # `frame_height` 本次的換算用不到，仍列為必要：兩欄同時寫入，只有其中一欄代表產物
 # 不完整，此時放行等於接受一份來源不明的 parquet；後續的幾何合理性檢查也要用它。
-# `foot_x`／`foot_y` 是上游算好的落腳點（見 ADR-008），本套件不再自己從 bbox 推算。
+# `foot_x`／`foot_y` 是上游算好的落腳點（見 ADR-009），本套件不再自己從 bbox 推算。
 REQUIRED_TRACKING_COLUMNS = ("frame_width", "frame_height", "foot_x", "foot_y")
 
 # 輸入／輸出檔名。

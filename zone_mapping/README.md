@@ -11,7 +11,7 @@ track 的落腳點 `(foot_x, foot_y)` 做 ray-casting 判定是否落在區域�
 
 落腳點是上游 `video_analyze` 算好寫進 `tracking_results.parquet` 的欄位（由 head 框推算，
 推不出來才退回 bbox 底邊中點），本套件不自行從 bbox 推算；缺這兩欄的舊 parquet 直接
-fail loud。理由見 [ADR-008](../docs/adr/008-head-based-foot-point.md)。
+fail loud。理由見 [ADR-009](../docs/adr/009-head-based-foot-point.md)。
 
 | 指標 | 定義 |
 | --- | --- |
@@ -44,10 +44,10 @@ output_root=OUTPUT_ROOT) -> Path`（在 `services/zone_map.py`），CLI 進入�
 | `services/zone_map.py` | 讀檔、逐攝影機/逐區域套用演算法、寫檔 |
 | `services/stats.py` | point-in-polygon 判定與人流聚合等純函式 |
 
-`camera_registry.yaml` 的模型與 zone 驗證（`vfa_registry`）、單行 JSON 的
-`StructuredLogger`（`vfa_observability`）由四包共用的 lib 提供，為 uv workspace 成員，
-不在本包內：[libs/vfa_registry](../libs/vfa_registry)、
-[libs/vfa_observability](../libs/vfa_observability)。
+下列三者由四包共用的 lib 提供，為 uv workspace 成員，不在本包內：`camera_registry.yaml`
+的模型與 zone 驗證（[libs/vfa_registry](../libs/vfa_registry)）、單行 JSON 的
+`StructuredLogger`（[libs/vfa_observability](../libs/vfa_observability)）、`[input]` 設定
+區塊與 `config.toml` 定位（[libs/vfa_config](../libs/vfa_config)）。
 
 ## 環境需求
 
@@ -67,6 +67,7 @@ output_root=OUTPUT_ROOT) -> Path`（在 `services/zone_map.py`），CLI 進入�
 | `pyyaml` | 讀取 `camera_registry.yaml` |
 | `vfa_registry` | 共用 lib：`camera_registry.yaml` 的模型與 zone 驗證 |
 | `vfa_observability` | 共用 lib：單行 JSON 的 `StructuredLogger` |
+| `vfa_config` | 共用 lib：`[input]` 設定區塊與 `config.toml` 定位 |
 
 ## 安裝與快速開始
 
@@ -92,8 +93,8 @@ CLI 不接受任何旗標，所有參數都讀自 `config.toml`。執行前需�
 | `OUTPUT_ROOT = outputs/` | `config/constants.py` 常數 | 去 `zone_mapping/outputs/` 找輸入而 `FileNotFoundError`，產出也落在錯的樹 |
 | `settings.input.bucket_dir` | `config.toml` `[input]` | 對到不存在的 `zone_mapping/bucket_name1`；實務上不會走到，上一列的輸入檢查會先失敗 |
 
-本套件自己的 `config.toml` 以 `find_project_root`（往上找 `pyproject.toml`）定位，不受
-cwd 影響。
+本套件自己的 `config.toml` 以共用 lib 的 `get_toml_path(__file__)`（往上找
+`pyproject.toml`）定位，不受 cwd 影響。
 
 ## 設定
 
@@ -109,9 +110,9 @@ cwd 影響。
 [input]
 bucket_dir = "bucket_name1"
 date = 2026-05-01
+bucket_minutes = 60         # 事件統計時間粒度（分鐘）
 
 [zone]
-bucket_minutes = 60         # 事件統計時間粒度（分鐘）
 boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像素）；0 = 純內外判定
 ```
 
@@ -119,8 +120,13 @@ boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像
 | --- | --- | --- | --- |
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（cwd 相對） |
 | | `date` | — | 統計日期；未設定時報錯 |
-| `[zone]` | `bucket_minutes` | `60` | 事件統計時間粒度（分鐘），`>= 1` |
-| | `boundary_band_px_1080p` | `25` | `entries` 的區域邊界緩衝帶寬度，`>= 0`，以 1080p（寬 1920）為基準的像素；執行時依各攝影機的 `frame_width` 換算成實際像素（`基準值 × frame_width / 1920`，只用寬度、線性），`0` = 純內外判定且換算後仍是 `0` |
+| | `bucket_minutes` | `60` | 事件統計時間粒度（分鐘），`>= 1`；與 `line_counting`／`flow_report` 的同名欄位是同一個口徑，三包要填一致的值 |
+| `[zone]` | `boundary_band_px_1080p` | `25` | `entries` 的區域邊界緩衝帶寬度，`>= 0`，以 1080p（寬 1920）為基準的像素；執行時依各攝影機的 `frame_width` 換算成實際像素（`基準值 × frame_width / 1920`，只用寬度、線性），`0` = 純內外判定且換算後仍是 `0` |
+
+`[input]` 由共用 lib `vfa_config` 提供、四包同一份定義，故本包也接受 `camera_ids`
+（只有 `video_analyze` 會讀）；`bucket_minutes` 於 issue #79 由 `[zone]` 移到這裡，沿用
+舊位置（含 `ZONE__BUCKET_MINUTES`）會直接報錯並指出新位置與新的環境變數名
+`INPUT__BUCKET_MINUTES`。理由見 [ADR-008](../docs/adr/008-config-section-namespace.md)。
 
 同一個設定值在 1080p 與 4K 上代表同樣的實際距離，不必為混解析度的 bucket 各調一套；
 尺寸來自 `tracking_results.parquet` 的 `frame_width`／`frame_height` 欄位，取捨見
