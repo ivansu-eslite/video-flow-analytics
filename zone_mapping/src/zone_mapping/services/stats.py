@@ -10,7 +10,7 @@
 
 **首格語義與 `line_counting` 相反**：這裡首次出現即在區內算一次 entry（人可能從
 畫面外直接走進區內，沒有「先在區外被看到」那一格）；`line_counting` 的起始側不算
-跨越（見 `docs/adr/001-line-crossing-detection.md`）。
+跨越（見 `docs/adr/line_counting/001-line-crossing-detection.md`）。
 
 判定「人是否在區域內」用落腳點 (foot_x, foot_y)。落腳點由上游 `video_analyze` 算好寫進
 `tracking_results.parquet`（由 head 框推算，推不出來才退回 bbox 底邊中點，見 ADR-009），

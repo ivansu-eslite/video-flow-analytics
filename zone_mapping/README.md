@@ -11,14 +11,14 @@ track 的落腳點 `(foot_x, foot_y)` 做 ray-casting 判定是否落在區域�
 
 落腳點是上游 `video_analyze` 算好寫進 `tracking_results.parquet` 的欄位（由 head 框推算，
 推不出來才退回 bbox 底邊中點），本套件不自行從 bbox 推算；缺這兩欄的舊 parquet 直接
-fail loud。理由見 [ADR-009](../docs/adr/009-head-based-foot-point.md)。
+fail loud。理由見 [ADR-009](../docs/adr/shared/009-head-based-foot-point.md)。
 
 | 指標 | 定義 |
 | --- | --- |
 | `unique_visitors` | 該時段內在區域出現過的不重複 `track_id` 數 |
 | `entries` | 「區域外 → 區域內」的轉換次數，由線段區域（`boundary_band_px_1080p`）濾掉邊界抖動 |
 
-**兩項指標刻意用不同判定**（見 [ADR-006](../docs/adr/006-zone-boundary-band.md)）：
+**兩項指標刻意用不同判定**（見 [ADR-006](../docs/adr/zone_mapping/006-zone-boundary-band.md)）：
 `entries` 是事件型指標，用線段區域的 Schmitt-trigger——落腳點的帶號距離 `> band` 才確認
 在區內、`< -band` 才確認在區外，落在帶內時沿用前一個已確認狀態，因此在邊界附近來回
 徘徊只計一次進入。`unique_visitors` 是佔用型指標，仍用當格的 point-in-polygon 布林值，
@@ -126,11 +126,11 @@ boundary_band_px_1080p = 25 # entries 的線段區域（1080p 基準像素）；
 `[input]` 由共用 lib `vfa_config` 提供、四包同一份定義，故本包也接受 `camera_ids`
 （只有 `video_analyze` 會讀）；`bucket_minutes` 於 issue #79 由 `[zone]` 移到這裡，沿用
 舊位置（含 `ZONE__BUCKET_MINUTES`）會直接報錯並指出新位置與新的環境變數名
-`INPUT__BUCKET_MINUTES`。理由見 [ADR-008](../docs/adr/008-config-section-namespace.md)。
+`INPUT__BUCKET_MINUTES`。理由見 [ADR-008](../docs/adr/shared/008-config-section-namespace.md)。
 
 同一個設定值在 1080p 與 4K 上代表同樣的實際距離，不必為混解析度的 bucket 各調一套；
 尺寸來自 `tracking_results.parquet` 的 `frame_width`／`frame_height` 欄位，取捨見
-[ADR-004](../docs/adr/004-band-resolution-scaling.md)。舊參數 `entry_debounce_frames`
+[ADR-004](../docs/adr/shared/004-band-resolution-scaling.md)。舊參數 `entry_debounce_frames`
 （時間去抖）已移除，沿用會直接報錯並說明語義變更。
 
 `camera_registry.yaml`（攝影機清單與區域定義，放在 `bucket_dir` 根目錄、不進版控）的
@@ -159,7 +159,7 @@ boundary_band_px_1080p = 25 # entries 的線段區域（1080p 基準像素）；
   （分別對應基準值 15／25／30／57.5），資料只來自 2026-07-28 的兩台 4K 攝影機、4 個
   zone。實測建議 60 px（基準值 30），採用的 25 更保守——濾重複計數的力道比實測建議弱。
   **1080p 攝影機的 zone 從未掃過**。數字與取捨見
-  [ADR-006](../docs/adr/006-zone-boundary-band.md)。
+  [ADR-006](../docs/adr/zone_mapping/006-zone-boundary-band.md)。
 - **加寬 band 會同時砍掉真實訪客**：基準值 25（4K 50 px）讓四個 zone 的 `entries` 降
   56–81%，但「貢獻過 entry 的不同人數」也降到原本的 57–80%——只在區域邊緣淺淺待過、
   從未進到深處的人不再被計為進入。`unique_visitors` 不受影響（該欄不吃線段區域）。
@@ -172,8 +172,8 @@ boundary_band_px_1080p = 25 # entries 的線段區域（1080p 基準像素）；
 - **本階段沒產出時，當日整份報表都不會產出**：`flow_report` 的輸入必要性看
   `bucket_dir/camera_registry.yaml` 的定義，registry 裡有 `zones` 定義就必須有
   `zone_counts.parquet`，缺檔會中止整份報表、連出入口三個分頁也不產（見
-  [ADR-005](../docs/adr/005-report-input-requirement-from-snapshot.md)、
-  [ADR-007](../docs/adr/007-remove-registry-snapshot.md)）。上面兩道
+  [ADR-005](../docs/adr/flow_report/005-report-input-requirement-from-snapshot.md)、
+  [ADR-007](../docs/adr/shared/007-remove-registry-snapshot.md)）。上面兩道
   fail-loud 誤擋的代價因此不只是區域那兩頁。
 - **跨日報表會混到兩種口徑**：`flow_report` 以 `append` 累加各日的 `zone_counts.parquet`，
   改動前後產出的 `entries` 語義不同。要口徑一致就得重跑歷史日期，否則需在報表註明

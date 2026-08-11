@@ -164,7 +164,7 @@ Negative
 - **同一份舊 parquet 會出現 `zone_mapping` 照跑、`line_counting` 報錯的不對稱狀態。**
   `zone_mapping` 不讀這兩欄，輸入端也沒有欄位白名單，缺欄位對它沒有影響。這是 fail loud
   決策的直接後果，不是 bug。
-  （**已由 [ADR-006](006-zone-boundary-band.md) 修訂**：`zone_mapping` 的 entry 判定改用
+  （**已由 [ADR-006](../zone_mapping/006-zone-boundary-band.md) 修訂**：`zone_mapping` 的 entry 判定改用
   線段區域後同樣需要換算像素參數，兩包都會擋下缺欄位的舊 parquet，不對稱不再存在。）
 - **參數更名是破壞性變更。** 版控裡原本的預設值是 0，非 0 的值只出現在 `overlay/` 的
   sweep 實驗，所以沒有既有設定是因為「更名」而改變行為；但別處另存的設定檔需要人工改名，

@@ -131,7 +131,7 @@ Negative
 - **舊 parquet 全面失效**：`zone_mapping` 從此擋下缺影像尺寸欄位的 parquet，原本能跑的
   舊資料會停跑，需以現行 `video_analyze` 重跑（GPU）。
 - **`zone_mapping` 擋下的那一天，整份報表都產不出來**：ADR-005 起 `flow_report` 的輸入
-  必要性看 registry 的定義（[ADR-007](007-remove-registry-snapshot.md) 起是
+  必要性看 registry 的定義（[ADR-007](../shared/007-remove-registry-snapshot.md) 起是
   `bucket_dir/camera_registry.yaml`，原為當日輸出目錄下的快照）——裡面有 `zones` 定義就
   必須有 `zone_counts.parquet`，缺檔即中止整個 `export_report_daily`，出入口三個分頁也不會產出。
   因此本 ADR 新增的兩道 fail loud（缺影像尺寸欄位、窄區域）不只影響區域兩頁，誤擋的代價
@@ -145,10 +145,10 @@ Negative
 
 ## Related Links
 
-- [ADR-001](001-line-crossing-detection.md)：計數線的跨越判定，末段描述與 zone 相反的首格語義
-- [ADR-004](004-band-resolution-scaling.md)：像素參數的尺規與影像尺寸來源（本 ADR 修訂其
+- [ADR-001](../line_counting/001-line-crossing-detection.md)：計數線的跨越判定，末段描述與 zone 相反的首格語義
+- [ADR-004](../shared/004-band-resolution-scaling.md)：像素參數的尺規與影像尺寸來源（本 ADR 修訂其
   「zone_mapping 照跑」的不對稱條款）
-- [ADR-005](005-report-input-requirement-from-snapshot.md)：報表的輸入必要性由快照決定
+- [ADR-005](../flow_report/005-report-input-requirement-from-snapshot.md)：報表的輸入必要性由快照決定
   （本 ADR 的 fail loud 因此會擋掉當日整份報表）
 - `overlay/zone_band.py`：本判定的可運作原型（開發用工具，不進版控）
 - `overlay/analysis/`：`zone_newscale.py`（band 掃描）、`zone_combo.py`（空間＋時間並行的
