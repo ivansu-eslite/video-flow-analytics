@@ -1,7 +1,7 @@
 """人流 Excel 報表的非 Pydantic 靜態常數。
 
 從 `services/report.py`／`services/stats.py` 抽出的寫死值集中於此，讓報表結構
-（分頁名、表頭、排序欄、閥值）與程式邏輯分離。
+（分頁名、表頭、排序欄）與程式邏輯分離。
 """
 
 from pathlib import Path
@@ -28,7 +28,7 @@ SHEET_EVENTS = "活動事件"
 # Excel 報表標頭定義。兩個 line 尖峰分頁的表頭相同，只差尖峰時段取自 in_count
 # 還是 out_count，故共用同一份 LINE_PEAK_HEADERS。
 ZONE_HOURLY_HEADERS = ["日期", "星期", "小時", "區域", "人流量"]
-ZONE_PEAK_HEADERS = ["日期", "星期", "區域", "尖峰時段", "尖峰人流", "每日提醒"]
+ZONE_PEAK_HEADERS = ["日期", "星期", "區域", "尖峰時段", "尖峰人流"]
 LINE_HOURLY_HEADERS = [
     "日期",
     "星期",
@@ -47,7 +47,6 @@ LINE_PEAK_HEADERS = [
     "尖峰時段",
     "尖峰進場",
     "尖峰出場",
-    "每日提醒",
 ]
 EVENTS_HEADERS = [
     "日期",
@@ -68,9 +67,3 @@ ZONE_HOURLY_SORT_COLUMNS = ("日期", "小時", "區域")
 ZONE_PEAK_SORT_COLUMNS = ("日期", "區域")
 LINE_HOURLY_SORT_COLUMNS = ("日期", "小時", "計數線")
 LINE_PEAK_SORT_COLUMNS = ("日期", "計數線")
-
-# 用餐時段提醒閥值：(開始小時, 結束小時, 提醒文字)。
-MEAL_THRESHOLDS = (
-    (11, 14, "加強午餐動線"),
-    (17, 20, "加強晚餐動線"),
-)

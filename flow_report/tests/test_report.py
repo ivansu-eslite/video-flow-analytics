@@ -417,7 +417,6 @@ def _make_zone_peak_df(rows):
             "zone": pl.Utf8,
             "peak_period": pl.Utf8,
             "peak_value": pl.Int64,
-            "reminder": pl.Utf8,
         },
         orient="row",
     )
@@ -451,7 +450,6 @@ def _make_line_peak_df(rows):
             "peak_period": pl.Utf8,
             "peak_in": pl.Int64,
             "peak_out": pl.Int64,
-            "reminder": pl.Utf8,
         },
         orient="row",
     )
@@ -466,9 +464,7 @@ def _frames(**kwargs) -> ReportFrames:
 def _zone_frames(date="2026-05-01", weekday="星期五", period="09:00", value=10):
     return _frames(
         zone_hourly=_make_zone_hourly_df([(date, weekday, period, "checkout", value)]),
-        zone_peak=_make_zone_peak_df(
-            [(date, weekday, "checkout", period, value, "無")]
-        ),
+        zone_peak=_make_zone_peak_df([(date, weekday, "checkout", period, value)]),
     )
 
 
@@ -481,8 +477,8 @@ def _full_frames(date="2026-05-01", weekday="星期五", period="09:00"):
         ]
     )
     peak_rows = [
-        (date, weekday, "四樓書店", "main_gate", period, 30, 12, "無"),
-        (date, weekday, "四樓書店", "side_gate", period, 5, 9, "無"),
+        (date, weekday, "四樓書店", "main_gate", period, 30, 12),
+        (date, weekday, "四樓書店", "side_gate", period, 5, 9),
     ]
     return zone._replace(
         line_hourly=line_hourly,

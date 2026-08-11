@@ -4,7 +4,6 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from flow_report.services.stats import (
-    meal_time_reminder,
     peak_lines_per_day,
     peak_per_day,
     rollup_by_period,
@@ -81,21 +80,6 @@ def test_rollup_by_period_keeps_zones_separate():
     assert values_by_zone == {"checkout": 100, "entrance": 10}
 
 
-def test_meal_time_reminder_boundaries():
-    cases = {
-        10: "無",
-        11: "加強午餐動線",
-        13: "加強午餐動線",
-        14: "無",
-        16: "無",
-        17: "加強晚餐動線",
-        19: "加強晚餐動線",
-        20: "無",
-    }
-    for hour, expected in cases.items():
-        assert meal_time_reminder(hour) == expected, hour
-
-
 def _make_rollup(rows):
     return pl.DataFrame(
         rows,
@@ -123,11 +107,10 @@ def test_peak_per_day_picks_max_value_per_zone():
     checkout = result.filter(pl.col("zone") == "checkout").row(0, named=True)
     assert checkout["peak_period"] == "19:00"
     assert checkout["peak_value"] == 1246
-    assert checkout["reminder"] == "加強晚餐動線"
 
     entrance = result.filter(pl.col("zone") == "entrance").row(0, named=True)
     assert entrance["peak_period"] == "11:00"
-    assert entrance["reminder"] == "加強午餐動線"
+    assert entrance["peak_value"] == 282
 
 
 def test_peak_per_day_ties_pick_earlier_period():
@@ -253,12 +236,10 @@ def test_peak_lines_per_day_metric_column_decides_peak_period():
     peak_in = peak_lines_per_day(df, "in_count").row(0, named=True)
     assert peak_in["peak_period"] == "12:00"
     assert (peak_in["peak_in"], peak_in["peak_out"]) == (200, 30)
-    assert peak_in["reminder"] == "加強午餐動線"
 
     peak_out = peak_lines_per_day(df, "out_count").row(0, named=True)
     assert peak_out["peak_period"] == "19:00"
     assert (peak_out["peak_in"], peak_out["peak_out"]) == (50, 400)
-    assert peak_out["reminder"] == "加強晚餐動線"
 
 
 def test_peak_lines_per_day_ties_pick_earlier_period():
@@ -284,7 +265,7 @@ def test_peak_lines_per_day_one_row_per_date_and_line():
     assert result.height == 3
     assert result.columns == [
         "date", "weekday", "line_group", "line",
-        "peak_period", "peak_in", "peak_out", "reminder",
+        "peak_period", "peak_in", "peak_out",
     ]
 
 
@@ -302,6 +283,11 @@ def test_peak_lines_per_day_rerun_produces_identical_row_order():
 
 
 def test_peak_lines_per_day_handles_empty_input():
+    # 當日無任何跨越事件時 line_counting 會寫出 0 列的正常產物；欄位仍須完整，
+    # 寫入 report.xlsx 時是靠欄序對齊表頭
     result = peak_lines_per_day(_make_line_rollup([]), "in_count")
     assert result.height == 0
-    assert result.schema["reminder"] == pl.Utf8
+    assert result.columns == [
+        "date", "weekday", "line_group", "line",
+        "peak_period", "peak_in", "peak_out",
+    ]
