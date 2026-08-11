@@ -1,7 +1,7 @@
 """人流 Excel 報表的非 Pydantic 靜態常數。
 
-從 `services/report.py`／`services/stats.py` 抽出的寫死值集中於此，讓報表結構
-（分頁名、表頭、排序欄）與程式邏輯分離。
+從 `services/report.py` 抽出的寫死值集中於此，讓報表結構（分頁名、表頭、排序欄）
+與程式邏輯分離。
 """
 
 from pathlib import Path

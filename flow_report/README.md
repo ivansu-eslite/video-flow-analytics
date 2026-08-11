@@ -37,8 +37,9 @@
 >
 > **三個尖峰分頁移除了「每日提醒」欄**（原本依尖峰時段所在小時給出用餐動線建議，屬寫死
 > 的業務判讀規則，不是統計量）。同樣**不做遷移**：既有 `report.xlsx` 的表頭與歷史值留著，
-> 之後 append 的新列該欄留白；要乾淨表頭需自行刪掉該檔重跑。BI 端若已接該欄，新資料會是
-> 空值。
+> 之後 append 的新列該欄留白。BI 端若已接該欄，新資料會是空值。要換成乾淨表頭只能刪掉該
+> 檔重建，但 `export_report_daily` 一次只彙總單一日期，得把要保留的每一天逐日重跑才補得
+> 回來。
 
 **進入點是函式呼叫，CLI 只是外殼**：核心是
 `export_report_daily(date, bucket_dir, period_minutes, metric, on_duplicate_date,
@@ -50,7 +51,7 @@ bucket_minutes, output_root=OUTPUT_ROOT) -> Path`（在 `services/report.py`）�
 | 目錄 | 內容 |
 | --- | --- |
 | `main.py` | CLI 外殼：讀 `settings` → 組參數 → 呼叫 `export_report_daily` |
-| `config/constants.py` | 非 Pydantic 靜態常數（分頁名、表頭、閥值、預設路徑等） |
+| `config/constants.py` | 非 Pydantic 靜態常數（分頁名、表頭、排序欄、預設路徑等） |
 | `models/config.py` | pydantic-settings 設定模型與全域單例 `settings` |
 | `services/report.py` | 報表 orchestration、I/O 與 Excel 讀寫 |
 | `services/stats.py` | 時區轉換、期間彙總、尖峰計算等純函式 |
