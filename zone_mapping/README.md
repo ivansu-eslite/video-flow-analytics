@@ -16,13 +16,13 @@ fail loud。理由見 [ADR-009](../docs/adr/009-head-based-foot-point.md)。
 | 指標 | 定義 |
 | --- | --- |
 | `unique_visitors` | 該時段內在區域出現過的不重複 `track_id` 數 |
-| `entries` | 「區域外 → 區域內」的轉換次數，由區域邊界緩衝帶（`boundary_band_px_1080p`）濾掉邊界抖動 |
+| `entries` | 「區域外 → 區域內」的轉換次數，由線段區域（`boundary_band_px_1080p`）濾掉邊界抖動 |
 
 **兩項指標刻意用不同判定**（見 [ADR-006](../docs/adr/006-zone-boundary-band.md)）：
-`entries` 是事件型指標，用緩衝帶的 Schmitt-trigger——落腳點的帶號距離 `> band` 才確認
+`entries` 是事件型指標，用線段區域的 Schmitt-trigger——落腳點的帶號距離 `> band` 才確認
 在區內、`< -band` 才確認在區外，落在帶內時沿用前一個已確認狀態，因此在邊界附近來回
 徘徊只計一次進入。`unique_visitors` 是佔用型指標，仍用當格的 point-in-polygon 布林值，
-不吃這個黏著狀態（否則走出區域後停在邊界外緩衝帶內的人，會在其後每個時段都被算成區內
+不吃這個黏著狀態（否則走出區域後停在邊界外線段區域內的人，會在其後每個時段都被算成區內
 訪客）。**`entries` 首次出現即在區內算一次進入**，與 `line_counting` 的「起始側不計」
 相反，是刻意的。
 
@@ -113,7 +113,7 @@ date = 2026-05-01
 bucket_minutes = 60         # 事件統計時間粒度（分鐘）
 
 [zone]
-boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像素）；0 = 純內外判定
+boundary_band_px_1080p = 25 # entries 的線段區域（1080p 基準像素）；0 = 純內外判定
 ```
 
 | 區塊 | 欄位 | 預設 | 約束 / 說明 |
@@ -121,7 +121,7 @@ boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（cwd 相對） |
 | | `date` | — | 統計日期；未設定時報錯 |
 | | `bucket_minutes` | `60` | 事件統計時間粒度（分鐘），`>= 1`；與 `line_counting`／`flow_report` 的同名欄位是同一個口徑，三包要填一致的值 |
-| `[zone]` | `boundary_band_px_1080p` | `25` | `entries` 的區域邊界緩衝帶寬度，`>= 0`，以 1080p（寬 1920）為基準的像素；執行時依各攝影機的 `frame_width` 換算成實際像素（`基準值 × frame_width / 1920`，只用寬度、線性），`0` = 純內外判定且換算後仍是 `0` |
+| `[zone]` | `boundary_band_px_1080p` | `25` | `entries` 的線段區域寬度，`>= 0`，以 1080p（寬 1920）為基準的像素；執行時依各攝影機的 `frame_width` 換算成實際像素（`基準值 × frame_width / 1920`，只用寬度、線性），`0` = 純內外判定且換算後仍是 `0` |
 
 `[input]` 由共用 lib `vfa_config` 提供、四包同一份定義，故本包也接受 `camera_ids`
 （只有 `video_analyze` 會讀）；`bucket_minutes` 於 issue #79 由 `[zone]` 移到這裡，沿用
@@ -141,7 +141,7 @@ boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像
 - **`zone` 名稱須全域唯一**：不只同一攝影機內不可重複，跨攝影機也不可重複（下游報表以
   區域名稱、不含 `camera_id` 分組彙總，同名區域會被合併）。
 - **`polygon` 至少需要 3 個頂點**，座標為該攝影機固定解析度下的像素座標。
-- **`polygon` 要寬到容得下緩衝帶**：內切半徑小於該攝影機換算後的 `boundary_band_px_1080p`
+- **`polygon` 要寬到容得下線段區域**：內切半徑小於該攝影機換算後的 `boundary_band_px_1080p`
   時直接報錯。這種區域內部沒有任何點能滿足「帶號距離 > band」，`entries` 會恆為 0；
   報錯訊息帶算出的半徑與建議上限（半徑為格點取樣的下界，會略微低估）。
 - **`participates_in_zone_mapping = false`** 的攝影機直接跳過，不看其 `zones` 內容。
@@ -162,7 +162,7 @@ boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像
   [ADR-006](../docs/adr/006-zone-boundary-band.md)。
 - **加寬 band 會同時砍掉真實訪客**：基準值 25（4K 50 px）讓四個 zone 的 `entries` 降
   56–81%，但「貢獻過 entry 的不同人數」也降到原本的 57–80%——只在區域邊緣淺淺待過、
-  從未進到深處的人不再被計為進入。`unique_visitors` 不受影響（該欄不吃緩衝帶）。
+  從未進到深處的人不再被計為進入。`unique_visitors` 不受影響（該欄不吃線段區域）。
 - **內切半徑檢查是必要條件，不是充分條件**：通過檢查（半徑 > band）不代表 band 可用。
   實測那四個 zone 的內切半徑 141–218 px，但 4K 115 px 的 band 仍讓三個代表性 track
   完全不再被計入。
@@ -185,7 +185,7 @@ boundary_band_px_1080p = 25 # entries 的區域邊界緩衝帶（1080p 基準像
 
 | 路徑 | 讀 / 寫 | 內容 |
 | --- | --- | --- |
-| `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（緩衝帶寬度的解析度換算靠它，issue #63 起才有）與 `foot_x`／`foot_y`（落腳點，本階段不自行從 bbox 推算，issue #72 起才有）四欄，缺任一欄都直接報錯要求重跑 `video_analyze`——只有 issue #72 之後產出的檔案才同時具備 |
+| `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（線段區域寬度的解析度換算靠它，issue #63 起才有）與 `foot_x`／`foot_y`（落腳點，本階段不自行從 bbox 推算，issue #72 起才有）四欄，缺任一欄都直接報錯要求重跑 `video_analyze`——只有 issue #72 之後產出的檔案才同時具備 |
 | `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與區域幾何 |
 | `outputs/{bucket}/{date}/zone_counts.parquet` | 寫 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries` |
 

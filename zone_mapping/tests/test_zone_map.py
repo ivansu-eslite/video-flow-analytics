@@ -10,7 +10,7 @@ from zone_mapping.services.zone_map import _resolve_band_px, map_zones_daily
 
 _TAIPEI = ZoneInfo("Asia/Taipei")
 
-# 邊長 200 的正方形，內切半徑 100：容得下預設的 25 px 緩衝帶（不傳 band 參數的
+# 邊長 200 的正方形，內切半徑 100：容得下預設的 25 px 線段區域（不傳 band 參數的
 # 測試才不會被「窄區域 fail loud」擋在到達待測邏輯之前）。
 _SQUARE_200 = [[0, 0], [200, 0], [200, 200], [0, 200]]
 
@@ -182,10 +182,10 @@ def test_boundary_band_scales_with_each_camera_frame_width(tmp_path):
 
     兩台攝影機給完全相同的 zone 與軌跡（腳底離邊界 15 px），
     `boundary_band_px_1080p = 10`：
-    - cam001（1920）換算後緩衝帶 10 px < 15 → 確認在區內，算一次進入。
-    - cam002（3840）換算後緩衝帶 20 px > 15 → 整段都在緩衝帶內，沒有已確認的進入。
+    - cam001（1920）換算後線段區域 10 px < 15 → 確認在區內，算一次進入。
+    - cam002（3840）換算後線段區域 20 px > 15 → 整段都在線段區域內，沒有已確認的進入。
 
-    `unique_visitors` 兩台都是 1（腳底點確實落在多邊形內），順帶鎖住「緩衝帶只影響
+    `unique_visitors` 兩台都是 1（腳底點確實落在多邊形內），順帶鎖住「線段區域只影響
     entries」。沒換算（兩台都用 10）或換算方向寫反（3840 用 5）時 cam002 會多算一次。
     """
     bucket_dir = tmp_path / "bucket_test"
@@ -295,7 +295,7 @@ def test_zero_band_stays_zero_at_any_resolution(tmp_path):
 
 
 def test_zone_narrower_than_band_fails_loud(tmp_path):
-    """內切半徑小於緩衝帶的 zone 要報錯：緩衝帶吃掉整個區域內部後，該 zone 的
+    """內切半徑小於線段區域的 zone 要報錯：線段區域吃掉整個區域內部後，該 zone 的
     entries 會恆為 0，靜默產出一份全是 0 的統計比中止危險得多。
 
     訊息要帶得出算出的半徑與建議上限（1080p 基準值），誤擋時操作的人才知道往哪調。
@@ -309,7 +309,7 @@ def test_zone_narrower_than_band_fails_loud(tmp_path):
                 "camera_id": "cam001",
                 "location": "loc",
                 "ip": "127.0.0.1",
-                # 邊長 10 的正方形，內切半徑僅 5 px，放不下預設的 25 px 緩衝帶
+                # 邊長 10 的正方形，內切半徑僅 5 px，放不下預設的 25 px 線段區域
                 "zones": [
                     {"name": "zone_a", "polygon": [[0, 0], [10, 0], [10, 10], [0, 10]]}
                 ],
@@ -337,7 +337,7 @@ def test_zone_narrower_than_band_fails_loud(tmp_path):
 
 def test_tracking_results_without_frame_size_fails_loud(tmp_path):
     """舊版 video_analyze 產出的 parquet 沒有影像尺寸欄位：直接報錯中止，不可
-    退回「把設定值當成實際像素」——那會在 4K 攝影機上靜默套用只有一半寬的緩衝帶。"""
+    退回「把設定值當成實際像素」——那會在 4K 攝影機上靜默套用只有一半寬的線段區域。"""
     bucket_dir = tmp_path / "bucket_test"
     bucket_dir.mkdir()
     _write_registry(
@@ -423,7 +423,7 @@ def test_tracking_results_without_foot_point_fails_loud(tmp_path):
 
 
 def test_multiple_frame_widths_for_one_camera_fails_loud(tmp_path):
-    """同一台攝影機出現多個 frame_width：靜默取其中一個會讓半天的緩衝帶用錯尺度，
+    """同一台攝影機出現多個 frame_width：靜默取其中一個會讓半天的線段區域用錯尺度，
     須報錯（上游整天解析度固定，出現這種資料代表 parquet 是拼接出來的）。"""
     bucket_dir = tmp_path / "bucket_test"
     bucket_dir.mkdir()

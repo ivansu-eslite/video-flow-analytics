@@ -15,7 +15,7 @@ OUTPUT_ROOT = Path("outputs")
 # 表示的值，執行時各攝影機依 `frame_width / 1920` 換算成自己的實際像素（見 ADR-004）。
 BASELINE_FRAME_WIDTH = 1920
 
-# 區域邊界緩衝帶寬度的預設值（1080p 基準像素），由實測挑出，見 README「已知限制」。
+# 線段區域寬度的預設值（1080p 基準像素），由實測挑出，見 README「已知限制」。
 # `ZoneConfig` 與 `map_zones_daily` 的簽名共用這一份，避免「預設」在同一個套件裡
 # 有兩個意思；`config.toml` 無法引用常數，那一份由 tests/test_config.py 鎖住一致性。
 DEFAULT_BOUNDARY_BAND_PX_1080P = 25
