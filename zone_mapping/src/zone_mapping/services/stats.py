@@ -2,11 +2,11 @@
 
 人流指標（兩者刻意用不同判定，見 ADR-006）：
 - unique_visitors：該時段內腳底落在區域內的不重複 track_id 數（不重複訪客）。純粹
-  用 `points_in_polygon` 的布林值，不吃緩衝帶的黏著狀態——佔用型指標若吃了黏著
-  狀態，走出區域後停在邊界外緩衝帶內的人會在其後每個時段都被算成區內訪客。
+  用 `points_in_polygon` 的布林值，不吃線段區域的黏著狀態——佔用型指標若吃了黏著
+  狀態，走出區域後停在邊界外線段區域內的人會在其後每個時段都被算成區內訪客。
 - entries：每個 track 依時間序偵測「區域外 → 區域內」的轉換次數，歸戶到轉換發生
   那格的時段（同一人離開再進入算多次；首次出現即在區域內也算一次進入）。事件型
-  指標，用區域邊界緩衝帶（Schmitt-trigger）濾掉腳底點在邊界附近抖動的重複計數。
+  指標，用線段區域（Schmitt-trigger）濾掉腳底點在邊界附近抖動的重複計數。
 
 **首格語義與 `line_counting` 相反**：這裡首次出現即在區內算一次 entry（人可能從
 畫面外直接走進區內，沒有「先在區外被看到」那一格）；`line_counting` 的起始側不算
@@ -60,7 +60,7 @@ def signed_distance_to_polygon(
     點錨定側別（`line_counting` 的做法與此刻意不同，見 ADR-006）。
 
     多邊形自動閉合：`Zone.polygon` 不重複首點，最後一點連回第一點的那條邊也要算，
-    否則收尾邊附近的緩衝帶會整段失效。
+    否則收尾邊附近的線段區域會整段失效。
 
     Args:
         xs: 待判定點的 x 座標，長度 N。
@@ -102,7 +102,7 @@ def count_zone_visits(
 
     輸入 cam_sub 需已含 foot_x / foot_y / time_bucket 欄位，且只包含該攝影機的列。
 
-    `entries` 用區域邊界緩衝帶的 Schmitt-trigger：帶號距離 `> band` 確認在內、
+    `entries` 用線段區域的 Schmitt-trigger：帶號距離 `> band` 確認在內、
     `< -band` 確認在外、落在帶內則沿用前一個已確認狀態，只有已確認狀態由外翻內才算
     一次進入。腳底點在邊界附近抖動時整段維持同一個已確認狀態，因此只計一次；
     `band = 0` 退化成純內外判定。
@@ -113,7 +113,7 @@ def count_zone_visits(
         cam_sub: 單一攝影機的追蹤明細，需已含 `foot_x`／`foot_y`／
             `time_bucket`／`track_id`／`timestamp` 欄位。
         zone: 要套用的區域定義。
-        boundary_band_px: 區域邊界緩衝帶的半寬，**實際像素**（1080p 基準值的換算
+        boundary_band_px: 線段區域的半寬，**實際像素**（1080p 基準值的換算
             在 `services/zone_map.py` 完成，本模組維持純幾何）。
 
     Returns:
@@ -140,7 +140,7 @@ def count_zone_visits(
             .then(1)
             .when(pl.col("_signed_d") < -boundary_band_px)
             .then(-1)
-            .otherwise(None)  # 落在緩衝帶內：留 null 交給 forward_fill 沿用前一格
+            .otherwise(None)  # 落在線段區域內：留 null 交給 forward_fill 沿用前一格
             .alias("_side")
         )
         .with_columns(

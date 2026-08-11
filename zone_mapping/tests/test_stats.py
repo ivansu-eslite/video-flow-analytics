@@ -22,8 +22,8 @@ _L_SHAPE = np.array(
 _ZONE = Zone(name="zone_a", polygon=[(0, 0), (10, 0), (10, 10), (0, 10)])
 _DEEP_INSIDE = (5.0, 5.0)  # 距邊界 5
 _DEEP_OUTSIDE = (-5.0, 5.0)  # 距邊界 5（區外）
-_JITTER_INSIDE = (0.5, 5.0)  # 距邊界 0.5（區內），band=2 時落在緩衝帶
-_JITTER_OUTSIDE = (-0.5, 5.0)  # 距邊界 0.5（區外），band=2 時落在緩衝帶
+_JITTER_INSIDE = (0.5, 5.0)  # 距邊界 0.5（區內），band=2 時落在線段區域
+_JITTER_OUTSIDE = (-0.5, 5.0)  # 距邊界 0.5（區外），band=2 時落在線段區域
 _BAND = 2.0
 
 
@@ -63,7 +63,7 @@ def test_signed_distance_positive_inside_negative_outside():
 
 def test_signed_distance_is_zero_on_boundary():
     """恰在邊界上的點距離為 0；內外符號由 points_in_polygon 給（邊界結果依實作而定），
-    因此 band=0 時這種點會落在緩衝帶內而沿用前一格狀態。"""
+    因此 band=0 時這種點會落在線段區域內而沿用前一格狀態。"""
     signed_d, inside = signed_distance_to_polygon(
         np.array([0.0]), np.array([5.0]), _SQUARE
     )
@@ -78,7 +78,7 @@ def test_signed_distance_accounts_for_closing_edge():
     """多邊形要自動閉合：靠近「最後一點連回第一點」那條邊的點，距離要算到該邊。
 
     `_SQUARE` 的收尾邊是左邊 x=0。點 (1, 5) 離它 1 px；漏算收尾邊會退而取到其他邊的
-    5 px，緩衝帶在該邊整段失效（該邊附近的抖動又會被計成進入）。
+    5 px，線段區域在該邊整段失效（該邊附近的抖動又會被計成進入）。
     """
     signed_d, _ = signed_distance_to_polygon(
         np.array([1.0]), np.array([5.0]), _SQUARE
@@ -123,9 +123,9 @@ def test_entries_counted_once_when_track_starts_inside():
 
 
 def test_boundary_jitter_inside_band_counts_single_entry():
-    """腳底點在邊界附近反覆進出（皆落在緩衝帶內）只算一次進入。
+    """腳底點在邊界附近反覆進出（皆落在線段區域內）只算一次進入。
 
-    序列：確認在外 → 帶內來回四次 → 確認在內 → 帶內再來回 → 確認在內。緩衝帶讓
+    序列：確認在外 → 帶內來回四次 → 確認在內 → 帶內再來回 → 確認在內。線段區域讓
     已確認狀態黏著，只有第一次真的越過帶才翻轉。
     """
     cam_sub = _make_cam_sub(
@@ -166,7 +166,7 @@ def test_same_jitter_without_band_counts_every_crossing():
 
 
 def test_leaving_beyond_band_and_returning_counts_two_entries():
-    """真的離開（越過緩衝帶外側）再回來算兩次進入——緩衝帶不能把重複造訪也吃掉。"""
+    """真的離開（越過線段區域外側）再回來算兩次進入——線段區域不能把重複造訪也吃掉。"""
     cam_sub = _make_cam_sub([_DEEP_INSIDE, _DEEP_OUTSIDE, _DEEP_INSIDE])
 
     result = count_zone_visits(cam_sub, _ZONE, _BAND)
@@ -187,10 +187,10 @@ def test_zero_band_matches_plain_inside_outside_transitions():
 
 
 def test_unique_visitors_ignores_committed_state():
-    """`unique_visitors` 不吃緩衝帶的黏著狀態：走出區域後停在邊界外緩衝帶內的人，
+    """`unique_visitors` 不吃線段區域的黏著狀態：走出區域後停在邊界外線段區域內的人，
     在其後的時段不算區內訪客（否則佔用型指標會被事件型判定汙染）。
 
-    第二個時段那格的已確認狀態仍是「在區內」（腳底點還在緩衝帶內），但 `in_zone`
+    第二個時段那格的已確認狀態仍是「在區內」（腳底點還在線段區域內），但 `in_zone`
     為 False，該時段完全沒有統計列；吃了黏著狀態的話會多出一列 unique_visitors=1。
     """
     cam_sub = _make_cam_sub([_DEEP_INSIDE, _JITTER_OUTSIDE], bucket_index=[0, 1])
@@ -203,7 +203,7 @@ def test_unique_visitors_ignores_committed_state():
 def test_committed_state_does_not_leak_across_tracks():
     """已確認狀態依 `track_id` 分組，不會從前一個 track 洩漏到下一個。
 
-    三個 track：`t1`／`t2` 各自全程在區內（各 1 次進入），`t3` 前兩格都在緩衝帶內、
+    三個 track：`t1`／`t2` 各自全程在區內（各 1 次進入），`t3` 前兩格都在線段區域內、
     最後一格才確認在區外（0 次進入），正確答案是 2。輸入按時間交錯，模擬多人同時在
     畫面裡的實際明細。少了 `over("track_id")` 兩處都會靜默算錯：
 
