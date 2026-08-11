@@ -98,8 +98,11 @@ CLI 不接受任何旗標，所有參數都讀自 `config.toml`。執行前需�
 
 | 路徑 | 來源 | 在 `flow_report/` 內執行時 |
 | --- | --- | --- |
-| `OUTPUT_ROOT = outputs/` | `config/constants.py` 常數 | 去 `flow_report/outputs/` 找輸入而 `FileNotFoundError`，報表也落在錯的樹 |
-| `settings.input.bucket_dir` | `config.toml` `[input]` | 只取其目錄名來組路徑，故實務上不會走到；上一列的輸入檢查會先失敗 |
+| `settings.input.bucket_dir` | `config.toml` `[input]` | **最先失敗的就是這個**：`load_registry` 吃完整路徑，去 `flow_report/bucket_name1/` 找 registry 而 `FileNotFoundError: 找不到設備登錄檔` |
+| `OUTPUT_ROOT = outputs/` | `config/constants.py` 常數 | 會去 `flow_report/outputs/` 找輸入、報表也落在錯的樹，但上一列已先拋錯，實務上走不到這裡 |
+
+`bucket_dir` 在本階段有兩種用法，只有前者受 cwd 影響：`registry_path`／`load_registry`
+吃**完整路徑**（故 cwd 錯了就找不到 registry），輸出目錄則只取 `bucket_path.name`。
 
 本套件自己的 `config.toml` 以共用 lib 的 `get_toml_path(__file__)`（往上找
 `pyproject.toml`）定位，不受 cwd 影響。
@@ -126,7 +129,7 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 
 | 區塊 | 欄位 | 預設 | 約束 / 說明 |
 | --- | --- | --- | --- |
-| `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（cwd 相對）；本階段只取其目錄名來組出 `outputs/{bucket}/` 路徑 |
+| `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（cwd 相對）；本階段有兩種用法——讀 `camera_registry.yaml` 吃**完整路徑**，組 `outputs/{bucket}/` 則只取其目錄名（見上方「執行位置」） |
 | | `date` | — | 彙總日期；未設定時報錯 |
 | | `bucket_minutes` | `60` | 上游 `zone_counts.parquet`／`line_counts.parquet` 的時段粒度（分鐘），`>= 1`；須與產生這兩份 parquet 時的 `zone_mapping`／`line_counting` 設定一致 |
 | `[report]` | `period_minutes` | `60` | 報表彙總粒度（分鐘），`>= 1`，且**須為 `input.bucket_minutes` 的倍數**（否則 fail-loud 報錯） |

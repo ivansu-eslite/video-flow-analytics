@@ -126,7 +126,7 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 
 ### `camera_registry.yaml`（資料樣貌）
 
-放在每個 `bucket_dir` 根目錄下。**此檔不進版控**（隨 `bucket_name*/` 一起被 `.gitignore`
+放在每個 `bucket_dir` 根目錄下。**此檔不進版控**（隨 `bucket_*/` 一起被 `.gitignore`
 排除），需依實際部署環境人工維護。
 
 攝影機片段的目錄結構為：
