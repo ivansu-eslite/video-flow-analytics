@@ -4,7 +4,9 @@
 - in_count：該時段內 track 由外側跨越到內側（往 `inside_point` 那一側）的次數。
 - out_count：該時段內 track 由內側跨越到外側的次數。
 
-判定「人在線的哪一側」用 bbox 腳底中心點 ((x1+x2)/2, y2) 到計數線的帶號垂直距離。
+判定「人在線的哪一側」用落腳點 (foot_x, foot_y) 到計數線的帶號垂直距離。落腳點由上游
+`video_analyze` 算好寫進 `tracking_results.parquet`（由 head 框推算，推不出來才退回
+bbox 底邊中點，見 ADR-009），本套件不自己從 bbox 推算。
 跨越偵測用「帶線段區域的 Schmitt-trigger」：`crossing_band_px` 把細線加粗成有寬度的線段區域，
 濾除腳底點在線附近的抖動／駐留；`= 0` 退化為細線純零交越。本模組收到的
 `crossing_band_px` 已是該攝影機的實際像素——設定檔的值以 1080p 為基準，換算在
@@ -60,7 +62,8 @@ def signed_distance_to_polyline(
     # `(p - a) - t*ab`**：後者多一次捨入，會讓部分點在 1 ulp 上改由另一段勝出而翻掉
     # 側別（回歸測試見 tests/test_stats.py 的 wedge 那條）。
     # 以上等價性以**有限輸入**為前提：`d2 < best_d2` 對 NaN 恆為 False，含 NaN 的點
-    # 會拿到初始值 0.0 而非 NaN。呼叫端的 foot_x/foot_y 由 bbox 算出、必為有限值。
+    # 會拿到初始值 0.0 而非 NaN。呼叫端的 foot_x/foot_y 由上游從 bbox 與 head 框算出、
+    # 必為有限值（推算不出來時退回 bbox 底邊中點，不會留下空值，見 ADR-009）。
     best_d2 = np.full(px.shape, np.inf)
     signed = np.zeros(px.shape)
     for i in range(len(pts) - 1):

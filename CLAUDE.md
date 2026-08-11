@@ -13,8 +13,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `uv.lock`／`.venv`。
 
 `zone_mapping` 與 `line_counting` 的輸入相同（`tracking_results.parquet` ＋
-`camera_registry.yaml`），都以腳底點做純 CPU 向量化判定，差別在幾何——zone 判「腳底是否
-落在多邊形內」（區域佔用），line 判「腳底是否跨越計數線及其方向」（方向性進出）。
+`camera_registry.yaml`），都以落腳點做純 CPU 向量化判定，差別在幾何——zone 判「落腳點是否
+落在多邊形內」（區域佔用），line 判「落腳點是否跨越計數線及其方向」（方向性進出）。
 
 本 repo 原為單一套件 `src/video_flow_analytics/`，2026-07 拆成 `video_analyze`／`zone_mapping`／
 `flow_report` 三包（issue #18），同月再收斂成 uv workspace（issue #56），其後新增
@@ -38,7 +38,7 @@ uv run --package line_counting line_counting       # 計數線進出人數統計
 uv run --package flow_report   flow_report         # 報表彙總 → report.xlsx
 
 uv run --directory <pkg> ruff check .              # lint；<pkg> = video_analyze / zone_mapping / line_counting / flow_report
-uv run --directory <pkg> pytest                    # 測試（四包各 6／3／3／3 支測試檔）
+uv run --directory <pkg> pytest                    # 測試（四包各 8／3／3／3 支測試檔）
 
 uv run --directory libs/vfa_registry pytest        # 共用 lib 的測試（4 支）自成一套，不在四包底下
 uv run --directory libs/vfa_registry ruff check .
@@ -79,7 +79,11 @@ Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態�
 `camera_registry.yaml`，說明為何不補回溯替代方案、以及被接受的靜默錯位範圍（修訂 ADR-005
 的資料來源）；ADR-008：設定的頂層區塊名是跨四包的全域環境變數命名空間，`[input]` 因此
 由 `libs/vfa_config` 提供單一定義、欄位取聯集，說明為何不改用套件前綴、為何否決把
-`bucket_minutes` 寫進 parquet metadata，並修訂「各包只保留自己讀到的區塊」那條。
+`bucket_minutes` 寫進 parquet metadata，並修訂「各包只保留自己讀到的區塊」那條；
+ADR-009：落腳點由 head 框推算並上移成 `tracking_results.parquet` 的欄位，記錄多候選
+head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能進 tracker、ADR-001／003／
+004／006 的判定輸入點定義隨之改變，以及**計數會大幅上升**（本機重跑 zone entries
+最多 74 → 264）——方向是否正確只能靠疊圖目視，正式環境上線前需求方要自行判斷。
 
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
 
@@ -97,6 +101,24 @@ Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態�
   `zone_mapping` 會不會直接崩；換算與檢查的位置、以及為何不改用「人形肩寬百分比」當尺規，
   見 ADR-004。
 
+### 落腳點是資料欄位，不是各包各自算的公式（跨套件硬性契約）
+
+`tracking_results.parquet` 帶 `foot_x`／`foot_y`（issue #72）：人站在地面的位置，由
+`video_analyze` 用 head 框對 fbody 框中心做點反射推算（`foot = 2 × C_fbody − H`，
+`H` 為 head 框頂邊中點），推算不出來才退回舊定義 `((x1+x2)/2, y2)`。改動前這條公式由各
+消費端從 bbox 現算，散在 `line_map.py`／`zone_map.py` 與 overlay 五個模組共十餘處。
+
+- **只能在上游算**：推算需要 head 框，而 head **不進 tracker**——送進去的話同一個人會多
+  出一條頭部軌跡，`track_id` 的語義從「一個人」變成「一個偵測目標」，下游的不重複訪客與
+  進出人數直接翻倍，而輸出檔本身完全正常。偵測 `classes` 因此是 `[0, 2]`，但
+  `services/inference.py` 只把 fbody 子集餵給 ByteTracker。
+- 缺這兩欄的舊 parquet 被 `line_counting` 與 `zone_mapping` 兩包 fail loud 擋下，與影像
+  尺寸欄位同一道檢查。`[foot_point].method = "bbox_bottom"` 可切回舊定義；此時
+  `classes` 不必含 head，但 `method = "head"` 卻少了 head 會直接拋錯（否則每列都退回
+  框底邊中點，改動靜默失效）。
+- 配對條件、多候選 head 的選法（實測推翻了規劃階段的直覺判準）與被否決的替代方案
+  （OBB／pose／ground plane）見 [ADR-009](docs/adr/009-head-based-foot-point.md)。
+
 ### 四包共用碼的處理方式
 
 - **`registry.py`、`structured_logging.py` → 抽成 `libs/` 共用 lib（issue #48）。**
@@ -109,8 +131,8 @@ Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態�
   本身無需改碼。
 - **`config.py`：私有區塊各包分開，`[input]` 抽成 `libs/vfa_config`（issue #79）。**
   各包只保留自己 `run_*` 實際讀到的**私有**區塊（`video_analyze` 的
-  `tracker`/`model`/`output`；`zone_mapping` 的 `zone`；`line_counting` 的 `line`；
-  `flow_report` 的 `report`）；四包都有的 `[input]` 則由 `libs/vfa_config` 提供單一
+  `tracker`/`model`/`foot_point`/`output`；`zone_mapping` 的 `zone`；`line_counting` 的
+  `line`；`flow_report` 的 `report`）；四包都有的 `[input]` 則由 `libs/vfa_config` 提供單一
   `InputConfig`，欄位取四包需求的**聯集**（`bucket_dir`/`date`/`camera_ids`/`bucket_minutes`），
   `find_project_root`／`get_toml_path` 一併抽在此 lib。四包皆已 DDD 重構（`flow_report`
   issue #42、`zone_mapping` issue #46、`video_analyze` issue #50、`line_counting` issue #41

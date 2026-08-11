@@ -18,7 +18,13 @@ from pydantic_settings import SettingsConfigDict
 from vfa_config import get_toml_path
 
 from video_analyze.models import config as config_module
-from video_analyze.models.config import AppConfig, ModelConfig, TrackerConfig, load_config
+from video_analyze.models.config import (
+    AppConfig,
+    FootPointConfig,
+    ModelConfig,
+    TrackerConfig,
+    load_config,
+)
 
 # 設定來源含環境變數，且欄位名未加前綴：執行環境剛好有這些變數時會蓋掉 toml 的值，
 # 讓測試結果取決於誰的機器在跑。逐一清掉，測的才是「從這份 toml 載入」的行為。
@@ -27,6 +33,8 @@ _ENV_OVERRIDES = (
     "MODEL",
     "OUTPUT",
     "INPUT",
+    "FOOT_POINT",
+    "FOOT_POINT__METHOD",
     "MODEL__CLASSES",
     "MODEL__BATCH",
     "MODEL__MODEL_PATH",
@@ -59,8 +67,9 @@ def _config_class(toml_path) -> type[AppConfig]:
     return _ScopedConfig
 
 
-def test_model_config_classes_defaults_to_fbody():
-    assert ModelConfig().classes == [2]
+def test_model_config_classes_defaults_to_head_and_fbody():
+    """head 也要偵測：它不進 tracker，只供落腳點推算（見 ADR-009）。"""
+    assert ModelConfig().classes == [0, 2]
 
 
 def test_model_config_classes_rejects_empty_list():
@@ -79,7 +88,13 @@ def test_config_sections_match_shared_contract():
     新增區塊會讓這支變紅，逼使用者確認該名稱在其他包沒被用過；把 `input` 改回本地
     定義同樣變紅——那正是 `INPUT__*` 撞名的來源。
     """
-    assert set(AppConfig.model_fields) == {"tracker", "model", "output", "input"}
+    assert set(AppConfig.model_fields) == {
+        "tracker",
+        "model",
+        "foot_point",
+        "output",
+        "input",
+    }
     assert AppConfig.model_fields["input"].annotation is vfa_config.InputConfig
 
 
@@ -128,7 +143,7 @@ def test_uses_defaults_when_toml_missing(tmp_path):
     """找不到設定檔時以預設值啟動，而非中止。"""
     config = _config_class(tmp_path / "nope.toml")()
 
-    assert config.model.classes == [2]
+    assert config.model.classes == [0, 2]
     assert config.tracker.track_buffer == 30
     assert config.input.bucket_dir == "bucket_name"
     assert config.output.save_video is False
@@ -155,6 +170,49 @@ def test_invalid_value_in_toml_raises_instead_of_silently_defaulting(tmp_path):
     toml.write_text("[model]\nclasses = []\n", encoding="utf-8")
 
     with pytest.raises(ValidationError):
+        _config_class(toml)()
+
+
+def test_foot_point_method_defaults_to_head():
+    assert FootPointConfig().method == "head"
+
+
+def test_foot_point_method_rejects_unknown_value():
+    with pytest.raises(ValidationError):
+        FootPointConfig(method="pose")
+
+
+def test_head_method_without_head_class_is_rejected(tmp_path):
+    """`method="head"` 卻沒偵測 head，每列都會退回框底邊中點——改動靜默失效，須擋下。"""
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        "[model]\nclasses = [2]\n[foot_point]\nmethod = \"head\"\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValidationError, match="head"):
+        _config_class(toml)()
+
+
+def test_bbox_bottom_method_without_head_class_is_allowed(tmp_path):
+    """切回舊算法時不需要 head，classes 只留 fbody 是合法組合。"""
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        "[model]\nclasses = [2]\n[foot_point]\nmethod = \"bbox_bottom\"\n",
+        encoding="utf-8",
+    )
+
+    config = _config_class(toml)()
+
+    assert config.foot_point.method == "bbox_bottom"
+    assert config.model.classes == [2]
+
+
+def test_classes_without_fbody_is_rejected(tmp_path):
+    """少了追蹤目標，整天的 parquet 會是空的，卻不會有任何錯誤訊息。"""
+    toml = tmp_path / "config.toml"
+    toml.write_text("[model]\nclasses = [0]\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="fbody"):
         _config_class(toml)()
 
 

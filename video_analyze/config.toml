@@ -10,7 +10,13 @@ gmc_method = "none"
 [model]
 model_path = "20260714-153811_yolo26m_baseline.pt"
 batch = 8                 # 湊批目標，實際單次推理批次為此值的 2 倍
-classes = [2]              # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
+classes = [0, 2]           # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
+                           # fbody 是追蹤目標；head 只用來推算落腳點，不進 tracker
+
+[foot_point]
+# "head" = 由頭部位置推算落腳點（修正斜向視角下框底邊中點落在人體外的偏移）
+# "bbox_bottom" = 框底邊中點，改用 head 推算之前的做法，保留供對照與回退
+method = "head"
 
 [output]
 save_video = false # 設為 true 會儲存影片；設為 false 則只跑推理不存檔

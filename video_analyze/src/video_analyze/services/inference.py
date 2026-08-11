@@ -3,10 +3,14 @@ import time
 from pathlib import Path
 from queue import Empty
 
+import numpy as np
+from ultralytics.engine.results import Boxes
 from vfa_observability import StructuredLogger
 
+from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
 from video_analyze.models.config import settings
 from video_analyze.services.detector import YOLODetector
+from video_analyze.services.foot_point import FootPointEstimator
 from video_analyze.services.fps_meter import FpsMeter
 from video_analyze.services.frame_ring import FrameRing
 from video_analyze.services.tracker import MultiStreamByteTracker
@@ -25,6 +29,23 @@ logger = StructuredLogger(component="inference")
 # 影格不足目標批次時最多再等這麼久湊批（實測 batch 4→8 可讓每格推理 3.8ms→2.4ms）
 _FILL_MAX_WAIT = 0.004
 _FILL_POLL = 0.0005
+
+
+def split_detections(boxes: Boxes) -> tuple[Boxes, np.ndarray]:
+    """把一格的偵測結果拆成「要餵給 tracker 的 fbody 子集」與「head 框座標」。
+
+    head 只用來推算落腳點，**不可進 tracker**：送進去的話同一個人會多出一條頭部
+    軌跡，`track_id` 的語義從「一個人」變成「一個偵測目標」，下游的不重複訪客與
+    進出人數會直接翻倍。
+
+    Args:
+        boxes: 單格的偵測結果，需已在 CPU（`Boxes.cpu()`）。
+
+    Returns:
+        `(fbody 子集, head 框的 [M, 4] xyxy)`；沒有 head 時第二項為 `(0, 4)` 空陣列。
+    """
+    cls = boxes.cls
+    return boxes[cls == FBODY_CLASS_ID], boxes.xyxy[cls == HEAD_CLASS_ID].numpy()
 
 
 class InferencePipeline:
@@ -61,6 +82,8 @@ class InferencePipeline:
         self.tracker = tracker
         self.writer = MultiStreamVideoWriter(output_root=output_root)
         self.annotator = TrackAnnotator()
+        # 跨批次重用：它記著每條軌跡上一次成功推算的落腳點偏移量
+        self.foot_estimator = FootPointEstimator(settings.foot_point.method)
         self.collector = TrackingResultCollector(results_path)
         self.fps_meter = FpsMeter()
         # ultralytics 對 in-memory list source 一次 forward 整個 list（batch=
@@ -177,14 +200,20 @@ class InferencePipeline:
                 self.fps_meter.add_detection_time(time.perf_counter() - detect_start)
                 for idx, stream_id in enumerate(batch_stream_ids):
                     packet = batch_packets[idx]
+                    fbody_boxes, heads = split_detections(results[idx].boxes.cpu())
                     track_start = time.perf_counter()
-                    tracks = self.tracker.update(stream_id, results[idx].boxes)
+                    tracks = self.tracker.update(stream_id, fbody_boxes)
                     self.fps_meter.add_tracking_time(time.perf_counter() - track_start)
+                    # 配對用 tracker 輸出的 Kalman 平滑框，不用 detection 框：落腳點
+                    # 才與同列寫進 parquet 的 bbox 自洽（tracker 回傳的 idx 也不是
+                    # 傳入陣列的索引，無法拿來回填，見 tracker.py 的 Returns 說明）
+                    foot_points = self.foot_estimator.estimate(stream_id, tracks, heads)
                     shape = self.frame_shapes[stream_id]
                     self.collector.add(
                         camera_id=self.stream_names[stream_id],
                         packet=packet,
                         tracks=tracks,
+                        foot_points=foot_points,
                         frame_width=shape.width,
                         frame_height=shape.height,
                     )

@@ -7,13 +7,18 @@ line_counting 直接吃這份 schema）、跨 flush 的資料不遺漏也不重�
 `frame_width` / `frame_height` 特別要測：來源 `frame_shapes` 存的是 `(height, width)`，
 順序寫反不會有型別錯誤，只會讓下游的解析度換算靜默算錯。因此這裡一律用寬高不相等的
 尺寸，寬高互換就會讓斷言失敗。
+
+`foot_x` / `foot_y` 同屬「寫錯也不會報錯」的欄位：它與 `tracks` 是兩個獨立參數，
+列數對不上或順序錯開都會讓每一列的落腳點配到別條軌跡，而 parquet 本身完全正常。
 """
 
 import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import polars as pl
+import pytest
 
 from video_analyze.config.constants import TRACKING_RESULTS_SCHEMA
 from video_analyze.services import tracking_results as tr
@@ -41,8 +46,17 @@ def _tracks(*rows: tuple[float, float, float, float, int]) -> np.ndarray:
     return np.array(rows, dtype=float).reshape(len(rows), 5)
 
 
+def _feet(*rows: tuple[float, float]) -> np.ndarray:
+    """落腳點由 `services/foot_point.py` 算好後傳入，collector 只負責逐列寫下。
+
+    測試一律給「不等於框底邊中點」的值：collector 若自作主張從 bbox 重算，斷言就會
+    失敗（落腳點改用 head 推算後，這兩者本來就不再相等）。
+    """
+    return np.array(rows, dtype=float).reshape(len(rows), 2)
+
+
 def test_add_writes_all_schema_columns_with_expected_values(tmp_path):
-    """一格兩條軌跡：八個既有欄位與新增的兩個尺寸欄位都要逐列寫對。"""
+    """一格兩條軌跡：既有欄位、落腳點與兩個尺寸欄位都要逐列寫對。"""
     results_path = tmp_path / "tracking_results.parquet"
     collector = TrackingResultCollector(results_path)
 
@@ -50,6 +64,7 @@ def test_add_writes_all_schema_columns_with_expected_values(tmp_path):
         camera_id="loc_cam001",
         packet=_packet(7),
         tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1), (50.0, 60.0, 70.0, 80.0, 2)),
+        foot_points=_feet((23.0, 41.0), (64.0, 77.0)),
         frame_width=_WIDTH,
         frame_height=_HEIGHT,
     )
@@ -67,6 +82,8 @@ def test_add_writes_all_schema_columns_with_expected_values(tmp_path):
             "y1": 20.0,
             "x2": 30.0,
             "y2": 40.0,
+            "foot_x": 23.0,
+            "foot_y": 41.0,
             "frame_width": _WIDTH,
             "frame_height": _HEIGHT,
         },
@@ -79,10 +96,28 @@ def test_add_writes_all_schema_columns_with_expected_values(tmp_path):
             "y1": 60.0,
             "x2": 70.0,
             "y2": 80.0,
+            "foot_x": 64.0,
+            "foot_y": 77.0,
             "frame_width": _WIDTH,
             "frame_height": _HEIGHT,
         },
     ]
+
+
+def test_add_rejects_foot_points_of_mismatched_length():
+    """落腳點與軌跡列數不一致就 fail loud：錯位後每一列的落腳點都配到別條軌跡，
+    輸出檔看起來完全正常，下游查不出來。"""
+    collector = TrackingResultCollector(Path("unused.parquet"))
+
+    with pytest.raises(ValueError, match="逐列對應"):
+        collector.add(
+            camera_id="loc_cam001",
+            packet=_packet(0),
+            tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1), (50.0, 60.0, 70.0, 80.0, 2)),
+            foot_points=_feet((23.0, 41.0)),
+            frame_width=_WIDTH,
+            frame_height=_HEIGHT,
+        )
 
 
 def test_add_keeps_each_camera_own_frame_size(tmp_path):
@@ -94,6 +129,7 @@ def test_add_keeps_each_camera_own_frame_size(tmp_path):
         camera_id="loc_cam001",
         packet=_packet(0),
         tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
+        foot_points=_feet((23.0, 41.0)),
         frame_width=1920,
         frame_height=1080,
     )
@@ -101,6 +137,7 @@ def test_add_keeps_each_camera_own_frame_size(tmp_path):
         camera_id="loc_cam002",
         packet=_packet(0),
         tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
+        foot_points=_feet((23.0, 41.0)),
         frame_width=3840,
         frame_height=2160,
     )
@@ -122,6 +159,7 @@ def test_add_with_empty_tracks_adds_no_rows(tmp_path):
         camera_id="loc_cam001",
         packet=_packet(0),
         tracks=np.empty((0, 5), dtype=float),
+        foot_points=np.empty((0, 2), dtype=float),
         frame_width=_WIDTH,
         frame_height=_HEIGHT,
     )
@@ -142,6 +180,7 @@ def test_rows_survive_flush_boundary(tmp_path, monkeypatch):
             camera_id="loc_cam001",
             packet=_packet(i),
             tracks=_tracks((float(i), 20.0, 30.0, 40.0, i)),
+            foot_points=_feet((float(i) + 3.0, 41.0)),
             frame_width=_WIDTH,
             frame_height=_HEIGHT,
         )
@@ -175,6 +214,7 @@ def test_results_path_appears_only_after_save(tmp_path):
         camera_id="loc_cam001",
         packet=_packet(0),
         tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
+        foot_points=_feet((23.0, 41.0)),
         frame_width=_WIDTH,
         frame_height=_HEIGHT,
     )
@@ -196,6 +236,7 @@ def test_discard_leaves_no_partial_output(tmp_path):
         camera_id="loc_cam001",
         packet=_packet(0),
         tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
+        foot_points=_feet((23.0, 41.0)),
         frame_width=_WIDTH,
         frame_height=_HEIGHT,
     )

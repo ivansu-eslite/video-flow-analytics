@@ -96,7 +96,11 @@ gmc_method = "none"
 [model]
 model_path = "20260714-153811_yolo26m_baseline.pt"
 batch = 8
-classes = [2]              # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
+classes = [0, 2]           # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
+                           # fbody 是追蹤目標；head 只用來推算落腳點，不進 tracker
+
+[foot_point]
+method = "head"            # "head" = 由頭部位置推算；"bbox_bottom" = 框底邊中點（舊做法）
 
 [output]
 save_video = false         # 是否輸出標註影片（開發 / 偵錯輔助）
@@ -114,7 +118,8 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 | `[tracker]` | ByteTrack 各項閾值 | 見範例 | `*_thresh` 皆介於 0–1，`track_buffer >= 1` |
 | `[model]` | `model_path` | `"20260714-153811_yolo26m_baseline.pt"` | 權重檔路徑（CrowdHuman 微調權重） |
 | | `batch` | `1` | YOLO 推理湊批目標，`>= 1`（範例用 `8`）；實際單次推理批次為此值的 2 倍 |
-| | `classes` | `[2]` | 要保留的偵測類別 id；權重類別為 `0=head, 1=vbody, 2=fbody`；至少 1 個元素。載入時會驗證此清單與已載入權重的 `model.names` 相符，不符（如指定的權重檔遺失、fallback 下載到別的模型）直接拋錯 |
+| | `classes` | `[0, 2]` | 要保留的偵測類別 id；權重類別為 `0=head, 1=vbody, 2=fbody`；至少 1 個元素。載入時會驗證此清單與已載入權重的 `model.names` 相符，不符（如指定的權重檔遺失、fallback 下載到別的模型）直接拋錯。**必須含 fbody**（追蹤目標）；`method = "head"` 時**還必須含 head**，否則直接拋錯——少了 head 每一列都會退回框底邊中點，改動靜默失效 |
+| `[foot_point]` | `method` | `"head"` | 落腳點的推算方式：`"head"` 由頭部位置推算（修正斜向視角下框底邊中點落在人體外的偏移），`"bbox_bottom"` 為改動前的框底邊中點，保留供對照與回退。見 [ADR-009](../docs/adr/009-head-based-foot-point.md) |
 | `[output]` | `save_video` | `false` | 是否輸出標註影片（開發 / 偵錯用途） |
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（範例用 `bucket_name1`） |
 | | `date` | — | 分析日期 |
@@ -223,6 +228,7 @@ bucket 呼叫。
 | `timestamp` | datetime（`Asia/Taipei`） | 該片段檔名時間 ＋ 片段內幀序 / fps |
 | `track_id` | int | ByteTrack 指派的追蹤編號，跨片段延續 |
 | `x1` / `y1` / `x2` / `y2` | float | 追蹤框的像素座標 |
+| `foot_x` / `foot_y` | float | 落腳點（人站在地面的位置）的像素座標；由 head 框推算，配不到頭時沿用該軌跡上次的偏移量，連偏移量都沒有才退回 `((x1+x2)/2, y2)` |
 | `frame_width` / `frame_height` | int | 該路的影像尺寸（`probe_frame_shape` 探測首格所得，整天固定）；逐列重複同一個值 |
 
 `frame_width` / `frame_height` 是為下游而存的：`line_counting` 與 `zone_mapping` 都是純
@@ -231,6 +237,13 @@ CPU 套件、部署時不掛載影片，拿不到影像尺寸，卻需要它把�
 （見 [ADR-004](../docs/adr/004-band-resolution-scaling.md) 與
 [ADR-006](../docs/adr/006-zone-boundary-band.md)）。缺這兩欄的舊 parquet 會被這兩包
 **都**直接擋下，需以本套件重跑產生。
+
+`foot_x` / `foot_y` 同樣是為下游而存：推算需要 head 框，而 head 不進追蹤結果（它若進
+tracker，同一個人會多出一條頭部軌跡），因此只能在本套件算。**推算帶跨幀狀態**：配不到
+頭的那幾格沿用該軌跡上次成功推算的偏移量（超過 60 格才放棄），避免落腳點在兩種算法之間
+彈跳——代價是同一份 detection 在不同歷史下會得到不同的落腳點。下游一律讀這兩欄、不再自行
+從 bbox 推算，缺欄位同樣 fail loud。公式、配對條件與多候選時的選法見
+[ADR-009](../docs/adr/009-head-based-foot-point.md)。
 
 ## 架構
 
@@ -243,10 +256,11 @@ CPU 套件、部署時不掛載影片，拿不到影像尺寸，卻需要它把�
 | --- | --- |
 | `main.py` | 薄 CLI 外殼：進入點 `main`，讀 `settings` 組參數後呼叫 `analyze_daily` |
 | `models/config.py` | Pydantic-settings 設定模型（`config.toml`＋環境變數）與全域 `settings` 單例 |
-| `config/constants.py` | 非 Pydantic 靜態常數（`OUTPUT_ROOT`、輸出檔名與 parquet schema） |
+| `config/constants.py` | 非 Pydantic 靜態常數（`OUTPUT_ROOT`、輸出檔名與 parquet schema、CrowdHuman 類別 id `HEAD_CLASS_ID`／`FBODY_CLASS_ID`） |
 | `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理子進程生命週期） |
 | `services/inference.py` | 推理迴圈（湊批、偵測、追蹤、寫檔） |
 | `services/detector.py` | YOLO 偵測 |
+| `services/foot_point.py` | `FootPointEstimator`：head 框配對與落腳點推算；自行維護跨幀狀態（每條軌跡上次成功推算的偏移量） |
 | `services/tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |
 | `services/tracking_results.py` | 追蹤明細累積與 parquet 寫出 |
 | `services/fps_meter.py` | 處理 FPS 統計 |
@@ -275,7 +289,8 @@ zone 與 line 幾何都不會被驗證。
 - **讀取進程**：無空 slot 時阻塞，形成對推理進程的天然背壓。**時間戳 = 該片段檔名時間 ＋
   片段內幀序 / fps**（逐段計算，不能用全日累計幀數推算）。
 - **推理進程**：非阻塞輪詢各路 queue 湊批，維持 GPU 批次效率；每個 packet 依序經
-  偵測 → 追蹤 → 累積追蹤結果 → 畫框 → 寫檔。
+  偵測 → 拆出 fbody／head（只有 fbody 進 tracker）→ 追蹤 → 推算落腳點 → 累積追蹤結果
+  → 畫框 → 寫檔。
 - **mp4v 編碼在背景執行緒**，與下一批 GPU 推理重疊。關檔順序有講究：某路尾端影格常與
   該路結束訊號同批出現，必須等這批全部寫完才關檔，否則背景緒會先收尾、之後補寫的影格
   會把檔案截斷。

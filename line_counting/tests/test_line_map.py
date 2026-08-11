@@ -36,6 +36,10 @@ def _write_tracking_results(
     """寫出追蹤明細；`frame_width`／`frame_height` 逐列補成同一個值（上游即如此寫）。
 
     預設 1920×1080 = 基準解析度，換算係數 1，讓不測換算的案例維持原本的判定尺度。
+
+    各案例的 `rows` 刻意**只給 `foot_x`／`foot_y`、不給 bbox 欄位**：落腳點改由上游
+    算好寫進 parquet 後（ADR-009），本套件只讀這兩欄；若有人把判定改回從 bbox 現算，
+    這些測試會因為缺欄位而爆，而不是靜默沿用舊公式。
     """
     n = len(next(iter(rows.values())))
     pl.DataFrame(
@@ -47,7 +51,7 @@ def test_count_lines_daily_counts_crossing_and_ignores_camera_without_lines(tmp_
     """happy path：定義了計數線且當天有資料的攝影機正確算出跨越；沒有 `lines` 的
     攝影機（不在參與集合）不因當天無資料而中止。
 
-    track 由外側（y2=50，y<100）跨到內側（y2=150，往 inside_point 那側）→ in=1。
+    track 由外側（foot_y=50，y<100）跨到內側（foot_y=150，往 inside_point 那側）→ in=1。
     """
     bucket_dir = tmp_path / "bucket_test"
     bucket_dir.mkdir()
@@ -81,10 +85,8 @@ def test_count_lines_daily_counts_crossing_and_ignores_camera_without_lines(tmp_
             "camera_id": ["loc_cam001", "loc_cam001"],
             "timestamp": [base, base + datetime.timedelta(seconds=1)],
             "track_id": [1, 1],
-            "x1": [90.0, 90.0],
-            "y1": [40.0, 140.0],
-            "x2": [110.0, 110.0],
-            "y2": [50.0, 150.0],  # 腳底 y：50（外側）→ 150（內側）
+            "foot_x": [100.0, 100.0],
+            "foot_y": [50.0, 150.0],  # 腳底 y：50（外側）→ 150（內側）
         },
     )
 
@@ -151,11 +153,9 @@ def test_count_lines_daily_maps_line_group_to_its_own_line(tmp_path):
                 base + datetime.timedelta(seconds=3),
             ],
             "track_id": [1, 1, 2, 2],
-            "x1": [90.0, 90.0, 90.0, 90.0],
-            "y1": [40.0, 140.0, 440.0, 640.0],
-            "x2": [110.0, 110.0, 110.0, 110.0],
+            "foot_x": [100.0, 100.0, 100.0, 100.0],
             # track 1 跨 door（y=100）；track 2 跨 door_b（y=500）
-            "y2": [50.0, 150.0, 450.0, 650.0],
+            "foot_y": [50.0, 150.0, 450.0, 650.0],
         },
     )
 
@@ -220,10 +220,8 @@ def test_crossing_band_scales_with_each_camera_frame_width(tmp_path):
                 base + datetime.timedelta(seconds=1),
             ],
             "track_id": [1, 1, 2, 2],
-            "x1": [90.0, 90.0, 90.0, 90.0],
-            "y1": [75.0, 105.0, 75.0, 105.0],
-            "x2": [110.0, 110.0, 110.0, 110.0],
-            "y2": [85.0, 115.0, 85.0, 115.0],  # 腳底離線 15 px（外側 → 內側）
+            "foot_x": [100.0, 100.0, 100.0, 100.0],
+            "foot_y": [85.0, 115.0, 85.0, 115.0],  # 腳底離線 15 px（外側 → 內側）
             "frame_width": [1920, 1920, 3840, 3840],
             "frame_height": [1080, 1080, 2160, 2160],
         }
@@ -277,10 +275,8 @@ def test_zero_band_stays_zero_at_any_resolution(tmp_path):
             "camera_id": ["loc_cam001", "loc_cam001"],
             "timestamp": [base, base + datetime.timedelta(seconds=1)],
             "track_id": [1, 1],
-            "x1": [90.0, 90.0],
-            "y1": [89.0, 91.0],
-            "x2": [110.0, 110.0],
-            "y2": [99.0, 101.0],  # 腳底離線僅 1 px
+            "foot_x": [100.0, 100.0],
+            "foot_y": [99.0, 101.0],  # 腳底離線僅 1 px
         },
         frame_width=3840,
         frame_height=2160,
@@ -324,14 +320,58 @@ def test_tracking_results_without_frame_size_fails_loud(tmp_path):
             "camera_id": ["loc_cam001"],
             "timestamp": [base],
             "track_id": [1],
-            "x1": [90.0],
-            "y1": [140.0],
-            "x2": [110.0],
-            "y2": [150.0],
+            "foot_x": [100.0],
+            "foot_y": [150.0],
         }
     ).write_parquet(output_dir / "tracking_results.parquet")
 
     with pytest.raises(ValueError, match="frame_width"):
+        count_lines_daily(
+            date=datetime.date(2026, 5, 1),
+            bucket_dir=str(bucket_dir),
+            bucket_minutes=60,
+            output_root=output_root,
+        )
+
+
+def test_tracking_results_without_foot_point_fails_loud(tmp_path):
+    """有影像尺寸、但只有 bbox 沒有落腳點欄位（issue #63 之後、#72 之前的產物）：
+    同樣要報錯中止。這種 parquet 通過了尺寸那道檢查，若不擋下就會走到判定時才因
+    缺欄位炸在 polars 層，或被日後補上的 bbox fallback 靜默套回舊公式。"""
+    bucket_dir = tmp_path / "bucket_test"
+    bucket_dir.mkdir()
+    _write_registry(
+        bucket_dir / "camera_registry.yaml",
+        [
+            {
+                "camera_id": "cam001",
+                "location": "loc",
+                "ip": "127.0.0.1",
+                "lines": [_DOOR],
+            },
+        ],
+    )
+
+    output_root = tmp_path / "outputs"
+    output_dir = output_root / "bucket_test" / "2026-05-01"
+    output_dir.mkdir(parents=True)
+    base = datetime.datetime(2026, 5, 1, 9, 0, tzinfo=_TAIPEI)
+    # 刻意不經 _write_tracking_results：這裡要的正是「有 bbox、無 foot」的舊格式
+    pl.DataFrame(
+        {
+            "camera_id": ["loc_cam001"],
+            "timestamp": [base],
+            "track_id": [1],
+            "x1": [80.0],
+            "y1": [70.0],
+            "x2": [120.0],
+            "y2": [150.0],
+            "frame_width": [1920],
+            "frame_height": [1080],
+        }
+    ).write_parquet(output_dir / "tracking_results.parquet")
+
+    with pytest.raises(ValueError, match="foot_x"):
         count_lines_daily(
             date=datetime.date(2026, 5, 1),
             bucket_dir=str(bucket_dir),
@@ -366,10 +406,8 @@ def test_multiple_frame_widths_for_one_camera_fails_loud(tmp_path):
             "camera_id": ["loc_cam001", "loc_cam001"],
             "timestamp": [base, base + datetime.timedelta(seconds=1)],
             "track_id": [1, 1],
-            "x1": [90.0, 90.0],
-            "y1": [40.0, 140.0],
-            "x2": [110.0, 110.0],
-            "y2": [50.0, 150.0],
+            "foot_x": [100.0, 100.0],
+            "foot_y": [50.0, 150.0],
             "frame_width": [1920, 3840],
             "frame_height": [1080, 2160],
         }
@@ -414,10 +452,8 @@ def test_count_lines_daily_still_fails_loud_for_camera_with_lines_missing_data(
             "camera_id": ["loc_other"],
             "timestamp": [base],
             "track_id": [1],
-            "x1": [90.0],
-            "y1": [140.0],
-            "x2": [110.0],
-            "y2": [150.0],
+            "foot_x": [100.0],
+            "foot_y": [150.0],
         },
     )
 

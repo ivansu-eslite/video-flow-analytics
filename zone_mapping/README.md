@@ -6,8 +6,12 @@
 ## 概述
 
 輸入是追蹤明細 `tracking_results.parquet` 與 `camera_registry.yaml` 的區域定義；以每個
-track 的腳底中心點 `((x1 + x2) / 2, y2)` 做 ray-casting 判定是否落在區域多邊形內，再依
+track 的落腳點 `(foot_x, foot_y)` 做 ray-casting 判定是否落在區域多邊形內，再依
 `time_bucket` 聚合出兩項事件指標，輸出 `zone_counts.parquet`：
+
+落腳點是上游 `video_analyze` 算好寫進 `tracking_results.parquet` 的欄位（由 head 框推算，
+推不出來才退回 bbox 底邊中點），本套件不自行從 bbox 推算；缺這兩欄的舊 parquet 直接
+fail loud。理由見 [ADR-009](../docs/adr/009-head-based-foot-point.md)。
 
 | 指標 | 定義 |
 | --- | --- |
@@ -15,7 +19,7 @@ track 的腳底中心點 `((x1 + x2) / 2, y2)` 做 ray-casting 判定是否落�
 | `entries` | 「區域外 → 區域內」的轉換次數，由線段區域（`boundary_band_px_1080p`）濾掉邊界抖動 |
 
 **兩項指標刻意用不同判定**（見 [ADR-006](../docs/adr/006-zone-boundary-band.md)）：
-`entries` 是事件型指標，用線段區域的 Schmitt-trigger——腳底點的帶號距離 `> band` 才確認
+`entries` 是事件型指標，用線段區域的 Schmitt-trigger——落腳點的帶號距離 `> band` 才確認
 在區內、`< -band` 才確認在區外，落在帶內時沿用前一個已確認狀態，因此在邊界附近來回
 徘徊只計一次進入。`unique_visitors` 是佔用型指標，仍用當格的 point-in-polygon 布林值，
 不吃這個黏著狀態（否則走出區域後停在邊界外線段區域內的人，會在其後每個時段都被算成區內
@@ -181,7 +185,7 @@ boundary_band_px_1080p = 25 # entries 的線段區域（1080p 基準像素）；
 
 | 路徑 | 讀 / 寫 | 內容 |
 | --- | --- | --- |
-| `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（線段區域寬度的解析度換算靠它），2026-07 之前產出的舊檔沒有這兩欄，會直接報錯要求重跑 `video_analyze` |
+| `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（線段區域寬度的解析度換算靠它，issue #63 起才有）與 `foot_x`／`foot_y`（落腳點，本階段不自行從 bbox 推算，issue #72 起才有）四欄，缺任一欄都直接報錯要求重跑 `video_analyze`——只有 issue #72 之後產出的檔案才同時具備 |
 | `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與區域幾何 |
 | `outputs/{bucket}/{date}/zone_counts.parquet` | 寫 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries` |
 
