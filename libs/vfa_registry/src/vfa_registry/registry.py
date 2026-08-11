@@ -1,3 +1,16 @@
+"""`camera_registry.yaml` 的模型與驗證，由四包共用。
+
+四包（`video_analyze`／`zone_mapping`／`line_counting`／`flow_report`）讀的是同一份
+實體檔案，因此本模組的欄位是**全檔的解析契約**，不是各包的功能清單：`CameraEntry`
+同時帶 `zones` 與 `lines`，即使某一包用不到（`video_analyze` 兩者都用不到），欄位也
+不能依模組裁剪——`extra="forbid"` 下，模型少一個欄位就會讓含該欄位的 yaml 在那一包
+解析失敗。
+
+各包的差別在**呼叫端要不要呼叫** `parse_and_validate_zones`／
+`parse_and_validate_lines`（幾何驗證刻意延後到那時，見 `CameraEntry.zones` 說明），
+不在模型有沒有這個欄位。
+"""
+
 import math
 from collections import Counter
 from pathlib import Path
@@ -105,7 +118,7 @@ class Line(BaseModel):
 
 
 class CameraEntry(BaseModel):
-    """單一攝影機的身份與 zone 定義。
+    """單一攝影機的身份與 zone／line 定義。
 
     Attributes:
         camera_id: 攝影機代號；在 `CameraRegistry` 內必須唯一（見
