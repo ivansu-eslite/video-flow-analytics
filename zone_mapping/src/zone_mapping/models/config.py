@@ -20,7 +20,7 @@ class ZoneConfig(BaseModel):
     """Zone 人流統計參數。
 
     Attributes:
-        boundary_band_px_1080p: entry 判定的區域邊界緩衝帶寬度，以 1080p
+        boundary_band_px_1080p: entry 判定的線段區域寬度，以 1080p
             （寬 1920）為基準的像素值；執行時依各攝影機的 `frame_width` 換算成
             實際像素。`0` = 純內外判定（每次跨越邊界都計），且 0 換算後仍是 0。
             預設 25 取自實測（見 README「已知限制」）。
@@ -57,14 +57,14 @@ class ZoneConfig(BaseModel):
         """舊參數名 `entry_debounce_frames` 要報出「判定方式已換」，而非通用的未知欄位。
 
         `extra="forbid"` 本來就會擋下舊名，但訊息只說不允許額外欄位，看不出時間去抖
-        已整個被空間緩衝帶取代；沿用舊設定的人需要知道原本的「連續格數」不能直接當成
+        已整個被線段區域取代；沿用舊設定的人需要知道原本的「連續格數」不能直接當成
         新參數的值（單位由格數變成像素，且是 1080p 基準值）。`mode="before"` 先於
         `extra="forbid"` 觸發，toml 與環境變數兩條路徑都會走到這裡。
         """
         if isinstance(data, dict) and "entry_debounce_frames" in data:
             raise ValueError(
                 "[zone] 的 entry_debounce_frames 已移除：entry 判定改用區域邊界"
-                "緩衝帶（boundary_band_px_1080p），不再用「連續 N 格都在區內」的"
+                "線段區域（boundary_band_px_1080p），不再用「連續 N 格都在區內」的"
                 "時間去抖。新參數的單位是以 1080p（寬 1920）為基準的像素，執行時依"
                 "各攝影機的影像寬度換算（1920 → ×1、3840 → ×2），原本的格數不可"
                 "直接沿用。見 ADR-006。"

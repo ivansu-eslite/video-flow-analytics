@@ -72,7 +72,7 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 ADR-004：線段區域參數的尺規與影像尺寸來源，決定像素參數改以 1080p 為基準依 `frame_width`
 換算，尺寸由上游寫進 parquet（而非人工填 registry 或下游讀影片 header）；ADR-005：
 `flow_report` 的輸入必要性改由 registry 的定義決定（不看檔案在不在），說明為何刻意不留
-跳過用的旗標；ADR-006：`zone_mapping` 的 `entries` 由時間去抖改為區域邊界緩衝帶＋
+跳過用的旗標；ADR-006：`zone_mapping` 的 `entries` 由時間去抖改為線段區域＋
 Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態、為何 zone 與 line 的
 幾何不可統一，並修訂 ADR-004 的「舊 parquet 不對稱」條款；ADR-007：移除
 `camera_registry_used.yaml` 快照機制，`flow_report` 改讀 `bucket_dir` 當下的

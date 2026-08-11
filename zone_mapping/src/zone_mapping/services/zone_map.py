@@ -41,20 +41,20 @@ _INRADIUS_MIN_SAMPLES = 32
 def _resolve_band_px(
     camera_id: str, cam_sub: pl.DataFrame, boundary_band_px_1080p: float
 ) -> tuple[float, float]:
-    """把 1080p 基準的緩衝帶寬度換算成該攝影機的實際像素，並記錄換算過程。
+    """把 1080p 基準的線段區域寬度換算成該攝影機的實際像素，並記錄換算過程。
 
     換算只用寬度、線性：`實際 px = 基準值 × frame_width / 1920`。同一台攝影機整天
     解析度固定（上游 `probe_frame_shape` 只探測首格，中途變動會在 `frame_ring`
     就中止），因此這裡要求該攝影機的 `frame_width` 只有單一正值——多個值代表拿到的
-    是手工拼接的 parquet 或上游語義已改，靜默取其中一個會讓半天的緩衝帶用錯尺度。
+    是手工拼接的 parquet 或上游語義已改，靜默取其中一個會讓半天的線段區域用錯尺度。
 
     Args:
         camera_id: 該攝影機的 `camera_id`（僅供錯誤訊息與日誌）。
         cam_sub: 只含該攝影機的追蹤明細，需已含 `frame_width` 欄位且非空。
-        boundary_band_px_1080p: 以 1080p（寬 1920）為基準的緩衝帶寬度。
+        boundary_band_px_1080p: 以 1080p（寬 1920）為基準的線段區域寬度。
 
     Returns:
-        `(band_px, scale)`：換算後的緩衝帶寬度（實際像素）與換算比例。一併回傳
+        `(band_px, scale)`：換算後的線段區域寬度（實際像素）與換算比例。一併回傳
         `scale` 是為了讓窄區域的錯誤訊息能把建議上限換算回使用者實際在改的那個
         1080p 基準值（`line_counting` 沒有這道檢查，故其對應函式只回 `band_px`）。
 
@@ -71,7 +71,7 @@ def _resolve_band_px(
     scale = frame_width / BASELINE_FRAME_WIDTH
     band_px = boundary_band_px_1080p * scale
     logger.info(
-        "區域邊界緩衝帶依解析度換算",
+        "線段區域依解析度換算",
         camera_id=camera_id,
         frame_width=frame_width,
         baseline_width=BASELINE_FRAME_WIDTH,
@@ -85,7 +85,7 @@ def _resolve_band_px(
 def _validate_zone_fits_band(
     camera_id: str, zone: Zone, band_px: float, scale: float
 ) -> None:
-    """fail-loud：多邊形要寬到容得下緩衝帶，否則該 zone 的 entries 會恆為 0。
+    """fail-loud：多邊形要寬到容得下線段區域，否則該 zone 的 entries 會恆為 0。
 
     最窄處小於 `2 × band` 的多邊形，內部可能沒有任何點滿足「帶號距離 > band」，
     狀態機永遠翻不到「確認在區內」。這種靜默的恆為 0 正是 fail-loud 要擋的那類錯誤，
@@ -99,7 +99,7 @@ def _validate_zone_fits_band(
     Args:
         camera_id: 該攝影機的 `camera_id`（僅供錯誤訊息）。
         zone: 要檢查的區域定義。
-        band_px: 該攝影機換算後的緩衝帶寬度（實際像素）。
+        band_px: 該攝影機換算後的線段區域寬度（實際像素）。
         scale: `frame_width / 1920`，用來把建議上限換算回 1080p 基準值。
 
     Raises:
@@ -129,14 +129,14 @@ def _validate_zone_fits_band(
             f"兩條路擇一：把 [zone].boundary_band_px_1080p 調到 {suggested:.1f} 以下"
             "（1080p 基準值），或把 camera_registry.yaml 的 zone 多邊形畫寬一點。"
             if round(suggested, 1) > 0
-            else "這個 zone 窄到放不下任何正的緩衝帶，只能把 camera_registry.yaml 的 "
+            else "這個 zone 窄到放不下任何正的線段區域，只能把 camera_registry.yaml 的 "
             "zone 多邊形畫寬一點。"
         )
         raise ValueError(
-            f"攝影機 {camera_id} 的 zone「{zone.name}」放不下區域邊界緩衝帶："
-            f"內切半徑約 {inradius:.1f}px、緩衝帶 {band_px:.1f}px（皆為該攝影機的"
+            f"攝影機 {camera_id} 的 zone「{zone.name}」放不下線段區域："
+            f"內切半徑約 {inradius:.1f}px、線段區域 {band_px:.1f}px（皆為該攝影機的"
             f"實際像素，frame_width/{BASELINE_FRAME_WIDTH} = {scale:.4g}）。"
-            "緩衝帶會吃掉整個區域內部，這個 zone 的 entries 會恆為 0。"
+            "線段區域會吃掉整個區域內部，這個 zone 的 entries 會恆為 0。"
             f"{remedy}內切半徑為格點取樣的下界，會略微低估。"
         )
 
@@ -158,7 +158,7 @@ def map_zones_daily(
         date: 要統計的日期，需已有對應的 `tracking_results.parquet`。
         bucket_dir: 本機模擬 GCS bucket 的根目錄。
         bucket_minutes: 人流統計的時段粒度（分鐘）。
-        boundary_band_px_1080p: `entries` 判定的區域邊界緩衝帶寬度，以 1080p
+        boundary_band_px_1080p: `entries` 判定的線段區域寬度，以 1080p
             （寬 1920）為基準的像素值；逐攝影機依其 `frame_width` 換算成實際像素後
             才進判定（見 ADR-004、ADR-006）。`0` = 純內外判定，且換算後仍是 0；
             預設 25 取自實測（見 README「已知限制」）。
@@ -172,7 +172,7 @@ def map_zones_daily(
             `bucket_dir` 底下找不到 `camera_registry.yaml`。
         ValueError: 追蹤結果缺少影像尺寸欄位（舊版 `video_analyze` 的產物）、
             `camera_registry.yaml` 定義了 zone 的攝影機在當天追蹤結果中查無資料、
-            任一 zone 定義不合法，或有 zone 窄到放不下緩衝帶。
+            任一 zone 定義不合法，或有 zone 窄到放不下線段區域。
     """
     output_dir = output_root / Path(bucket_dir).name / date.isoformat()
     results_path = output_dir / TRACKING_RESULTS_FILENAME

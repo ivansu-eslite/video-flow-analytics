@@ -2,7 +2,7 @@
 
 重點守護「找不到 `config.toml` → 警告並以預設值啟動；檔案存在但值不合法或頂層
 區塊名未知 → 直接報錯」這條 fail-loud 語義：參數錯了卻靜默套用預設值，會讓人流
-統計以非預期的口徑產出而無人察覺（例如把 `[zone]` 拼成 `[zones]`，緩衝帶寬度與
+統計以非預期的口徑產出而無人察覺（例如把 `[zone]` 拼成 `[zones]`，線段區域寬度與
 時段粒度整段悄悄退回預設）。
 
 `AppConfig.model_config` 的 `toml_file` 在 class 定義時就求值，事後 monkeypatch
@@ -178,7 +178,7 @@ def test_unknown_top_level_section_raises(tmp_path):
 
 def test_unknown_field_in_nested_section_raises(tmp_path):
     """巢狀欄位名打錯要報錯：boundary_band_px_1080p 漏掉尾巴寫成 boundary_band_px，
-    不可被靜默忽略而讓緩衝帶退回預設值（巢狀 model 的 extra="forbid"，非僅頂層區塊名）。"""
+    不可被靜默忽略而讓線段區域退回預設值（巢狀 model 的 extra="forbid"，非僅頂層區塊名）。"""
     toml = tmp_path / "config.toml"
     toml.write_text("[zone]\nboundary_band_px = 40\n", encoding="utf-8")
 
@@ -196,7 +196,7 @@ def test_negative_boundary_band_px_1080p_raises(tmp_path):
 
 
 def test_removed_entry_debounce_frames_raises_actionable_error(tmp_path):
-    """沿用已移除的 `entry_debounce_frames` 要報出「判定方式已換成空間緩衝帶」。
+    """沿用已移除的 `entry_debounce_frames` 要報出「判定方式已換成線段區域」。
 
     `extra="forbid"` 本來就會擋下它，但訊息只說欄位未知；沿用舊設定的人需要知道
     單位由「連續格數」變成「1080p 基準像素」，原本的數值不可直接搬過來。
@@ -222,7 +222,7 @@ def test_default_boundary_band_agrees_across_all_three_places():
     """版控的 `config.toml`、`ZoneConfig` 與 `map_zones_daily` 簽名的預設值要一致。
 
     這個值是實測調出來的（見 README），不是「沒設定時的中性值」；任兩處分岔都會讓同
-    一份程式用不同的緩衝帶尺度統計，而且不會有任何錯誤訊息——沒有 `config.toml` 的環境
+    一份程式用不同的線段區域尺度統計，而且不會有任何錯誤訊息——沒有 `config.toml` 的環境
     吃模型預設值，直接呼叫 `map_zones_daily`（README 說明的正式進入點）吃的是簽名
     預設值。後兩者已共用同一個常數，`config.toml` 無法引用常數，由本測試鎖住。
     （`bucket_dir` 一類的欄位刻意不受此約束。）
