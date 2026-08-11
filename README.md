@@ -65,8 +65,8 @@ flowchart LR
   `tracking_results.parquet`）；`flow_report` 有兩個上游輸入，改由
   `bucket_dir/camera_registry.yaml` **的定義**決定該有哪幾份輸入——純看檔案無法區分「定義了
   計數線卻忘了跑 `line_counting`」與「這個 bucket 本來就沒有計數線」，前者會讓報表靜默
-  少三個分頁。取捨見 [ADR-005](docs/adr/005-report-input-requirement-from-snapshot.md)
-  與 [ADR-007](docs/adr/007-remove-registry-snapshot.md)（後者把資料來源由當日輸出目錄
+  少三個分頁。取捨見 [ADR-005](docs/adr/flow_report/005-report-input-requirement-from-snapshot.md)
+  與 [ADR-007](docs/adr/shared/007-remove-registry-snapshot.md)（後者把資料來源由當日輸出目錄
   下的 registry 快照改為 `bucket_dir` 當下的檔案）。
 - **重跑冪等**：所有輸出都先寫入 `.tmp` 暫存檔、完成後再 `rename` 成正式檔名，藉由
   `rename` 的原子性，確保過程中斷時不會在正式檔名下留下半成品。`flow_report` 對同一天重跑
@@ -201,7 +201,7 @@ cameras:
 - **`line_group` 則刻意不驗證唯一**——與 `name` 相反，同一個 `line_group` 本來就預期出現
   在不同攝影機底下，這正是分組的用途（一個範圍的數個出入口可能分屬不同攝影機）。`name`
   本身仍全域唯一，故 `(line_group, name)` 組合天然唯一。取捨見
-  [ADR-002](docs/adr/002-line-group-semantics.md)。
+  [ADR-002](docs/adr/line_counting/002-line-group-semantics.md)。
 - **`polygon` 至少需要 3 個頂點**才能構成區域；**`points` 至少需要 2 個頂點**才能構成
   計數線，且不可有零長度線段（連續重複頂點）。兩者座標皆為對應攝影機固定解析度下的像素
   座標。
@@ -230,14 +230,37 @@ cameras:
 `frame_height` 由 `video_analyze` 逐列寫入，供 `line_counting` 與 `zone_mapping` 把設定檔
 的 1080p 基準像素換算成各攝影機的實際像素——兩者都是純 CPU 套件、部署時不掛載影片，只能
 從這裡取得尺寸。缺這兩欄的舊 parquet 會被兩包直接擋下（不給「當成 1080p」的 fallback）。
-取捨見 [ADR-004](docs/adr/004-band-resolution-scaling.md)；`zone_mapping` 何時開始依賴
-這兩欄見 [ADR-006](docs/adr/006-zone-boundary-band.md)。
+取捨見 [ADR-004](docs/adr/shared/004-band-resolution-scaling.md)；`zone_mapping` 何時開始依賴
+這兩欄見 [ADR-006](docs/adr/zone_mapping/006-zone-boundary-band.md)。
 
 **落腳點欄位同樣是硬性契約**：`foot_x`／`foot_y`（人站在地面的位置）由 `video_analyze`
 用 head 框推算後逐列寫入，`line_counting`／`zone_mapping` 與疊圖工具一律讀這兩欄、不再
 各自從 bbox 現算——推算需要 head 框，而 head 不進追蹤結果（它若進 tracker，同一個人會多
 出一條頭部軌跡）。缺這兩欄的舊 parquet 同樣被兩包擋下。公式、配對條件與多候選時的選法
-見 [ADR-009](docs/adr/009-head-based-foot-point.md)。
+見 [ADR-009](docs/adr/shared/009-head-based-foot-point.md)。
+
+## 架構決策紀錄
+
+技術決策記在 [docs/adr/](docs/adr/)，依影響的模組分子目錄：只動一個套件的放
+`docs/adr/<套件名>/`（`video_analyze`／`zone_mapping`／`line_counting`／`flow_report`），
+跨套件的放 `docs/adr/shared/`。
+
+| ADR | 影響範圍 | 主題 |
+| --- | --- | --- |
+| [001](docs/adr/line_counting/001-line-crossing-detection.md) | `line_counting` | 計數線的跨越判定方式，說明為什麼不能改成「整條線只有一個方向」 |
+| [002](docs/adr/line_counting/002-line-group-semantics.md) | `line_counting` | 計數線群組（`line_group`）的語意，說明為何不驗證跨攝影機唯一 |
+| [003](docs/adr/line_counting/003-finite-line-segment.md) | `line_counting` | 計數線的有效長度，在側別翻轉之外加一道「軌跡要真的穿過有限線段」的閘門（修正 ADR-001 的無限直線前提），並說明為何不採逐格有效性閘門 |
+| [004](docs/adr/shared/004-band-resolution-scaling.md) | shared | 線段區域參數的尺規與影像尺寸來源，決定像素參數改以 1080p 為基準依 `frame_width` 換算，尺寸由上游寫進 parquet（而非人工填 registry 或下游讀影片 header） |
+| [005](docs/adr/flow_report/005-report-input-requirement-from-snapshot.md) | `flow_report` | `flow_report` 的輸入必要性改由 registry 的定義決定（不看檔案在不在），說明為何刻意不留跳過用的旗標 |
+| [006](docs/adr/zone_mapping/006-zone-boundary-band.md) | `zone_mapping` | `zone_mapping` 的 `entries` 由時間去抖改為線段區域＋Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態、為何 zone 與 line 的幾何不可統一，並修訂 ADR-004 的「舊 parquet 不對稱」條款 |
+| [007](docs/adr/shared/007-remove-registry-snapshot.md) | shared | 移除 `camera_registry_used.yaml` 快照機制，`flow_report` 改讀 `bucket_dir` 當下的 `camera_registry.yaml`，說明為何不補回溯替代方案、以及被接受的靜默錯位範圍（修訂 ADR-005 的資料來源） |
+| [008](docs/adr/shared/008-config-section-namespace.md) | shared | 設定的頂層區塊名是跨四包的全域環境變數命名空間，`[input]` 因此由 `libs/vfa_config` 提供單一定義、欄位取聯集，說明為何不改用套件前綴、為何否決把 `bucket_minutes` 寫進 parquet metadata，並修訂「各包只保留自己讀到的區塊」那條 |
+| [009](docs/adr/shared/009-head-based-foot-point.md) | shared | 落腳點由 head 框推算並上移成 `tracking_results.parquet` 的欄位，記錄多候選 head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能進 tracker、ADR-001／003／004／006 的判定輸入點定義隨之改變，以及**計數會大幅上升**（本機重跑 zone entries 最多 74 → 264）——方向是否正確只能靠疊圖目視，正式環境上線前需求方要自行判斷 |
+
+**取號規則**：編號是全域流水號，與子目錄無關；新增 ADR 一律取上表的下一號，不在各子目錄
+內自行編號，因此單一子目錄內看到跳號是正常的（`shared/` 是 004、007、008、009）。理由是
+編號被當成穩定識別碼在用——ADR 之間有修訂關係（007 修訂 005、006 修訂 004、003 修訂
+001），外部 issue 與 PR 也直接引用這組號，各子目錄自行重編會讓這些引用失效。
 
 ## 共用 lib
 

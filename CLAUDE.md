@@ -64,26 +64,10 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 
 ## 架構
 
-影響整個 workspace 的技術決策記在 [docs/adr/](docs/adr/)（單一套件的決策才放
-`<package>/docs/adr/`）。目前有 ADR-001：`line_counting` 的計數線跨越判定方式，
-說明為什麼不能改成「整條線只有一個方向」；ADR-002：計數線群組（`line_group`）的語意，
-說明為何不驗證跨攝影機唯一；ADR-003：計數線的有效長度，在側別翻轉之外加一道「軌跡要
-真的穿過有限線段」的閘門（修正 ADR-001 的無限直線前提），並說明為何不採逐格有效性閘門；
-ADR-004：線段區域參數的尺規與影像尺寸來源，決定像素參數改以 1080p 為基準依 `frame_width`
-換算，尺寸由上游寫進 parquet（而非人工填 registry 或下游讀影片 header）；ADR-005：
-`flow_report` 的輸入必要性改由 registry 的定義決定（不看檔案在不在），說明為何刻意不留
-跳過用的旗標；ADR-006：`zone_mapping` 的 `entries` 由時間去抖改為線段區域＋
-Schmitt-trigger，說明為何 `unique_visitors` 刻意不吃這個黏著狀態、為何 zone 與 line 的
-幾何不可統一，並修訂 ADR-004 的「舊 parquet 不對稱」條款；ADR-007：移除
-`camera_registry_used.yaml` 快照機制，`flow_report` 改讀 `bucket_dir` 當下的
-`camera_registry.yaml`，說明為何不補回溯替代方案、以及被接受的靜默錯位範圍（修訂 ADR-005
-的資料來源）；ADR-008：設定的頂層區塊名是跨四包的全域環境變數命名空間，`[input]` 因此
-由 `libs/vfa_config` 提供單一定義、欄位取聯集，說明為何不改用套件前綴、為何否決把
-`bucket_minutes` 寫進 parquet metadata，並修訂「各包只保留自己讀到的區塊」那條；
-ADR-009：落腳點由 head 框推算並上移成 `tracking_results.parquet` 的欄位，記錄多候選
-head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能進 tracker、ADR-001／003／
-004／006 的判定輸入點定義隨之改變，以及**計數會大幅上升**（本機重跑 zone entries
-最多 74 → 264）——方向是否正確只能靠疊圖目視，正式環境上線前需求方要自行判斷。
+技術決策記在 [docs/adr/](docs/adr/)，依影響的模組分子目錄：只動一個套件的放
+`docs/adr/<套件名>/`，跨套件的放 `docs/adr/shared/`；編號是全域流水號、與子目錄無關，
+新增一律取下一號。九支 ADR 的清單、影響範圍與各自主題見
+[README.md 的「架構決策紀錄」](README.md#架構決策紀錄)（唯一索引，本檔不另列一份）。
 
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
 
@@ -117,7 +101,7 @@ head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能
   `classes` 不必含 head，但 `method = "head"` 卻少了 head 會直接拋錯（否則每列都退回
   框底邊中點，改動靜默失效）。
 - 配對條件、多候選 head 的選法（實測推翻了規劃階段的直覺判準）與被否決的替代方案
-  （OBB／pose／ground plane）見 [ADR-009](docs/adr/009-head-based-foot-point.md)。
+  （OBB／pose／ground plane）見 [ADR-009](docs/adr/shared/009-head-based-foot-point.md)。
 
 ### 四包共用碼的處理方式
 
@@ -147,7 +131,7 @@ head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能
   `InputConfig` 刻意含各包用不到的欄位（`video_analyze` 不讀 `bucket_minutes`、
   `flow_report` 不讀 `camera_ids`），四包各有一支區塊契約測試釘住這件事。新增頂層區塊前
   要確認該名稱在其他三包沒被用過。規則、否決過的替代方案與已知缺口見
-  [ADR-008](docs/adr/008-config-section-namespace.md)。
+  [ADR-008](docs/adr/shared/008-config-section-namespace.md)。
 
   `bucket_minutes` 一併從 `zone_mapping` 的 `[zone]`、`line_counting` 的 `[line]` 移進
   `[input]`（issue #79），三包共用單一環境變數 `INPUT__BUCKET_MINUTES`。**三份
@@ -186,7 +170,7 @@ head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能
 賣場的數個出入口）。**`line_group` 是與上述規則刻意相反的例外**：跨攝影機同名不但不
 擋，還正是分組的用途——一個範圍的出入口本來就可能分屬不同攝影機。`line` 名稱本身仍全域
 唯一，故 `(line_group, line)` 組合天然唯一。取捨與「為何不能順手補上同型驗證」見
-[ADR-002](docs/adr/002-line-group-semantics.md)。
+[ADR-002](docs/adr/line_counting/002-line-group-semantics.md)。
 
 ### `flow_report` 的輸入必要性看 registry，不看檔案（跨套件契約）
 
@@ -196,8 +180,8 @@ fail loud；沒有任何 `lines` 定義則整批跳過出入口三個分頁、�
 `participates_in_zone_mapping` 且 `zones` 非空）。這是**這條 repo 唯一不照「下游看上游輸出
 檔是否存在」原則的階段**，根 README 的階段相依原則那段已寫明這個例外；`zone_mapping`／
 `line_counting` 只有單一上游、沒有這個歧義，維持看檔案。取捨與「為何刻意不留跳過用的
-旗標」見 [ADR-005](docs/adr/005-report-input-requirement-from-snapshot.md)；資料來源
-為何由快照改成當下的檔案見 [ADR-007](docs/adr/007-remove-registry-snapshot.md)。
+旗標」見 [ADR-005](docs/adr/flow_report/005-report-input-requirement-from-snapshot.md)；資料來源
+為何由快照改成當下的檔案見 [ADR-007](docs/adr/shared/007-remove-registry-snapshot.md)。
 
 後果是 `flow_report` 從此被 `line_counting` 綁住：registry 只要有任一 `lines`，沒跑
 `line_counting` 就連 zone 兩頁都產不出來（整個 `export_report_daily` 中止）。排程上

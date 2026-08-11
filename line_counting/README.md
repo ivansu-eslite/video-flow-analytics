@@ -17,7 +17,7 @@ Schmitt-trigger」偵測側別翻轉（跨越）與方向，再依 `time_bucket`
 
 落腳點是上游 `video_analyze` 算好寫進 `tracking_results.parquet` 的欄位（由 head 框推算，
 推不出來才退回 bbox 底邊中點），本套件不自行從 bbox 推算；缺這兩欄的舊 parquet 直接
-fail loud。理由見 [ADR-009](../docs/adr/009-head-based-foot-point.md)。
+fail loud。理由見 [ADR-009](../docs/adr/shared/009-head-based-foot-point.md)。
 
 | 指標 | 定義 |
 | --- | --- |
@@ -61,7 +61,7 @@ output_root=OUTPUT_ROOT) -> Path`（在 `services/line_map.py`），CLI 進入�
    與計數線的**有限線段**相交過（`segment_crosses_polyline`），否則不計。**線的長度因此
    是實質判準**：只算真的走過所畫線段的人。閘門是事件級而非逐格判定，門口線段區域內駐留後
    進場、斜穿門、掉幀都不受影響，取捨見
-   [ADR-003](../docs/adr/003-finite-line-segment.md)。
+   [ADR-003](../docs/adr/line_counting/003-finite-line-segment.md)。
 4. **起始側不計**：track 起始就在某側（前一格為 `null`）不算跨越——計數線只認「側別
    翻轉」，起始側不構成翻轉。此點與 `zone_mapping` **相反**（`zone_mapping` 首次即在
    區內會算一次 entry）。
@@ -70,7 +70,7 @@ output_root=OUTPUT_ROOT) -> Path`（在 `services/line_map.py`），CLI 進入�
    1920`，只用寬度、線性）後才進判定。同一個設定值在 1080p 與 4K 上代表同樣的實際距離，
    不必為混解析度的 bucket 各調一套。尺寸來自 `tracking_results.parquet` 的
    `frame_width`／`frame_height` 欄位，取捨見
-   [ADR-004](../docs/adr/004-band-resolution-scaling.md)。
+   [ADR-004](../docs/adr/shared/004-band-resolution-scaling.md)。
 6. `crossing_band_px_1080p = 0` 時線段區域退化為單點，等同幾何零交越（每次穿過線段的幾何跨越
    都計）；`0` 換算後仍是 `0`，不受解析度影響。**預設值是 `25`**，由實測挑出（見
    「已知限制」的最後一條）。
@@ -187,7 +187,7 @@ crossing_band_px_1080p = 25  # 跨越去抖的線段區域寬度（1080p 基準�
 `[input]` 由共用 lib `vfa_config` 提供、四包同一份定義，故本包也接受 `camera_ids`
 （只有 `video_analyze` 會讀）；`bucket_minutes` 於 issue #79 由 `[line]` 移到這裡，沿用
 舊位置（含 `LINE__BUCKET_MINUTES`）會直接報錯並指出新位置與新的環境變數名
-`INPUT__BUCKET_MINUTES`。理由見 [ADR-008](../docs/adr/008-config-section-namespace.md)。
+`INPUT__BUCKET_MINUTES`。理由見 [ADR-008](../docs/adr/shared/008-config-section-namespace.md)。
 
 舊參數名 `crossing_band_px` 已不存在：沿用它會直接報錯並說明新語義，而不是被當成未知欄位
 （值的意義也變了——同一個數字在 4K 攝影機上換算後是兩倍）。
@@ -228,7 +228,7 @@ lines:
 標示，不在 `line_counting` 產生範圍層級的加總數字**，那是後續任務的功能。
 
 與 `line` 名稱相反，**`line_group` 允許、也預期會跨攝影機同名**：一個賣場的數個門本來
-就分屬不同攝影機，要能歸成同一組（見 [ADR-002](../docs/adr/002-line-group-semantics.md)）。
+就分屬不同攝影機，要能歸成同一組（見 [ADR-002](../docs/adr/line_counting/002-line-group-semantics.md)）。
 
 **使用前提（程式不驗證，需配置時自行保證）**：一個範圍的進出是把該範圍各出入口的
 `in`／`out` 相加，這只有在**每個出入口的 `inside_point` 都指向該範圍的內側**時才成立。

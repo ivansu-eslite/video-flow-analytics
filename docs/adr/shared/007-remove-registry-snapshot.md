@@ -4,7 +4,7 @@
 
 Accepted
 
-修訂 [ADR-005](005-report-input-requirement-from-snapshot.md)：判準（輸入必要性由 registry
+修訂 [ADR-005](../flow_report/005-report-input-requirement-from-snapshot.md)：判準（輸入必要性由 registry
 的定義決定，不由檔案是否存在決定）維持不變，**只換資料來源**——由
 `outputs/{bucket}/{date}/camera_registry_used.yaml` 快照改為 `bucket_dir/camera_registry.yaml`。
 
@@ -79,7 +79,7 @@ Negative:
 - **`line_group` 的改名同樣是靜默漂移**：`_reject_unknown_pairs` 比對的是
   `(camera_id, line)`，而報表「群組」欄的值取自 `line_counts.parquet`。registry 只改
   `line_group`、不改 `line` 名稱時，報表會沿用舊的群組名而沒有訊號。刻意不把
-  `line_group` 納入組合驗證：它跨攝影機同名是正常用途（見 [ADR-002](002-line-group-semantics.md)），
+  `line_group` 納入組合驗證：它跨攝影機同名是正常用途（見 [ADR-002](../line_counting/002-line-group-semantics.md)），
   納入驗證等於要求「分組不得調整」，代價高於它能擋下的錯誤——`line_group` 是報表的維度
   欄位，錯了會讓分組看起來怪，不會讓進出人數算錯。
 - **「整側定義被清空」需要一道額外的 fail loud**：`_reject_unknown_pairs` 靠的是「該側
@@ -99,6 +99,6 @@ Negative:
 
 ## Related Links
 
-- [ADR-005](005-report-input-requirement-from-snapshot.md)（本 ADR 修訂的對象）
-- [ADR-006](006-zone-boundary-band.md)（「新 ADR 修訂舊 ADR」的既有慣例）
+- [ADR-005](../flow_report/005-report-input-requirement-from-snapshot.md)（本 ADR 修訂的對象）
+- [ADR-006](../zone_mapping/006-zone-boundary-band.md)（「新 ADR 修訂舊 ADR」的既有慣例）
 - 部署端對應變更：argus PR #33

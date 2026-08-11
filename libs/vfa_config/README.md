@@ -19,7 +19,7 @@
 `[input]` 少列一個別包有的欄位，設了該變數的環境會讓這包連 `import` 都以
 `extra_forbidden` 失敗。抽出前四包各自裁剪，`INPUT__CAMERA_IDS` 會打死另外三包、
 `INPUT__BUCKET_MINUTES` 會打死另外三包（`flow_report` 自己的錯誤訊息正好叫維運人員去設
-這個變數）。取捨與命名空間規則見 [ADR-008](../../docs/adr/008-config-section-namespace.md)。
+這個變數）。取捨與命名空間規則見 [ADR-008](../../docs/adr/shared/008-config-section-namespace.md)。
 
 各包私有的 `[tracker]`／`[model]`／`[output]`／`[zone]`／`[line]`／`[report]` **不放進本
 lib**：那些區塊名本來就只有一包用，沒有撞名面。

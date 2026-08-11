@@ -146,7 +146,7 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 
 `[input]` 由共用 lib `vfa_config` 提供、四包同一份定義，故本階段也接受 `camera_ids`
 （只有 `video_analyze` 會讀）。為何不能各包裁剪見
-[ADR-008](../docs/adr/008-config-section-namespace.md)。
+[ADR-008](../docs/adr/shared/008-config-section-namespace.md)。
 
 `on_duplicate_date` 三種模式的行為：
 
@@ -170,8 +170,8 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 ## 哪些輸入是必要的
 
 **由 `bucket_dir/camera_registry.yaml` 的定義決定，不由檔案是否存在決定**
-（[ADR-005](../docs/adr/005-report-input-requirement-from-snapshot.md)、
-[ADR-007](../docs/adr/007-remove-registry-snapshot.md)）：
+（[ADR-005](../docs/adr/flow_report/005-report-input-requirement-from-snapshot.md)、
+[ADR-007](../docs/adr/shared/007-remove-registry-snapshot.md)）：
 
 | registry 的內容 | 缺對應的 parquet 時 |
 | --- | --- |
@@ -205,12 +205,12 @@ registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都�
 
 `camera_registry.yaml`（攝影機清單與區域／計數線定義，放在 `bucket_dir` 根目錄、不進版控）
 的完整格式見根 README。本階段讀的是 `bucket_dir` 下當下的那一份（缺檔即報錯；為何不是
-產生 parquet 當時的快照，見 [ADR-007](../docs/adr/007-remove-registry-snapshot.md)），
+產生 parquet 當時的快照，見 [ADR-007](../docs/adr/shared/007-remove-registry-snapshot.md)），
 相關使用限制（皆為 fail-loud，違反時直接報錯）：
 
 - **`zone` 與 `line` 名稱都須全域唯一**：本階段以區域／計數線名稱、不含 `camera_id`
   分組彙總，同名會讓不同攝影機的數字被合併成同一列，故不只同一攝影機內不可重複，跨攝影機
-  也不可重複。`line_group` 則刻意不驗證唯一（見 [ADR-002](../docs/adr/002-line-group-semantics.md)），
+  也不可重複。`line_group` 則刻意不驗證唯一（見 [ADR-002](../docs/adr/line_counting/002-line-group-semantics.md)），
   它只是報表的一個維度欄位。
 - **`camera_id` 與 `location_camera_id` 皆須唯一**：兩者都是查詢字典的鍵，重複會靜默
   覆蓋其中一筆攝影機，載入 registry 時即擋下。
@@ -253,7 +253,7 @@ registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都�
   `line_counting` 兩包各自的設定。三者不一致時，`period_minutes` 的倍數檢查會拿錯的數字
   驗證，不會被自動抓到。issue #79 讓三包的欄位路徑一致（都在 `[input]`，可用單一
   `INPUT__BUCKET_MINUTES` 一次覆寫），但三份 `config.toml` 仍各填一次；唯一能消除手抄的
-  做法（寫進 parquet 檔級 metadata）已在 [ADR-008](../docs/adr/008-config-section-namespace.md)
+  做法（寫進 parquet 檔級 metadata）已在 [ADR-008](../docs/adr/shared/008-config-section-namespace.md)
   否決，**這是已接受的最終狀態，不是待辦**。
 - **`line_group` 只是報表的一個維度欄位**：本階段不做範圍層級的加總（例如整個賣場的進出
   合計），出入口三頁都是逐計數線的數字。
@@ -263,7 +263,7 @@ registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都�
   本階段看不出來。**只改 `line_group`、不改 `line` 名稱也屬於這個範圍**：組合驗證不看
   `line_group`，報表的「群組」欄取自 `line_counts.parquet`，會沿用舊的群組名。這是移除
   registry 快照時接受的代價，見
-  [ADR-007](../docs/adr/007-remove-registry-snapshot.md)。
+  [ADR-007](../docs/adr/shared/007-remove-registry-snapshot.md)。
 
 ## 開發
 

@@ -119,7 +119,7 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 | `[model]` | `model_path` | `"20260714-153811_yolo26m_baseline.pt"` | 權重檔路徑（CrowdHuman 微調權重） |
 | | `batch` | `1` | YOLO 推理湊批目標，`>= 1`（範例用 `8`）；實際單次推理批次為此值的 2 倍 |
 | | `classes` | `[0, 2]` | 要保留的偵測類別 id；權重類別為 `0=head, 1=vbody, 2=fbody`；至少 1 個元素。載入時會驗證此清單與已載入權重的 `model.names` 相符，不符（如指定的權重檔遺失、fallback 下載到別的模型）直接拋錯。**必須含 fbody**（追蹤目標）；`method = "head"` 時**還必須含 head**，否則直接拋錯——少了 head 每一列都會退回框底邊中點，改動靜默失效 |
-| `[foot_point]` | `method` | `"head"` | 落腳點的推算方式：`"head"` 由頭部位置推算（修正斜向視角下框底邊中點落在人體外的偏移），`"bbox_bottom"` 為改動前的框底邊中點，保留供對照與回退。見 [ADR-009](../docs/adr/009-head-based-foot-point.md) |
+| `[foot_point]` | `method` | `"head"` | 落腳點的推算方式：`"head"` 由頭部位置推算（修正斜向視角下框底邊中點落在人體外的偏移），`"bbox_bottom"` 為改動前的框底邊中點，保留供對照與回退。見 [ADR-009](../docs/adr/shared/009-head-based-foot-point.md) |
 | `[output]` | `save_video` | `false` | 是否輸出標註影片（開發 / 偵錯用途） |
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（範例用 `bucket_name1`） |
 | | `date` | — | 分析日期 |
@@ -127,7 +127,7 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 
 `[input]` 由共用 lib `vfa_config` 提供、四包同一份定義，故本包也接受 `bucket_minutes`
 （只有 `zone_mapping`／`line_counting`／`flow_report` 會讀）。為何不能各包裁剪見
-[ADR-008](../docs/adr/008-config-section-namespace.md)。
+[ADR-008](../docs/adr/shared/008-config-section-namespace.md)。
 
 ### `camera_registry.yaml`（資料樣貌）
 
@@ -234,8 +234,8 @@ bucket 呼叫。
 `frame_width` / `frame_height` 是為下游而存的：`line_counting` 與 `zone_mapping` 都是純
 CPU 套件、部署時不掛載影片，拿不到影像尺寸，卻需要它把以 1080p 為基準的像素參數
 （`crossing_band_px_1080p`／`boundary_band_px_1080p`）換算成各攝影機的實際像素
-（見 [ADR-004](../docs/adr/004-band-resolution-scaling.md) 與
-[ADR-006](../docs/adr/006-zone-boundary-band.md)）。缺這兩欄的舊 parquet 會被這兩包
+（見 [ADR-004](../docs/adr/shared/004-band-resolution-scaling.md) 與
+[ADR-006](../docs/adr/zone_mapping/006-zone-boundary-band.md)）。缺這兩欄的舊 parquet 會被這兩包
 **都**直接擋下，需以本套件重跑產生。
 
 `foot_x` / `foot_y` 同樣是為下游而存：推算需要 head 框，而 head 不進追蹤結果（它若進
@@ -243,7 +243,7 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 頭的那幾格沿用該軌跡上次成功推算的偏移量（超過 60 格才放棄），避免落腳點在兩種算法之間
 彈跳——代價是同一份 detection 在不同歷史下會得到不同的落腳點。下游一律讀這兩欄、不再自行
 從 bbox 推算，缺欄位同樣 fail loud。公式、配對條件與多候選時的選法見
-[ADR-009](../docs/adr/009-head-based-foot-point.md)。
+[ADR-009](../docs/adr/shared/009-head-based-foot-point.md)。
 
 ## 架構
 
