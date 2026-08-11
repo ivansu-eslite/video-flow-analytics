@@ -63,7 +63,7 @@ class ZoneConfig(BaseModel):
         """
         if isinstance(data, dict) and "entry_debounce_frames" in data:
             raise ValueError(
-                "[zone] 的 entry_debounce_frames 已移除：entry 判定改用區域邊界"
+                "[zone] 的 entry_debounce_frames 已移除：entry 判定改用"
                 "線段區域（boundary_band_px_1080p），不再用「連續 N 格都在區內」的"
                 "時間去抖。新參數的單位是以 1080p（寬 1920）為基準的像素，執行時依"
                 "各攝影機的影像寬度換算（1920 → ×1、3840 → ×2），原本的格數不可"
