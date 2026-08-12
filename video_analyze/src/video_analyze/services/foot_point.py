@@ -261,15 +261,28 @@ class FootPointEstimator:
             if remembered is not None and tick - remembered[1] <= _OFFSET_TTL_FRAMES:
                 points[i] = bottom + remembered[0] * size
 
-        self._prune(stream_id, tick)
+        self._prune(tick)
         return points
 
-    def _prune(self, stream_id: int, tick: int) -> None:
-        """丟掉該路已過期的偏移量，避免整天累積數萬條死軌跡的狀態。"""
+    def _prune(self, tick: int) -> None:
+        """丟掉已過期的偏移量，避免整天累積數萬條死軌跡的狀態。
+
+        清理由跑到 `_PRUNE_EVERY_FRAMES` 整數格的那一路觸發，但掃的是**所有路**的
+        條目，過期與否各自用該路自己的 tick 判斷——tick 是 per-stream 的，拿觸發那
+        一路的 tick 去比別路會誤刪還活著的軌跡。
+
+        殘留：某一路讀完後就不再呼叫 `estimate`，它的 tick 停在最後一格，最後
+        `_OFFSET_TTL_FRAMES` 格內建立的條目相對這個停住的 tick 永遠算新鮮，會留到
+        進程結束。上限是該路收尾那 60 格內仍活著的軌跡數，量級遠小於整天的軌跡數，
+        接受這個殘留而不另外做「該路已結束」的通知。
+
+        Args:
+            tick: 觸發這次呼叫的那一路的當前幀序，只用來決定要不要清。
+        """
         if tick % _PRUNE_EVERY_FRAMES:
             return
         self._offsets = {
             k: v
             for k, v in self._offsets.items()
-            if k[0] != stream_id or tick - v[1] <= _OFFSET_TTL_FRAMES
+            if self._ticks[k[0]] - v[1] <= _OFFSET_TTL_FRAMES
         }

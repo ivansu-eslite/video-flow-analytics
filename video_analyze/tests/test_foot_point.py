@@ -353,3 +353,26 @@ def test_prune_keeps_live_state_on_this_and_other_streams():
     assert (0, 1) not in est._offsets  # 過期，該刪
     assert (1, 2) in est._offsets  # 另一路的新鮮狀態不可被掃到
     assert (0, 3) in est._offsets  # 本路的新鮮狀態也不可被掃到
+
+
+def test_prune_clears_expired_state_of_a_stream_that_stopped_calling():
+    """已經不再送幀的那一路，留下的過期狀態要被別路的清理掃掉。
+
+    每路只清自己的話，先讀完的攝影機其狀態會留到進程結束。過期與否要用**該路自己的**
+    tick 判斷：tick 是 per-stream 的，拿觸發清理那一路的 tick 去比別路，只要兩路進度
+    有差就會誤刪還活著的軌跡（上一支測的就是這件事）。
+    """
+    est = FootPointEstimator("head")
+    empty = np.empty((0, 4))
+    stopped = np.array([[0.0, 0.0, 400.0, 800.0, 1]])
+    ongoing = np.array([[0.0, 0.0, 400.0, 800.0, 2]])
+
+    est.estimate(1, stopped, _TILTED_HEAD)
+    for _ in range(fp._OFFSET_TTL_FRAMES + 1):  # 跑過 TTL 之後就不再呼叫
+        est.estimate(1, stopped, empty)
+    assert (1, 1) in est._offsets  # 該路自己的清理週期還沒到
+
+    for _ in range(fp._PRUNE_EVERY_FRAMES):  # 由還在跑的那一路觸發清理
+        est.estimate(0, ongoing, empty)
+
+    assert (1, 1) not in est._offsets
