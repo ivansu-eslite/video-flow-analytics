@@ -38,7 +38,7 @@ uv run --package line_counting line_counting       # 計數線進出人數統計
 uv run --package flow_report   flow_report         # 報表彙總 → report.xlsx
 
 uv run --directory <pkg> ruff check .              # lint；<pkg> = video_analyze / zone_mapping / line_counting / flow_report
-uv run --directory <pkg> pytest                    # 測試（四包各 8／3／3／3 支測試檔）
+uv run --directory <pkg> pytest                    # 測試（四包各 9／3／3／3 支測試檔）
 
 uv run --directory libs/vfa_registry pytest        # 共用 lib 的測試（4 支）自成一套，不在四包底下
 uv run --directory libs/vfa_registry ruff check .
