@@ -267,6 +267,28 @@ def test_head_shared_within_a_frame_is_not_written_to_cache():
     npt.assert_allclose(second, bbox_bottom_center(two_bodies[:, :4]))
 
 
+def test_shared_head_frame_leaves_earlier_offset_intact():
+    """共用的那一格只是不寫快取，不能連既有的偏移一起清掉。
+
+    清掉的話，這條軌跡下一次配不到頭就靜默彈回框底邊中點——正是偏移沿用要防的跳動，
+    而 parquet 完全正常。
+    """
+    est = FootPointEstimator("head")
+    est.estimate(0, _TILTED_BODY, _TILTED_HEAD)  # 單獨配到，偏移 +120px = 框寬的 0.3
+
+    shared_head = np.array([[170.0, 0.0, 230.0, 60.0]])
+    with_neighbour = np.array(
+        [
+            [0.0, 0.0, 400.0, 800.0, 7],
+            [100.0, 0.0, 500.0, 800.0, 8],
+        ]
+    )
+    est.estimate(0, with_neighbour, shared_head)  # 這一格兩條共用同一顆頭
+    after = est.estimate(0, _TILTED_BODY, np.empty((0, 4)))
+
+    npt.assert_allclose(after, [[320.0, 800.0]])  # 沿用第一格的 0.3，非共用那格的 0
+
+
 def test_separate_heads_in_one_frame_are_both_cached():
     """同一幀各配各的頭時兩筆都要進快取——共用的判定不可波及正常路徑。"""
     est = FootPointEstimator("head")
