@@ -240,6 +240,49 @@ def test_bbox_bottom_method_never_reuses_offsets():
     npt.assert_allclose(second, bbox_bottom_center(_TILTED_BODY[:, :4]))
 
 
+def test_head_shared_within_a_frame_is_not_written_to_cache():
+    """一顆 head 被同一幀兩個 fbody 配到時，兩邊都不寫快取。
+
+    配對沒有全域指派，共用時至少有一邊是錯配、且分不出是哪一邊（ADR-009）。寫進快取
+    的話這一幀的錯配會被沿用最多 60 格，等於把單幀誤差放大成約兩秒的持續偏移——而輸出
+    的 parquet 完全正常，沒有任何訊號。當格照樣用推算結果，只是不留下來。
+    """
+    est = FootPointEstimator("head")
+    shared_head = np.array([[170.0, 0.0, 230.0, 60.0]])  # 頂邊中點 (200, 0)
+    two_bodies = np.array(
+        [
+            [0.0, 0.0, 400.0, 800.0, 7],  # 中心 (200, 400)
+            [100.0, 0.0, 500.0, 800.0, 8],  # 中心 (300, 400)
+        ]
+    )
+
+    first = est.estimate(0, two_bodies, shared_head)
+
+    npt.assert_allclose(first, [[200.0, 800.0], [400.0, 800.0]])  # 當格仍用推算結果
+    assert est._offsets == {}
+
+    # 下一格配不到頭：沒有偏移可沿用，兩條都退回框底邊中點
+    second = est.estimate(0, two_bodies, np.empty((0, 4)))
+
+    npt.assert_allclose(second, bbox_bottom_center(two_bodies[:, :4]))
+
+
+def test_separate_heads_in_one_frame_are_both_cached():
+    """同一幀各配各的頭時兩筆都要進快取——共用的判定不可波及正常路徑。"""
+    est = FootPointEstimator("head")
+    heads = np.array([[40.0, 0.0, 120.0, 80.0], [540.0, 0.0, 620.0, 80.0]])
+    two_bodies = np.array(
+        [
+            [0.0, 0.0, 400.0, 800.0, 7],
+            [500.0, 0.0, 900.0, 800.0, 8],
+        ]
+    )
+
+    est.estimate(0, two_bodies, heads)
+
+    assert set(est._offsets) == {(0, 7), (0, 8)}
+
+
 def test_estimator_rejects_unknown_method():
     with pytest.raises(ValueError, match="未知的落腳點算法"):
         FootPointEstimator("pose")
