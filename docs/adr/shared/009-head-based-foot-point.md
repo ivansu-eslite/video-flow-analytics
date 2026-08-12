@@ -156,8 +156,10 @@ ADR-004 的影像尺寸欄位同一道檢查。
 偵測 `classes` 改為 `[0, 2]`，但只有 fbody 子集餵給 ByteTracker——head 也送進去的話同一
 個人會多出一條頭部軌跡，`track_id` 的語義從「一個人」變成「一個偵測目標」，下游的不重複
 訪客與進出人數直接翻倍，而輸出檔本身完全正常。拆分函式 `split_detections` 的行為由
-`test_inference_split.py` 釘住；**主迴圈把哪一份餵給 tracker 這條接線目前沒有自動測試**
-（迴圈需要多進程佇列與環形緩衝才跑得起來），改那一行不會有測試變紅。
+`test_inference_split.py` 釘住；主迴圈把哪一份餵給 tracker 這條接線由
+`test_inference_loop.py` 釘住（issue #91 補上——原先只有拆分函式有測試，把
+`tracker.update` 的引數改回未拆分的偵測結果時全部測試照過）。該測試以 stub 取代佇列、
+環形緩衝、偵測器與追蹤器直接跑 `start_loop`，不需要拉起子進程。
 
 **配對必須在 tracker 之後、對 tracker 輸出的框做，不可用 tracker 回傳的 `idx` 回填。**
 `idx` 並非傳入陣列的索引：`byte_tracker.py::_split_detections` 先依 `track_high_thresh`
