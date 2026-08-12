@@ -6,9 +6,13 @@
 
     foot = 2 × C_fbody − H,  H = head 框的頂邊中點
 
-H 取**頂邊中點**而非 head 框中心，是為了退化性質：人站直時 fbody 的垂直範圍就是
-[頭頂, 腳底]、框中心是兩者中點，`2 × C_y − 頭頂` 精確等於 `y2`，推算結果與改動前
-一致。若改用 head 中心，站直的人會系統性上偏半顆頭。
+H 取**頂邊中點**而非 head 框中心，是為了退化性質：人站直、且 head 框頂邊與 fbody 框
+頂邊重合時，fbody 的垂直範圍就是 [頭頂, 腳底]、框中心是兩者中點，`2 × C_y − 頭頂`
+精確等於 `y2`，推算結果與改動前一致。若改用 head 中心，同樣的人會系統性上偏半顆頭。
+
+兩個框由模型各自迴歸，真實偵測下頂邊不會剛好對齊：head 框頂邊比 fbody 框頂邊低 δ 時，
+推算結果就上偏 δ（站直與否無關）。所以退化性質是「δ = 0 時精確成立」，不是「站直的人
+一定不受影響」——ADR-009 實測 82.3% 的列與框底邊中點不同、位移中位 29 px。
 
 配對與選法的取捨（含被實測推翻的直覺）見 docs/adr/shared/009-head-based-foot-point.md。
 """
@@ -26,11 +30,15 @@ _MAX_AXIS_TILT_DEG = 50.0
 
 FOOT_POINT_METHODS = ("head", "bbox_bottom")
 
-# 配不到頭時最多沿用幾格前算出的偏移量。取 60 格（30fps 約 2 秒）：ByteTrack 的
-# `track_buffer` 是 30 格，軌跡中斷再接回也在這個範圍內；再久姿勢早就變了，舊偏移
-# 不再有代表性，寧可退回框底邊中點。
+# 配不到頭時最多沿用幾格前算出的偏移量。取 60 格：ByteTrack 的 `track_buffer` 是 30
+# 格，軌跡中斷再接回也在這個範圍內；再久姿勢早就變了，舊偏移不再有代表性，寧可退回
+# 框底邊中點。
+#
+# 這裡的「格」是**該路有軌跡的幀**，不是該路讀過的幀——`estimate` 對空幀在 tick 遞增
+# 之前就早退，整路無人的時段不消耗 TTL。因此它涵蓋的實際時間跨度只會比「30fps 下
+# 2 秒」長，長多少取決於該路的人流密度。
 _OFFSET_TTL_FRAMES = 60
-# 每這麼多格清一次過期狀態（整天數萬條軌跡，不清會一直累積）。
+# 每這麼多格清一次過期狀態（整天數萬條軌跡，不清會一直累積）。「格」的口徑同上。
 _PRUNE_EVERY_FRAMES = 300
 
 
@@ -180,8 +188,8 @@ class FootPointEstimator:
 
     寫入快取的條件比「這格推算成功」更嚴：同一幀內若一顆 head 被兩個以上 fbody 配到，
     這些框的推算結果照樣使用，但都不寫入快取。配對沒有全域指派（ADR-009 的已知限制），
-    共用時至少有一邊是錯配且分不出是哪一邊，寫進去等於把單幀的錯配放大成最多 60 格的
-    持續偏移。
+    共用時至少有一邊是錯配且分不出是哪一邊，寫進去等於把單幀的錯配放大成最多 60 個有
+    軌跡的幀的持續偏移。
 
     狀態以 `(stream_id, track_id)` 為鍵。實測（ultralytics 8.4.75）`track_id` 由
     `BaseTrack._count` 這個 class 變數發放，同一進程內所有 `BYTETracker` 實例共用，
@@ -257,15 +265,28 @@ class FootPointEstimator:
             if remembered is not None and tick - remembered[1] <= _OFFSET_TTL_FRAMES:
                 points[i] = bottom + remembered[0] * size
 
-        self._prune(stream_id, tick)
+        self._prune(tick)
         return points
 
-    def _prune(self, stream_id: int, tick: int) -> None:
-        """丟掉該路已過期的偏移量，避免整天累積數萬條死軌跡的狀態。"""
+    def _prune(self, tick: int) -> None:
+        """丟掉已過期的偏移量，避免整天累積數萬條死軌跡的狀態。
+
+        清理由跑到 `_PRUNE_EVERY_FRAMES` 整數格的那一路觸發，但掃的是**所有路**的
+        條目，過期與否各自用該路自己的 tick 判斷——tick 是 per-stream 的，拿觸發那
+        一路的 tick 去比別路會誤刪還活著的軌跡。
+
+        殘留：某一路讀完後就不再呼叫 `estimate`，它的 tick 停在最後一格，最後
+        `_OFFSET_TTL_FRAMES` 格內建立的條目相對這個停住的 tick 永遠算新鮮，會留到
+        進程結束。上限是該路收尾那 60 格內仍活著的軌跡數，量級遠小於整天的軌跡數，
+        接受這個殘留而不另外做「該路已結束」的通知。
+
+        Args:
+            tick: 觸發這次呼叫的那一路的當前幀序，只用來決定要不要清。
+        """
         if tick % _PRUNE_EVERY_FRAMES:
             return
         self._offsets = {
             k: v
             for k, v in self._offsets.items()
-            if k[0] != stream_id or tick - v[1] <= _OFFSET_TTL_FRAMES
+            if self._ticks[k[0]] - v[1] <= _OFFSET_TTL_FRAMES
         }

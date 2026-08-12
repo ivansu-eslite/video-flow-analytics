@@ -2,9 +2,10 @@
 
 守住四件事：
 
-1. **退化性質**——人站直時推算結果精確等於改動前的框底邊中點。這條是整個改動可以
-   安全上線的前提：站直的人（多數）不受影響，只有傾斜的人被修正。反射基準若誤用
-   head 框中心而非頂邊中點，站直的人會系統性上偏半顆頭，這裡會抓到。
+1. **退化性質**——人站直、且 head 框頂邊與 fbody 框頂邊重合時，推算結果精確等於改動
+   前的框底邊中點。反射基準若誤用 head 框中心而非頂邊中點，這種人會系統性上偏半顆頭，
+   這裡會抓到。兩個框頂邊差 δ 時推算結果上偏 δ，也一併釘住——真實偵測下 δ 不會是 0，
+   「站直的人不受影響」只在合成 fixture 的 δ = 0 下成立，不是產線上的保證。
 2. **傾斜時往正確方向移動**——head 偏左上時落腳點要往右下，這正是要修的偏移。
 3. **配不到 head 時退回底邊中點**，且不產生空值或例外（下游沒有處理 null 的路徑）。
 4. **多候選的選法**——取主軸最接近垂直的那顆。實測顯示「離框頂最近」會系統性挑到
@@ -23,17 +24,33 @@ from video_analyze.services.foot_point import (
     estimate_from_heads,
 )
 
-# 一個站直的人：框 200 寬、800 高，頭在框頂正中央、佔框高 1/8
+# 一個站直的人：框 200 寬、800 高，頭在框頂正中央、佔框高 1/8。兩個框的頂邊刻意齊平
+# （`y1` 都是 0.0），退化性質才成立——這是合成 fixture 才有的條件，見下面的 δ≠0 那支。
 _UPRIGHT_BODY = np.array([[100.0, 0.0, 300.0, 800.0]])
 _UPRIGHT_HEAD = np.array([[160.0, 0.0, 240.0, 100.0]])
 
 
-def test_upright_person_reproduces_bbox_bottom_center_exactly():
-    """站直時推算結果與改動前逐值相同——多數人不受這次改動影響。"""
+def test_flush_head_top_reproduces_bbox_bottom_center_exactly():
+    """head 框頂邊與 fbody 框頂邊齊平的站直人，推算結果與改動前逐值相同。"""
     got = estimate_from_heads(_UPRIGHT_BODY, _UPRIGHT_HEAD)
 
     npt.assert_allclose(got, bbox_bottom_center(_UPRIGHT_BODY))
     npt.assert_allclose(got, [[200.0, 800.0]])
+
+
+def test_head_top_below_body_top_shifts_foot_point_up_by_that_gap():
+    """兩個框頂邊差 δ 時，站直的人推算結果上偏 δ——退化性質的實際適用範圍。
+
+    head 與 fbody 由模型各自迴歸，真實偵測下頂邊不會剛好對齊，所以上面那條「與改動前
+    逐值相同」不能讀成「站直的人在產線上不受影響」。ADR-009 的實測（82.3% 的列與框底
+    邊中點不同、位移中位 29 px）已反映這件事，這裡把 δ≠0 的行為本身釘住。
+    """
+    delta = 12.0
+    head = _UPRIGHT_HEAD + np.array([0.0, delta, 0.0, delta])
+
+    got = estimate_from_heads(_UPRIGHT_BODY, head)
+
+    npt.assert_allclose(got, [[200.0, 800.0 - delta]])
 
 
 def test_reflection_uses_head_top_edge_not_head_center():
@@ -353,3 +370,26 @@ def test_prune_keeps_live_state_on_this_and_other_streams():
     assert (0, 1) not in est._offsets  # 過期，該刪
     assert (1, 2) in est._offsets  # 另一路的新鮮狀態不可被掃到
     assert (0, 3) in est._offsets  # 本路的新鮮狀態也不可被掃到
+
+
+def test_prune_clears_expired_state_of_a_stream_that_stopped_calling():
+    """已經不再送幀的那一路，留下的過期狀態要被別路的清理掃掉。
+
+    每路只清自己的話，先讀完的攝影機其狀態會留到進程結束。過期與否要用**該路自己的**
+    tick 判斷：tick 是 per-stream 的，拿觸發清理那一路的 tick 去比別路，只要兩路進度
+    有差就會誤刪還活著的軌跡（上一支測的就是這件事）。
+    """
+    est = FootPointEstimator("head")
+    empty = np.empty((0, 4))
+    stopped = np.array([[0.0, 0.0, 400.0, 800.0, 1]])
+    ongoing = np.array([[0.0, 0.0, 400.0, 800.0, 2]])
+
+    est.estimate(1, stopped, _TILTED_HEAD)
+    for _ in range(fp._OFFSET_TTL_FRAMES + 1):  # 跑過 TTL 之後就不再呼叫
+        est.estimate(1, stopped, empty)
+    assert (1, 1) in est._offsets  # 該路自己的清理週期還沒到
+
+    for _ in range(fp._PRUNE_EVERY_FRAMES):  # 由還在跑的那一路觸發清理
+        est.estimate(0, ongoing, empty)
+
+    assert (1, 1) not in est._offsets
