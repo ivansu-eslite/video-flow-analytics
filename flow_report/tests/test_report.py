@@ -9,17 +9,13 @@ import pytest
 import yaml
 
 from flow_report.config.constants import (
-    EVENTS_HEADERS,
-    LINE_HOURLY_HEADERS,
-    LINE_PEAK_HEADERS,
     SHEET_EVENTS,
     SHEET_LINE_HOURLY,
     SHEET_LINE_PEAK_IN,
     SHEET_LINE_PEAK_OUT,
     SHEET_ZONE_HOURLY,
     SHEET_ZONE_PEAK,
-    ZONE_HOURLY_HEADERS,
-    ZONE_PEAK_HEADERS,
+    ZONE_HOURLY_COLUMNS,
 )
 from flow_report.services.report import (
     ReportFrames,
@@ -417,7 +413,6 @@ def _make_zone_peak_df(rows):
             "zone": pl.Utf8,
             "peak_period": pl.Utf8,
             "peak_value": pl.Int64,
-            "reminder": pl.Utf8,
         },
         orient="row",
     )
@@ -451,7 +446,6 @@ def _make_line_peak_df(rows):
             "peak_period": pl.Utf8,
             "peak_in": pl.Int64,
             "peak_out": pl.Int64,
-            "reminder": pl.Utf8,
         },
         orient="row",
     )
@@ -466,9 +460,7 @@ def _frames(**kwargs) -> ReportFrames:
 def _zone_frames(date="2026-05-01", weekday="星期五", period="09:00", value=10):
     return _frames(
         zone_hourly=_make_zone_hourly_df([(date, weekday, period, "checkout", value)]),
-        zone_peak=_make_zone_peak_df(
-            [(date, weekday, "checkout", period, value, "無")]
-        ),
+        zone_peak=_make_zone_peak_df([(date, weekday, "checkout", period, value)]),
     )
 
 
@@ -481,8 +473,8 @@ def _full_frames(date="2026-05-01", weekday="星期五", period="09:00"):
         ]
     )
     peak_rows = [
-        (date, weekday, "四樓書店", "main_gate", period, 30, 12, "無"),
-        (date, weekday, "四樓書店", "side_gate", period, 5, 9, "無"),
+        (date, weekday, "四樓書店", "main_gate", period, 30, 12),
+        (date, weekday, "四樓書店", "side_gate", period, 5, 9),
     ]
     return zone._replace(
         line_hourly=line_hourly,
@@ -520,21 +512,121 @@ def _sheet_rows(path: Path) -> dict[str, list[tuple]]:
 
 
 def test_write_report_creates_all_sheets_with_headers(tmp_path):
-    """不論該 bucket 有沒有計數線，6 個分頁的表頭一律建立，讓 BI 端的 schema 穩定。"""
+    """不論該 bucket 有沒有計數線，6 個分頁的表頭一律建立，讓 BI 端的 schema 穩定。
+
+    表頭寫死字面值而非拿 constants 的常數比對：常數比對是恆等式，改了定義照樣
+    通過，擋不住無意間的欄位增刪。這些字串是 BI 端接的對外契約，該由測試釘住。
+    """
     path = tmp_path / "report.xlsx"
     _write(path, _zone_frames(), on_duplicate_date="append")
 
     wb = openpyxl.load_workbook(path)
     assert wb.sheetnames == list(_ALL_SHEETS)
-    assert [c.value for c in wb[SHEET_ZONE_HOURLY][1]] == ZONE_HOURLY_HEADERS
-    assert [c.value for c in wb[SHEET_ZONE_PEAK][1]] == ZONE_PEAK_HEADERS
-    assert [c.value for c in wb[SHEET_LINE_HOURLY][1]] == LINE_HOURLY_HEADERS
-    assert [c.value for c in wb[SHEET_LINE_PEAK_IN][1]] == LINE_PEAK_HEADERS
-    assert [c.value for c in wb[SHEET_LINE_PEAK_OUT][1]] == LINE_PEAK_HEADERS
-    assert [c.value for c in wb[SHEET_EVENTS][1]] == EVENTS_HEADERS
+    assert [c.value for c in wb[SHEET_ZONE_HOURLY][1]] == [
+        "日期", "星期", "小時", "區域", "人流量",
+    ]
+    assert [c.value for c in wb[SHEET_ZONE_PEAK][1]] == [
+        "日期", "星期", "區域", "尖峰時段", "尖峰人流",
+    ]
+    assert [c.value for c in wb[SHEET_LINE_HOURLY][1]] == [
+        "日期", "星期", "小時", "群組", "計數線", "進場人數", "出場人數", "淨進出",
+    ]
+    line_peak_headers = [
+        "日期", "星期", "群組", "計數線", "尖峰時段", "尖峰進場", "尖峰出場",
+    ]
+    assert [c.value for c in wb[SHEET_LINE_PEAK_IN][1]] == line_peak_headers
+    assert [c.value for c in wb[SHEET_LINE_PEAK_OUT][1]] == line_peak_headers
+    assert [c.value for c in wb[SHEET_EVENTS][1]] == [
+        "日期", "星期", "開始時間", "結束時間", "區域", "活動名稱", "活動類型",
+    ]
     # line 側為 None：分頁在、但沒有資料列
     assert wb[SHEET_LINE_HOURLY].max_row == 1
     wb.close()
+
+
+def test_write_report_rejects_frame_missing_a_defined_column(tmp_path):
+    """資料側少了分頁定義中的欄位時，寫檔階段要 fail loud。
+
+    表頭與資料欄名同源、且寫入時按欄名取值，就是為了讓「改了 stats.py 的 select
+    卻沒同步 constants.py」這類漂移在這裡爆掉，而不是靜默把值填進錯的表頭底下。
+    """
+    path = tmp_path / "report.xlsx"
+    frames = _zone_frames()
+    broken = frames.zone_peak.drop("peak_value")
+
+    with pytest.raises(pl.exceptions.ColumnNotFoundError, match="peak_value"):
+        _write(path, frames._replace(zone_peak=broken), on_duplicate_date="append")
+
+
+def test_write_report_puts_each_value_under_its_paired_header(tmp_path):
+    """每個表頭底下的值必須來自與它配對的資料欄。
+
+    這是 (資料欄名, 中文表頭) 序對本身要保護的東西：序對裡的資料欄名配錯（例如
+    把 `peak_value` 配到「尖峰時段」、`peak_period` 配到「尖峰人流」）時，欄數不變、
+    表頭不變、也沒有缺欄，表頭字面值／缺欄／欄序那三支測試全都攔不住，但報表會把
+    人數寫進時段欄交給 BI。故意讓各欄的值型別與內容互不相似，錯位一眼可辨。
+    """
+    path = tmp_path / "report.xlsx"
+    _write(path, _full_frames(date="2026-05-01", weekday="星期五", period="09:00"), "append")
+
+    wb = openpyxl.load_workbook(path)
+    zone_peak = wb[SHEET_ZONE_PEAK]
+    assert dict(
+        zip([c.value for c in zone_peak[1]], [c.value for c in zone_peak[2]])
+    ) == {
+        "日期": "2026-05-01",
+        "星期": "星期五",
+        "區域": "checkout",
+        "尖峰時段": "09:00",
+        "尖峰人流": 10,
+    }
+
+    line_peak = wb[SHEET_LINE_PEAK_IN]
+    assert dict(
+        zip([c.value for c in line_peak[1]], [c.value for c in line_peak[2]])
+    ) == {
+        "日期": "2026-05-01",
+        "星期": "星期五",
+        "群組": "四樓書店",
+        "計數線": "main_gate",
+        "尖峰時段": "09:00",
+        "尖峰進場": 30,
+        "尖峰出場": 12,
+    }
+
+    line_hourly = wb[SHEET_LINE_HOURLY]
+    assert dict(
+        zip([c.value for c in line_hourly[1]], [c.value for c in line_hourly[2]])
+    ) == {
+        "日期": "2026-05-01",
+        "星期": "星期五",
+        "小時": "09:00",
+        "群組": "四樓書店",
+        "計數線": "main_gate",
+        "進場人數": 30,
+        "出場人數": 12,
+        "淨進出": 18,
+    }
+    wb.close()
+
+
+def test_write_report_is_insensitive_to_frame_column_order(tmp_path):
+    """分頁的欄序由 constants 的欄位定義決定，不依賴資料側的欄序。
+
+    stats.py 的 select 調換順序不該讓報表的值跑到別的表頭底下——這是改成按欄名
+    取值換到的性質，也是位置對齊時代做不到的事。
+    """
+    ordered = tmp_path / "ordered.xlsx"
+    shuffled = tmp_path / "shuffled.xlsx"
+    frames = _zone_frames()
+    reordered = frames.zone_peak.select(
+        ["peak_value", "date", "zone", "weekday", "peak_period"]
+    )
+
+    _write(ordered, frames, on_duplicate_date="append")
+    _write(shuffled, frames._replace(zone_peak=reordered), on_duplicate_date="append")
+
+    assert _sheet_rows(shuffled) == _sheet_rows(ordered)
 
 
 def test_write_report_adds_missing_sheets_to_legacy_workbook(tmp_path):
@@ -544,10 +636,10 @@ def test_write_report_adds_missing_sheets_to_legacy_workbook(tmp_path):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     legacy_hourly = wb.create_sheet("每小時人流")
-    legacy_hourly.append(ZONE_HOURLY_HEADERS)
+    legacy_hourly.append([header for _, header in ZONE_HOURLY_COLUMNS])
     legacy_hourly.append(["2026-04-01", "星期三", "09:00", "checkout", 3])
     events = wb.create_sheet(SHEET_EVENTS)
-    events.append(EVENTS_HEADERS)
+    events.append(["日期", "星期", "開始時間", "結束時間", "區域", "活動名稱", "活動類型"])
     wb.save(path)
     wb.close()
 

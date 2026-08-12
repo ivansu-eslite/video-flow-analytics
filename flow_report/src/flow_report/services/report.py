@@ -31,9 +31,9 @@ from flow_report.config.constants import (
     COLUMN_WIDTH,
     EVENTS_HEADERS,
     LINE_COUNTS_FILENAME,
-    LINE_HOURLY_HEADERS,
+    LINE_HOURLY_COLUMNS,
     LINE_HOURLY_SORT_COLUMNS,
-    LINE_PEAK_HEADERS,
+    LINE_PEAK_COLUMNS,
     LINE_PEAK_SORT_COLUMNS,
     OUTPUT_ROOT,
     REPORT_FILENAME,
@@ -45,9 +45,9 @@ from flow_report.config.constants import (
     SHEET_ZONE_PEAK,
     TMP_SUFFIX,
     ZONE_COUNTS_FILENAME,
-    ZONE_HOURLY_HEADERS,
+    ZONE_HOURLY_COLUMNS,
     ZONE_HOURLY_SORT_COLUMNS,
-    ZONE_PEAK_HEADERS,
+    ZONE_PEAK_COLUMNS,
     ZONE_PEAK_SORT_COLUMNS,
 )
 from flow_report.services.stats import (
@@ -77,29 +77,41 @@ class ReportFrames(NamedTuple):
 
 
 class _DataSheet(NamedTuple):
-    """一個由本階段寫入的分頁：分頁名、表頭、排序欄與對應的 `ReportFrames` 欄位。"""
+    """一個由本階段寫入的分頁：分頁名、欄位定義、排序欄與對應的 `ReportFrames` 欄位。
+
+    `columns` 是 (資料欄名, 中文表頭) 序對，見 `config/constants.py`；表頭與取值
+    欄名同源，故 `headers` 由它衍生而非另存一份。
+    """
 
     name: str
-    headers: list[str]
+    columns: tuple[tuple[str, str], ...]
     sort_columns: tuple[str, ...]
     field: str
+
+    @property
+    def headers(self) -> list[str]:
+        return [header for _, header in self.columns]
+
+    @property
+    def data_columns(self) -> list[str]:
+        return [name for name, _ in self.columns]
 
 
 # 由本階段寫入的分頁。`活動事件` 不在此列：它的寫入者是其他來源，本階段只建表頭，
 # 既不寫入、也不因 overwrite 而清除該日的列（清了會刪掉別人的資料）。
 _DATA_SHEETS = (
     _DataSheet(
-        SHEET_ZONE_HOURLY, ZONE_HOURLY_HEADERS, ZONE_HOURLY_SORT_COLUMNS, "zone_hourly"
+        SHEET_ZONE_HOURLY, ZONE_HOURLY_COLUMNS, ZONE_HOURLY_SORT_COLUMNS, "zone_hourly"
     ),
-    _DataSheet(SHEET_ZONE_PEAK, ZONE_PEAK_HEADERS, ZONE_PEAK_SORT_COLUMNS, "zone_peak"),
+    _DataSheet(SHEET_ZONE_PEAK, ZONE_PEAK_COLUMNS, ZONE_PEAK_SORT_COLUMNS, "zone_peak"),
     _DataSheet(
-        SHEET_LINE_HOURLY, LINE_HOURLY_HEADERS, LINE_HOURLY_SORT_COLUMNS, "line_hourly"
-    ),
-    _DataSheet(
-        SHEET_LINE_PEAK_IN, LINE_PEAK_HEADERS, LINE_PEAK_SORT_COLUMNS, "line_peak_in"
+        SHEET_LINE_HOURLY, LINE_HOURLY_COLUMNS, LINE_HOURLY_SORT_COLUMNS, "line_hourly"
     ),
     _DataSheet(
-        SHEET_LINE_PEAK_OUT, LINE_PEAK_HEADERS, LINE_PEAK_SORT_COLUMNS, "line_peak_out"
+        SHEET_LINE_PEAK_IN, LINE_PEAK_COLUMNS, LINE_PEAK_SORT_COLUMNS, "line_peak_in"
+    ),
+    _DataSheet(
+        SHEET_LINE_PEAK_OUT, LINE_PEAK_COLUMNS, LINE_PEAK_SORT_COLUMNS, "line_peak_out"
     ),
 )
 
@@ -339,8 +351,14 @@ def _remove_rows_for_dates(ws: Worksheet, dates: set[str]) -> None:
         ws.delete_rows(row_idx)
 
 
-def _append_rows(ws: Worksheet, df: pl.DataFrame) -> None:
-    for row in df.iter_rows():
+def _append_rows(ws: Worksheet, df: pl.DataFrame, data_columns: list[str]) -> None:
+    """依分頁的欄位定義取值後逐列寫入。
+
+    先 `select` 再寫，是為了讓欄序由分頁定義決定、而非依賴 `services/stats.py` 的
+    `select` 恰好排成同樣順序；資料側少了定義中的欄位時，polars 會在這裡拋
+    `ColumnNotFoundError`，不會靜默把值填進錯的表頭底下。
+    """
+    for row in df.select(data_columns).iter_rows():
         ws.append(row)
 
 
@@ -433,7 +451,7 @@ def _write_report(
                 # `None` 的分頁只清不寫，見 _frame_dates 的說明
                 _remove_rows_for_dates(ws, new_dates)
             if df is not None:
-                _append_rows(ws, df)
+                _append_rows(ws, df, sheet.data_columns)
             if on_duplicate_date == "overwrite":
                 _sort_rows(
                     ws,

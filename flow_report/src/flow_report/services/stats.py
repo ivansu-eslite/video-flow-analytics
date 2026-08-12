@@ -1,13 +1,11 @@
-"""人流報表的核心演算法：時區轉換、期間彙總、尖峰計算、用餐時段規則。
+"""人流報表的核心演算法：時區轉換、期間彙總、尖峰計算。
 
 所有函式皆為純運算（不做任何檔案 I/O），方便單元測試；I/O 與 orchestration
 在 services/report.py。zone（區域佔用）與 line（計數線進出）的彙總各有一組
-函式，共用時區轉換與星期／用餐時段規則。
+函式，共用時區轉換與星期規則。
 """
 
 import polars as pl
-
-from flow_report.config.constants import MEAL_THRESHOLDS
 
 _WEEKDAY_NAMES = {
     1: "星期一", 2: "星期二", 3: "星期三",
@@ -123,21 +121,6 @@ def rollup_lines_by_period(df: pl.DataFrame, period_minutes: int) -> pl.DataFram
     )
 
 
-def meal_time_reminder(hour: int) -> str:
-    """依尖峰時段所在小時給出用餐時段提醒文字。
-
-    Args:
-        hour: 尖峰期間起始的小時（0-23）。
-
-    Returns:
-        午餐/晚餐時段提醒文字；不在用餐時段則為「無」。
-    """
-    for start, end, message in MEAL_THRESHOLDS:
-        if start <= hour < end:
-            return message
-    return "無"
-
-
 def peak_per_day(rollup_df: pl.DataFrame) -> pl.DataFrame:
     """每個 (date, zone) 取 value 最大的期間；並列時取時間較早的期間。
 
@@ -145,8 +128,7 @@ def peak_per_day(rollup_df: pl.DataFrame) -> pl.DataFrame:
         rollup_df: `rollup_by_period` 的輸出。
 
     Returns:
-        每個 (date, zone) 一列的尖峰統計，含 `peak_period`／`peak_value`／
-        `reminder` 欄位。
+        每個 (date, zone) 一列的尖峰統計，含 `peak_period`／`peak_value` 欄位。
     """
     sorted_df = rollup_df.sort(
         ["date", "zone", "value", "period"],
@@ -155,19 +137,12 @@ def peak_per_day(rollup_df: pl.DataFrame) -> pl.DataFrame:
     # maintain_order=True 不可省略：unique() 預設不保證輸出列順序，而本函式的結果
     # 會直接寫入 report.xlsx，列序需在重跑間穩定（見同檔的重跑列序回歸測試）。
     peaks = sorted_df.unique(subset=["date", "zone"], keep="first", maintain_order=True)
-    reminders = [
-        meal_time_reminder(int(period.split(":")[0]))
-        for period in peaks["period"].to_list()
-    ]
-    # 明寫 dtype：當日無任何 zone 事件（0 列）時空 list 推不出型別，reminder 欄會
-    # 變成 Null dtype（理由同 peak_lines_per_day）。
-    return peaks.with_columns(pl.Series("reminder", reminders, dtype=pl.Utf8)).select(
+    return peaks.select(
         "date",
         "weekday",
         "zone",
         pl.col("period").alias("peak_period"),
         pl.col("value").alias("peak_value"),
-        "reminder",
     )
 
 
@@ -184,7 +159,7 @@ def peak_lines_per_day(rollup_df: pl.DataFrame, metric_column: str) -> pl.DataFr
 
     Returns:
         每個 (date, line) 一列的尖峰統計，含 `peak_period`／`peak_in`／
-        `peak_out`／`reminder` 欄位。
+        `peak_out` 欄位。
     """
     sorted_df = rollup_df.sort(
         ["date", "line", metric_column, "period"],
@@ -192,13 +167,7 @@ def peak_lines_per_day(rollup_df: pl.DataFrame, metric_column: str) -> pl.DataFr
     )
     # maintain_order=True 不可省略，理由同 peak_per_day：列序需在重跑間穩定。
     peaks = sorted_df.unique(subset=["date", "line"], keep="first", maintain_order=True)
-    reminders = [
-        meal_time_reminder(int(period.split(":")[0]))
-        for period in peaks["period"].to_list()
-    ]
-    # 明寫 dtype：當日無任何跨越事件（0 列）是 line_counting 的正常產物，
-    # 空 list 推不出型別會讓 reminder 欄變成 Null dtype。
-    return peaks.with_columns(pl.Series("reminder", reminders, dtype=pl.Utf8)).select(
+    return peaks.select(
         "date",
         "weekday",
         "line_group",
@@ -206,5 +175,4 @@ def peak_lines_per_day(rollup_df: pl.DataFrame, metric_column: str) -> pl.DataFr
         pl.col("period").alias("peak_period"),
         pl.col("in_count").alias("peak_in"),
         pl.col("out_count").alias("peak_out"),
-        "reminder",
     )
