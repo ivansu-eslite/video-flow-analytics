@@ -51,10 +51,15 @@ bucket_minutes, output_root=OUTPUT_ROOT) -> Path`（在 `services/report.py`）�
 | 目錄 | 內容 |
 | --- | --- |
 | `main.py` | CLI 外殼：讀 `settings` → 組參數 → 呼叫 `export_report_daily` |
-| `config/constants.py` | 非 Pydantic 靜態常數（分頁名、表頭、排序欄、預設路徑等） |
+| `config/constants.py` | 非 Pydantic 靜態常數（分頁名、欄位定義、排序欄、預設路徑等） |
 | `models/config.py` | pydantic-settings 設定模型與全域單例 `settings` |
 | `services/report.py` | 報表 orchestration、I/O 與 Excel 讀寫 |
 | `services/stats.py` | 時區轉換、期間彙總、尖峰計算等純函式 |
+
+**報表欄位只定義一次**：每個分頁的欄位以 `(資料欄名, 中文表頭)` 序對寫在
+`config/constants.py`，寫檔時按欄名取值。要增刪報表欄位改這一處，分頁的欄序也由它決定，
+與 `services/stats.py` 的 `select` 順序無關；資料側少了定義中的欄位會在寫檔階段直接拋錯，
+不會把值靜默填進錯的表頭底下。
 
 下列三者由四包共用的 lib 提供，以 workspace 成員引用，不在本包內：`camera_registry.yaml`
 的模型與 zone／line 驗證（[libs/vfa_registry](../libs/vfa_registry)）、單行 JSON 的

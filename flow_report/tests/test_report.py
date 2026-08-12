@@ -9,17 +9,13 @@ import pytest
 import yaml
 
 from flow_report.config.constants import (
-    EVENTS_HEADERS,
-    LINE_HOURLY_HEADERS,
-    LINE_PEAK_HEADERS,
     SHEET_EVENTS,
     SHEET_LINE_HOURLY,
     SHEET_LINE_PEAK_IN,
     SHEET_LINE_PEAK_OUT,
     SHEET_ZONE_HOURLY,
     SHEET_ZONE_PEAK,
-    ZONE_HOURLY_HEADERS,
-    ZONE_PEAK_HEADERS,
+    ZONE_HOURLY_COLUMNS,
 )
 from flow_report.services.report import (
     ReportFrames,
@@ -516,21 +512,69 @@ def _sheet_rows(path: Path) -> dict[str, list[tuple]]:
 
 
 def test_write_report_creates_all_sheets_with_headers(tmp_path):
-    """不論該 bucket 有沒有計數線，6 個分頁的表頭一律建立，讓 BI 端的 schema 穩定。"""
+    """不論該 bucket 有沒有計數線，6 個分頁的表頭一律建立，讓 BI 端的 schema 穩定。
+
+    表頭寫死字面值而非拿 constants 的常數比對：常數比對是恆等式，改了定義照樣
+    通過，擋不住無意間的欄位增刪。這些字串是 BI 端接的對外契約，該由測試釘住。
+    """
     path = tmp_path / "report.xlsx"
     _write(path, _zone_frames(), on_duplicate_date="append")
 
     wb = openpyxl.load_workbook(path)
     assert wb.sheetnames == list(_ALL_SHEETS)
-    assert [c.value for c in wb[SHEET_ZONE_HOURLY][1]] == ZONE_HOURLY_HEADERS
-    assert [c.value for c in wb[SHEET_ZONE_PEAK][1]] == ZONE_PEAK_HEADERS
-    assert [c.value for c in wb[SHEET_LINE_HOURLY][1]] == LINE_HOURLY_HEADERS
-    assert [c.value for c in wb[SHEET_LINE_PEAK_IN][1]] == LINE_PEAK_HEADERS
-    assert [c.value for c in wb[SHEET_LINE_PEAK_OUT][1]] == LINE_PEAK_HEADERS
-    assert [c.value for c in wb[SHEET_EVENTS][1]] == EVENTS_HEADERS
+    assert [c.value for c in wb[SHEET_ZONE_HOURLY][1]] == [
+        "日期", "星期", "小時", "區域", "人流量",
+    ]
+    assert [c.value for c in wb[SHEET_ZONE_PEAK][1]] == [
+        "日期", "星期", "區域", "尖峰時段", "尖峰人流",
+    ]
+    assert [c.value for c in wb[SHEET_LINE_HOURLY][1]] == [
+        "日期", "星期", "小時", "群組", "計數線", "進場人數", "出場人數", "淨進出",
+    ]
+    line_peak_headers = [
+        "日期", "星期", "群組", "計數線", "尖峰時段", "尖峰進場", "尖峰出場",
+    ]
+    assert [c.value for c in wb[SHEET_LINE_PEAK_IN][1]] == line_peak_headers
+    assert [c.value for c in wb[SHEET_LINE_PEAK_OUT][1]] == line_peak_headers
+    assert [c.value for c in wb[SHEET_EVENTS][1]] == [
+        "日期", "星期", "開始時間", "結束時間", "區域", "活動名稱", "活動類型",
+    ]
     # line 側為 None：分頁在、但沒有資料列
     assert wb[SHEET_LINE_HOURLY].max_row == 1
     wb.close()
+
+
+def test_write_report_rejects_frame_missing_a_defined_column(tmp_path):
+    """資料側少了分頁定義中的欄位時，寫檔階段要 fail loud。
+
+    表頭與資料欄名同源、且寫入時按欄名取值，就是為了讓「改了 stats.py 的 select
+    卻沒同步 constants.py」這類漂移在這裡爆掉，而不是靜默把值填進錯的表頭底下。
+    """
+    path = tmp_path / "report.xlsx"
+    frames = _zone_frames()
+    broken = frames.zone_peak.drop("peak_value")
+
+    with pytest.raises(pl.exceptions.ColumnNotFoundError, match="peak_value"):
+        _write(path, frames._replace(zone_peak=broken), on_duplicate_date="append")
+
+
+def test_write_report_is_insensitive_to_frame_column_order(tmp_path):
+    """分頁的欄序由 constants 的欄位定義決定，不依賴資料側的欄序。
+
+    stats.py 的 select 調換順序不該讓報表的值跑到別的表頭底下——這是改成按欄名
+    取值換到的性質，也是位置對齊時代做不到的事。
+    """
+    ordered = tmp_path / "ordered.xlsx"
+    shuffled = tmp_path / "shuffled.xlsx"
+    frames = _zone_frames()
+    reordered = frames.zone_peak.select(
+        ["peak_value", "date", "zone", "weekday", "peak_period"]
+    )
+
+    _write(ordered, frames, on_duplicate_date="append")
+    _write(shuffled, frames._replace(zone_peak=reordered), on_duplicate_date="append")
+
+    assert _sheet_rows(shuffled) == _sheet_rows(ordered)
 
 
 def test_write_report_adds_missing_sheets_to_legacy_workbook(tmp_path):
@@ -540,10 +584,10 @@ def test_write_report_adds_missing_sheets_to_legacy_workbook(tmp_path):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     legacy_hourly = wb.create_sheet("每小時人流")
-    legacy_hourly.append(ZONE_HOURLY_HEADERS)
+    legacy_hourly.append([header for _, header in ZONE_HOURLY_COLUMNS])
     legacy_hourly.append(["2026-04-01", "星期三", "09:00", "checkout", 3])
     events = wb.create_sheet(SHEET_EVENTS)
-    events.append(EVENTS_HEADERS)
+    events.append(["日期", "星期", "開始時間", "結束時間", "區域", "活動名稱", "活動類型"])
     wb.save(path)
     wb.close()
 

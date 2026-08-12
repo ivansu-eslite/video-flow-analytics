@@ -25,29 +25,48 @@ SHEET_LINE_PEAK_IN = "各出入口每日進場尖峰"
 SHEET_LINE_PEAK_OUT = "各出入口每日出場尖峰"
 SHEET_EVENTS = "活動事件"
 
-# Excel 報表標頭定義。兩個 line 尖峰分頁的表頭相同，只差尖峰時段取自 in_count
-# 還是 out_count，故共用同一份 LINE_PEAK_HEADERS。
-ZONE_HOURLY_HEADERS = ["日期", "星期", "小時", "區域", "人流量"]
-ZONE_PEAK_HEADERS = ["日期", "星期", "區域", "尖峰時段", "尖峰人流"]
-LINE_HOURLY_HEADERS = [
-    "日期",
-    "星期",
-    "小時",
-    "群組",
-    "計數線",
-    "進場人數",
-    "出場人數",
-    "淨進出",
-]
-LINE_PEAK_HEADERS = [
-    "日期",
-    "星期",
-    "群組",
-    "計數線",
-    "尖峰時段",
-    "尖峰進場",
-    "尖峰出場",
-]
+# Excel 報表的欄位定義：(`services/stats.py` 輸出的資料欄名, 中文表頭)。
+#
+# 兩者寫在同一個序對而非兩份清單，是因為寫檔時是**按欄名取值**（見 report.py 的
+# `_append_rows`）：資料側改了欄名或少了欄位，寫檔階段就會拋錯，不會靜默把值填進
+# 錯的表頭底下。序對的順序即分頁的欄序，與資料側的 `select` 順序無關。
+#
+# 兩個 line 尖峰分頁的欄位相同，只差尖峰時段取自 in_count 還是 out_count，故共用
+# 同一份 LINE_PEAK_COLUMNS。
+ZONE_HOURLY_COLUMNS = (
+    ("date", "日期"),
+    ("weekday", "星期"),
+    ("period", "小時"),
+    ("zone", "區域"),
+    ("value", "人流量"),
+)
+ZONE_PEAK_COLUMNS = (
+    ("date", "日期"),
+    ("weekday", "星期"),
+    ("zone", "區域"),
+    ("peak_period", "尖峰時段"),
+    ("peak_value", "尖峰人流"),
+)
+LINE_HOURLY_COLUMNS = (
+    ("date", "日期"),
+    ("weekday", "星期"),
+    ("period", "小時"),
+    ("line_group", "群組"),
+    ("line", "計數線"),
+    ("in_count", "進場人數"),
+    ("out_count", "出場人數"),
+    ("net", "淨進出"),
+)
+LINE_PEAK_COLUMNS = (
+    ("date", "日期"),
+    ("weekday", "星期"),
+    ("line_group", "群組"),
+    ("line", "計數線"),
+    ("peak_period", "尖峰時段"),
+    ("peak_in", "尖峰進場"),
+    ("peak_out", "尖峰出場"),
+)
+# 活動事件的寫入者是其他來源，本階段只建表頭、沒有資料側，故維持純表頭清單。
 EVENTS_HEADERS = [
     "日期",
     "星期",
