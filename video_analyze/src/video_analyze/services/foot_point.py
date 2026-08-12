@@ -13,6 +13,8 @@ H 取**頂邊中點**而非 head 框中心，是為了退化性質：人站直�
 配對與選法的取捨（含被實測推翻的直覺）見 docs/adr/shared/009-head-based-foot-point.md。
 """
 
+from collections import Counter
+
 import numpy as np
 
 # head 框面積佔 fbody 框的比例上限：超過就不是「框裡的一顆頭」（多半是把整個人
@@ -176,6 +178,11 @@ class FootPointEstimator:
     寬高。距上次成功推算超過 `_OFFSET_TTL_FRAMES` 格才放棄沿用、退回框底邊中點——姿勢
     早就變了，舊偏移不再有代表性。
 
+    寫入快取的條件比「這格推算成功」更嚴：同一幀內若一顆 head 被兩個以上 fbody 配到，
+    這些框的推算結果照樣使用，但都不寫入快取。配對沒有全域指派（ADR-009 的已知限制），
+    共用時至少有一邊是錯配且分不出是哪一邊，寫進去等於把單幀的錯配放大成最多 60 格的
+    持續偏移。
+
     狀態以 `(stream_id, track_id)` 為鍵。實測（ultralytics 8.4.75）`track_id` 由
     `BaseTrack._count` 這個 class 變數發放，同一進程內所有 `BYTETracker` 實例共用，
     跨路不會撞號——所以 `stream_id` 目前是多餘的。**刻意保留**：那是 ultralytics 的
@@ -226,16 +233,25 @@ class FootPointEstimator:
         self._ticks[stream_id] = tick
         heads = np.asarray(heads, dtype=float).reshape(-1, 4)
 
+        # 同一幀被兩個以上 fbody 配到的 head：其中至少一邊是錯配，而沒有全域指派就
+        # 分不出是哪一邊。這種推算結果只用在這一格、不進快取，錯配才不會被沿用成最多
+        # 60 格的持續偏移。
+        matched = [_match_head(body, heads) for body in boxes]
+        shared = {
+            j for j, n in Counter(j for j in matched if j is not None).items() if n > 1
+        }
+
         for i, body in enumerate(boxes):
             key = (stream_id, int(tracks[i][4]))
             size = np.array(
                 [max(body[2] - body[0], 1e-6), max(body[3] - body[1], 1e-6)]
             )
             bottom = points[i].copy()  # 覆寫前先留著，偏移量是相對它算的
-            j = _match_head(body, heads)
+            j = matched[i]
             if j is not None:
                 points[i] = _reflect(body, heads[j])
-                self._offsets[key] = ((points[i] - bottom) / size, tick)
+                if j not in shared:
+                    self._offsets[key] = ((points[i] - bottom) / size, tick)
                 continue
             remembered = self._offsets.get(key)
             if remembered is not None and tick - remembered[1] <= _OFFSET_TTL_FRAMES:
