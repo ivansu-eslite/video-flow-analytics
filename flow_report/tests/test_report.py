@@ -558,6 +558,58 @@ def test_write_report_rejects_frame_missing_a_defined_column(tmp_path):
         _write(path, frames._replace(zone_peak=broken), on_duplicate_date="append")
 
 
+def test_write_report_puts_each_value_under_its_paired_header(tmp_path):
+    """每個表頭底下的值必須來自與它配對的資料欄。
+
+    這是 (資料欄名, 中文表頭) 序對本身要保護的東西：序對裡的資料欄名配錯（例如
+    把 `peak_value` 配到「尖峰時段」、`peak_period` 配到「尖峰人流」）時，欄數不變、
+    表頭不變、也沒有缺欄，表頭字面值／缺欄／欄序那三支測試全都攔不住，但報表會把
+    人數寫進時段欄交給 BI。故意讓各欄的值型別與內容互不相似，錯位一眼可辨。
+    """
+    path = tmp_path / "report.xlsx"
+    _write(path, _full_frames(date="2026-05-01", weekday="星期五", period="09:00"), "append")
+
+    wb = openpyxl.load_workbook(path)
+    zone_peak = wb[SHEET_ZONE_PEAK]
+    assert dict(
+        zip([c.value for c in zone_peak[1]], [c.value for c in zone_peak[2]])
+    ) == {
+        "日期": "2026-05-01",
+        "星期": "星期五",
+        "區域": "checkout",
+        "尖峰時段": "09:00",
+        "尖峰人流": 10,
+    }
+
+    line_peak = wb[SHEET_LINE_PEAK_IN]
+    assert dict(
+        zip([c.value for c in line_peak[1]], [c.value for c in line_peak[2]])
+    ) == {
+        "日期": "2026-05-01",
+        "星期": "星期五",
+        "群組": "四樓書店",
+        "計數線": "main_gate",
+        "尖峰時段": "09:00",
+        "尖峰進場": 30,
+        "尖峰出場": 12,
+    }
+
+    line_hourly = wb[SHEET_LINE_HOURLY]
+    assert dict(
+        zip([c.value for c in line_hourly[1]], [c.value for c in line_hourly[2]])
+    ) == {
+        "日期": "2026-05-01",
+        "星期": "星期五",
+        "小時": "09:00",
+        "群組": "四樓書店",
+        "計數線": "main_gate",
+        "進場人數": 30,
+        "出場人數": 12,
+        "淨進出": 18,
+    }
+    wb.close()
+
+
 def test_write_report_is_insensitive_to_frame_column_order(tmp_path):
     """分頁的欄序由 constants 的欄位定義決定，不依賴資料側的欄序。
 

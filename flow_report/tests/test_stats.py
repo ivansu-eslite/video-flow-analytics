@@ -284,7 +284,7 @@ def test_peak_lines_per_day_rerun_produces_identical_row_order():
 
 def test_peak_lines_per_day_handles_empty_input():
     # 當日無任何跨越事件時 line_counting 會寫出 0 列的正常產物；欄位仍須完整，
-    # 寫入 report.xlsx 時是靠欄序對齊表頭
+    # 少了任何一欄都會讓 report.py 的 _append_rows 取值時拋 ColumnNotFoundError。
     result = peak_lines_per_day(_make_line_rollup([]), "in_count")
     assert result.height == 0
     assert result.columns == [
