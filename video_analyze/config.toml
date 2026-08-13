@@ -18,9 +18,6 @@ classes = [0, 2]           # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
 # "bbox_bottom" = 框底邊中點，改用 head 推算之前的做法，保留供對照與回退
 method = "head"
 
-[output]
-save_video = false # 設為 true 會儲存影片；設為 false 則只跑推理不存檔
-
 [input]
 # bucket_dir／outputs 皆為 cwd 相對路徑：一律以
 # `uv run --package video_analyze video_analyze` 在 repo 根執行（見 README）。

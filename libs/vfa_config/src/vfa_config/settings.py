@@ -16,7 +16,7 @@ class InputConfig(BaseModel):
     變數的環境就會讓其他包在 import 期以 `extra_forbidden` 崩潰（模組層即
     `load_config()`）。裁剪成各包實際讀到的欄位曾是四包各自的做法，代價就是這個撞名。
 
-    各包私有的 `[tracker]`／`[model]`／`[output]`／`[zone]`／`[line]`／`[report]` 不受此
+    各包私有的 `[tracker]`／`[model]`／`[zone]`／`[line]`／`[report]` 不受此
     限制：那些區塊名本來就只有一包用。取捨與命名空間規則見 ADR-008。
 
     Attributes:

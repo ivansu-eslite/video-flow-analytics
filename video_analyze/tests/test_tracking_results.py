@@ -35,10 +35,8 @@ _WIDTH, _HEIGHT = 1920, 1080
 def _packet(frame_index: int) -> FramePacket:
     return FramePacket(
         frame=np.zeros((4, 4, 3), dtype=np.uint8),
-        segment_relpath="loc_cam001/2026/05/01/010000.000Z.mkv",
         frame_index=frame_index,
         timestamp=_BASE + datetime.timedelta(seconds=frame_index),
-        fps=10.0,
     )
 
 

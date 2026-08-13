@@ -32,10 +32,9 @@ class MultiStreamByteTracker:
         Returns:
             numpy 陣列，每列格式由 ultralytics `BYTETracker.update` 決定，
             目前為 `[x1, y1, x2, y2, track_id, score, cls, idx]`（本專案唯一
-            定義此格式之處，`TrackingResultCollector.add` 與
-            `TrackAnnotator.draw_bboxes` 皆沿用此處的說明，ultralytics
-            版本升級改變欄位時需一併檢查這兩處）；`stream_id` 不存在或當批
-            無存活軌跡時回傳空陣列。
+            定義此格式之處，`TrackingResultCollector.add` 沿用此處的說明，
+            ultralytics 版本升級改變欄位時需一併檢查該處）；`stream_id` 不存在
+            或當批無存活軌跡時回傳空陣列。
         """
         tracker = self.trackers.get(stream_id)
         if tracker is None:
