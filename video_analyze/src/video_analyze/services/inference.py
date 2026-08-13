@@ -78,6 +78,9 @@ class InferencePipeline:
         self.frame_shapes = frame_shapes
         self.num_streams = len(stream_names)
         self.finished_streams = set()
+        # 記住上一次湊批的起點，下一批從下一路開始繞一圈，避免固定從 0 起跑讓單一路
+        # 供得上時就一路取到滿批、其餘路永遠輪不到（issue #100）
+        self._next_stream_start = 0
         self.detector = detector
         self.tracker = tracker
         self.writer = MultiStreamVideoWriter(output_root=output_root)
@@ -106,9 +109,14 @@ class InferencePipeline:
         batch_stream_ids: list[int] = []
         newly_finished: list[int] = []
         fill_deadline: float | None = None
+        order = [
+            (self._next_stream_start + offset) % self.num_streams
+            for offset in range(self.num_streams)
+        ]
+        self._next_stream_start = (self._next_stream_start + 1) % self.num_streams
         while len(batch_packets) < self._target_batch:
             progressed = False
-            for stream_id in range(self.num_streams):
+            for stream_id in order:
                 if stream_id in self.finished_streams:
                     continue
                 data_queue = data_queues[stream_id]
