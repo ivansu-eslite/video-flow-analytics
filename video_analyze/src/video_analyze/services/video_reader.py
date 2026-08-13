@@ -45,12 +45,10 @@ class SegmentInfo:
         path: 片段檔案的完整路徑。
         start: 檔名解析出的錄影起始時間（檔名為 UTC，已轉換為台北時間 UTC+8，
             見 `_FILENAME_TZ` / `_LOCAL_TZ`）。
-        relpath: 相對 bucket 根的路徑（輸出影片會鏡射它）。
     """
 
     path: Path
     start: datetime
-    relpath: Path
 
 
 @dataclass
@@ -59,17 +57,13 @@ class FramePacket:
 
     Attributes:
         frame: 影格畫面（BGR）。
-        segment_relpath: 相對 bucket 根的路徑，輸出影片鏡射此路徑。
         frame_index: 該影格在所屬片段內的序號（從 0 起算）。
         timestamp: 由片段起始時間 + 幀序（`frame_index / fps`）推得的時間戳。
-        fps: 所屬片段的影格率，供逐片段開輸出檔用。
     """
 
     frame: np.ndarray
-    segment_relpath: str
     frame_index: int
     timestamp: datetime
-    fps: float
 
 
 def _parse_segment_start(path: Path, day: date) -> datetime:
@@ -157,11 +151,7 @@ def discover_segments(
     if not day_dir.is_dir():
         return []
     segments = [
-        SegmentInfo(
-            path=p,
-            start=_parse_segment_start(p, day),
-            relpath=p.relative_to(bucket_dir),
-        )
+        SegmentInfo(path=p, start=_parse_segment_start(p, day))
         for p in day_dir.glob(f"*.{file_ext}")
     ]
     segments.sort(key=lambda s: s.start)
@@ -207,7 +197,6 @@ class DailyStreamVideoReader:
             fps = cap.get(cv2.CAP_PROP_FPS)
             if fps <= 0:
                 raise ValueError(f"無法讀取影片 FPS: {segment.path}")
-            relpath = str(segment.relpath)
             frame_index = 0
             while True:
                 ret, frame = cap.read()
@@ -216,7 +205,7 @@ class DailyStreamVideoReader:
                 slot = self.free_queue.get()  # 無空 slot 時阻塞（背壓）
                 self.ring.write_slot(slot, frame)
                 timestamp = segment.start + timedelta(seconds=frame_index / fps)
-                self.data_queue.put((slot, relpath, frame_index, timestamp, fps))
+                self.data_queue.put((slot, frame_index, timestamp))
                 frame_index += 1
         finally:
             cap.release()

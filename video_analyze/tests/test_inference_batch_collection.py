@@ -18,7 +18,6 @@ from video_analyze.services.video_reader import FrameShape
 
 _TAIPEI = ZoneInfo("Asia/Taipei")
 _BASE = datetime.datetime(2026, 8, 1, 11, 0, tzinfo=_TAIPEI)
-_SEGMENT = "cam/2026/08/01/030000.000Z.mkv"
 
 
 class _RingStub:
@@ -34,7 +33,6 @@ def _make_pipeline(num_streams: int, tmp_path: Path) -> InferencePipeline:
         stream_names=names,
         detector=None,
         tracker=None,
-        output_root=tmp_path / "outputs",
         results_path=tmp_path / "outputs" / "tracking_results.parquet",
         frame_shapes=[FrameShape(height=4, width=4)] * num_streams,
     )
@@ -43,7 +41,7 @@ def _make_pipeline(num_streams: int, tmp_path: Path) -> InferencePipeline:
 def _fill(q: pyqueue.Queue, n: int) -> None:
     """塞 n 格假資料，`frame_index` 從 0 起連續遞增（供釘住不亂序用）。"""
     for i in range(n):
-        q.put((i % 16, _SEGMENT, i, _BASE, 15.0))
+        q.put((i % 16, i, _BASE))
 
 
 def test_batches_rotate_across_streams_when_all_have_data(tmp_path):
@@ -58,7 +56,7 @@ def test_batches_rotate_across_streams_when_all_have_data(tmp_path):
 
     sources_per_batch = []
     for _ in range(num_streams):
-        packets, stream_ids, _finished = pipeline._collect_batch(
+        packets, stream_ids = pipeline._collect_batch(
             data_queues, free_queues, rings
         )
         assert len(packets) == pipeline._target_batch
@@ -89,7 +87,7 @@ def test_batch_mixes_sources_when_the_starting_stream_runs_short(tmp_path):
     for q in data_queues[1:]:
         _fill(q, 200)
 
-    packets, stream_ids, _finished = pipeline._collect_batch(
+    packets, stream_ids = pipeline._collect_batch(
         data_queues, free_queues, rings
     )
 
@@ -109,7 +107,7 @@ def test_full_batch_still_fills_from_a_single_remaining_stream(tmp_path):
     _fill(data_queues[5], 200)
 
     for _ in range(3):
-        packets, stream_ids, _finished = pipeline._collect_batch(
+        packets, stream_ids = pipeline._collect_batch(
             data_queues, free_queues, rings
         )
         assert len(packets) == pipeline._target_batch
@@ -128,7 +126,7 @@ def test_frame_order_within_a_stream_is_preserved_across_rotated_batches(tmp_pat
 
     indices_by_stream: dict[int, list[int]] = {i: [] for i in range(num_streams)}
     for _ in range(6):
-        packets, stream_ids, _finished = pipeline._collect_batch(
+        packets, stream_ids = pipeline._collect_batch(
             data_queues, free_queues, rings
         )
         for packet, stream_id in zip(packets, stream_ids, strict=True):

@@ -76,18 +76,6 @@ class FootPointConfig(BaseModel):
     method: Literal["head", "bbox_bottom"] = "head"
 
 
-class OutputConfig(BaseModel):
-    """輸出行為參數。
-
-    Attributes:
-        save_video: 是否輸出逐片段標註影片。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    save_video: bool = False
-
-
 class AppConfig(BaseSettings):
     """`config.toml` 與環境變數對應的完整設定，模組載入時組成全域單例 `settings`。
 
@@ -95,7 +83,6 @@ class AppConfig(BaseSettings):
         tracker: ByteTrack 追蹤器參數。
         model: YOLO 模型參數。
         foot_point: 落腳點推算方式。
-        output: 輸出行為參數。
         input: 共用的 `[input]` 輸入參數（本包讀 `bucket_dir`／`date`／`camera_ids`）。
     """
 
@@ -127,7 +114,6 @@ class AppConfig(BaseSettings):
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
     foot_point: FootPointConfig = Field(default_factory=FootPointConfig)
-    output: OutputConfig = Field(default_factory=OutputConfig)
     input: InputConfig = Field(default_factory=InputConfig)
 
     @model_validator(mode="after")

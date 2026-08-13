@@ -221,7 +221,6 @@ cameras:
 | 路徑 | 產出階段 | 內容 |
 | --- | --- | --- |
 | `outputs/{bucket}/{date}/tracking_results.parquet` | video_analyze | 追蹤明細；含 `foot_x`／`foot_y` 與 `frame_width`／`frame_height`（見下） |
-| `outputs/{bucket}/{date}/…`（鏡射輸入路徑） | video_analyze | 逐片段標註影片，`save_video = true` 時才產出（開發 / 偵錯輔助） |
 | `outputs/{bucket}/{date}/zone_counts.parquet` | zone_mapping | 每時段每區域事件統計 |
 | `outputs/{bucket}/{date}/line_counts.parquet` | line_counting | 每時段每計數線進出人數，欄位 `line_group`／`camera_id`／`line`／`time_bucket`／`in_count`／`out_count` |
 | `outputs/{bucket}/report.xlsx` | flow_report | 跨日累加的 Excel 報表（六個分頁：區域兩頁、出入口三頁、活動事件一頁） |

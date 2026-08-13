@@ -1,13 +1,12 @@
 import datetime
 import multiprocessing as mp
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from vfa_observability import StructuredLogger
 from vfa_registry import load_registry
 
 from video_analyze.config.constants import OUTPUT_ROOT, TRACKING_RESULTS_FILENAME
-from video_analyze.models.config import settings
 from video_analyze.services.detector import YOLODetector
 from video_analyze.services.frame_ring import (
     RING_SLOTS,
@@ -23,7 +22,6 @@ from video_analyze.services.video_reader import (
     probe_frame_shape,
     run_video_reader,
 )
-from video_analyze.services.video_writer import mirrored_output_path
 
 logger = StructuredLogger(component="pipeline")
 
@@ -39,15 +37,11 @@ class AnalysisResult:
             `tracking_results.parquet`，格式不同會導致靜默地全數落空。
         tracking_results_path: 追蹤結果 parquet 的路徑（字串，非 `Path`
             物件；需要 `Path` 操作時呼叫端須自行包一層 `Path(...)`）。
-        output_video_paths: 已輸出的標註影片路徑清單；`save_video=False` 時
-            為空清單，且只列出實際成功寫出的檔案（0 幀等未產生輸出的片段
-            會被略過，不在清單內）。
     """
 
     date: datetime.date
     camera_ids: list[str]
     tracking_results_path: str
-    output_video_paths: list[str] = field(default_factory=list)
 
 
 def run_inference_pipeline(
@@ -56,7 +50,6 @@ def run_inference_pipeline(
     ring_buffers: list,
     frame_shapes: list[FrameShape],
     stream_names: list[str],
-    output_root: Path,
     results_path: Path,
 ) -> None:
     """推理子進程的進入點：建構偵測器/追蹤器/環形緩衝後啟動推理主迴圈。
@@ -71,7 +64,6 @@ def run_inference_pipeline(
         frame_shapes: 各路的 `FrameShape`，索引與 `ring_buffers` 對應；
             除了配置環形緩衝，也逐列寫進追蹤結果 parquet。
         stream_names: 各路攝影機的 `stream_dirname`。
-        output_root: 標註影片輸出根目錄。
         results_path: 追蹤結果 parquet 的目標路徑。
     """
     detector = YOLODetector()
@@ -84,7 +76,6 @@ def run_inference_pipeline(
         stream_names=stream_names,
         detector=detector,
         tracker=tracker,
-        output_root=output_root,
         results_path=results_path,
         frame_shapes=frame_shapes,
     )
@@ -113,7 +104,7 @@ def analyze_daily(
 
     以參數傳入 `bucket_dir`（而非讀全域 `settings`），讓本函式可重複以不同
     bucket 呼叫。內部會拆成 N 個讀取子進程 + 1 個推理子進程，逐段掃描指定
-    日期的影片、輸出追蹤明細 parquet 與（依設定）逐片段標註影片。
+    日期的影片、輸出追蹤明細 parquet。
 
     Args:
         date: 要分析的日期。
@@ -182,7 +173,6 @@ def analyze_daily(
                 ring_buffers,
                 frame_shapes,
                 stream_names,
-                output_root,
                 results_path,
             ),
         )
@@ -222,19 +212,8 @@ def analyze_daily(
         _terminate_all(processes)
         raise
 
-    output_video_paths = (
-        [
-            str(out_path)
-            for segments in segments_per_stream
-            for seg in segments
-            if (out_path := mirrored_output_path(output_root, seg.relpath)).exists()
-        ]
-        if settings.output.save_video
-        else []
-    )
     return AnalysisResult(
         date=date,
         camera_ids=stream_names,
         tracking_results_path=str(results_path),
-        output_video_paths=output_video_paths,
     )

@@ -21,7 +21,7 @@
 `INPUT__BUCKET_MINUTES` 會打死另外三包（`flow_report` 自己的錯誤訊息正好叫維運人員去設
 這個變數）。取捨與命名空間規則見 [ADR-008](../../docs/adr/shared/008-config-section-namespace.md)。
 
-各包私有的 `[tracker]`／`[model]`／`[output]`／`[zone]`／`[line]`／`[report]` **不放進本
+各包私有的 `[tracker]`／`[model]`／`[zone]`／`[line]`／`[report]` **不放進本
 lib**：那些區塊名本來就只有一包用，沒有撞名面。
 
 ## 使用方式

@@ -28,7 +28,7 @@
 
 | 套件 | 用途 |
 | --- | --- |
-| `opencv-python` | 影片片段讀取與標註影片輸出 |
+| `opencv-python` | 影片片段讀取與解碼 |
 | `ultralytics` | YOLO 偵測 |
 | `torch` / `torchvision` | 推理後端（與 `ultralytics` 一併釘住版本） |
 | `lap` | ByteTrack 的線性指派求解 |
@@ -102,9 +102,6 @@ classes = [0, 2]           # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
 [foot_point]
 method = "head"            # "head" = 由頭部位置推算；"bbox_bottom" = 框底邊中點（舊做法）
 
-[output]
-save_video = false         # 是否輸出標註影片（開發 / 偵錯輔助）
-
 [input]
 bucket_dir = "bucket_name1"
 date = 2026-05-01
@@ -120,7 +117,6 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 | | `batch` | `1` | YOLO 推理湊批目標，`>= 1`（範例用 `8`）；實際單次推理批次為此值的 2 倍 |
 | | `classes` | `[0, 2]` | 要保留的偵測類別 id；權重類別為 `0=head, 1=vbody, 2=fbody`；至少 1 個元素。載入時會驗證此清單與已載入權重的 `model.names` 相符，不符（如指定的權重檔遺失、fallback 下載到別的模型）直接拋錯。**必須含 fbody**（追蹤目標）；`method = "head"` 時**還必須含 head**，否則直接拋錯——少了 head 每一列都會退回框底邊中點，改動靜默失效 |
 | `[foot_point]` | `method` | `"head"` | 落腳點的推算方式：`"head"` 由頭部位置推算（修正斜向視角下框底邊中點落在人體外的偏移），`"bbox_bottom"` 為改動前的框底邊中點，保留供對照與回退。見 [ADR-009](../docs/adr/shared/009-head-based-foot-point.md) |
-| `[output]` | `save_video` | `false` | 是否輸出標註影片（開發 / 偵錯用途） |
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（範例用 `bucket_name1`） |
 | | `date` | — | 分析日期 |
 | | `camera_ids` | `[]` | 要分析的攝影機；空清單 = 全部 |
@@ -208,8 +204,8 @@ cameras:
 analyze_daily(date, bucket_dir, camera_ids=None) -> AnalysisResult
 ```
 
-回傳的 `AnalysisResult` 含 `date` / `camera_ids` / `tracking_results_path` /
-`output_video_paths`。`bucket_dir` 以參數傳入（而非讀全域 `settings`），故可重複以不同
+回傳的 `AnalysisResult` 含 `date` / `camera_ids` / `tracking_results_path`。
+`bucket_dir` 以參數傳入（而非讀全域 `settings`），故可重複以不同
 bucket 呼叫。
 
 ## 輸出檔案
@@ -217,7 +213,6 @@ bucket 呼叫。
 | 路徑 | 內容 |
 | --- | --- |
 | `outputs/{bucket_name}/{date}/tracking_results.parquet` | 追蹤明細 |
-| `outputs/{bucket_name}/{stream_dirname}/{YYYY}/{MM}/{DD}/…`（鏡射輸入路徑） | 逐片段標註影片，`save_video = true` 時才產出（開發 / 偵錯輔助） |
 
 `tracking_results.parquet` 的欄位：
 
@@ -261,7 +256,7 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | `models/config.py` | Pydantic-settings 設定模型（`config.toml`＋環境變數）與全域 `settings` 單例 |
 | `config/constants.py` | 非 Pydantic 靜態常數（`OUTPUT_ROOT`、輸出檔名與 parquet schema、CrowdHuman 類別 id `HEAD_CLASS_ID`／`FBODY_CLASS_ID`） |
 | `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理子進程生命週期） |
-| `services/inference.py` | 推理迴圈（湊批、偵測、追蹤、寫檔） |
+| `services/inference.py` | 推理迴圈（湊批、偵測、追蹤、累積結果） |
 | `services/detector.py` | YOLO 偵測 |
 | `services/foot_point.py` | `FootPointEstimator`：head 框配對與落腳點推算；自行維護跨幀狀態（每條軌跡上次成功推算的偏移量，共用 head 的那些不存） |
 | `services/tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |
@@ -269,10 +264,8 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | `services/fps_meter.py` | 處理 FPS 統計 |
 | `services/frame_ring.py` | 共享記憶體環形緩衝 |
 | `services/video_reader.py` | 逐日掃描片段、讀影格 |
-| `services/video_writer.py` | 標註影片輸出 |
-| `services/visualization.py` | `TrackAnnotator`，畫追蹤框 |
 
-I/O 邊界（讀寫檔、子進程、影像編解碼、繪圖）依 argus 慣例一律放 `services/`，不另立
+I/O 邊界（讀寫檔、子進程、影像解碼）依 argus 慣例一律放 `services/`，不另立
 頂層 adapter/io 層。log 用共用 lib `vfa_observability` 的 `StructuredLogger`
 （`from vfa_observability import StructuredLogger`），輸出單行 JSON。
 
@@ -292,11 +285,7 @@ zone 與 line 幾何都不會被驗證。
 - **讀取進程**：無空 slot 時阻塞，形成對推理進程的天然背壓。**時間戳 = 該片段檔名時間 ＋
   片段內幀序 / fps**（逐段計算，不能用全日累計幀數推算）。
 - **推理進程**：非阻塞輪詢各路 queue 湊批，維持 GPU 批次效率；每個 packet 依序經
-  偵測 → 拆出 fbody／head（只有 fbody 進 tracker）→ 追蹤 → 推算落腳點 → 累積追蹤結果
-  → 畫框 → 寫檔。
-- **mp4v 編碼在背景執行緒**，與下一批 GPU 推理重疊。關檔順序有講究：某路尾端影格常與
-  該路結束訊號同批出現，必須等這批全部寫完才關檔，否則背景緒會先收尾、之後補寫的影格
-  會把檔案截斷。
+  偵測 → 拆出 fbody／head（只有 fbody 進 tracker）→ 追蹤 → 推算落腳點 → 累積追蹤結果。
 
 ### fail-loud 錯誤處理
 

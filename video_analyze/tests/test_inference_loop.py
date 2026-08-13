@@ -29,7 +29,6 @@ _TAIPEI = ZoneInfo("Asia/Taipei")
 _BASE = datetime.datetime(2026, 5, 1, 9, 0, tzinfo=_TAIPEI)
 _ORIG_SHAPE = (1080, 1920)
 _SHAPE = FrameShape(height=1080, width=1920)
-_SEGMENT = "loc_cam001/2026/05/01/010000.000Z.mkv"
 
 
 def _boxes(rows: list[tuple[float, float, float, float, float, int]]) -> Boxes:
@@ -98,22 +97,6 @@ class _RecordingTracker:
         )
 
 
-class _NullWriter:
-    """取代 MultiStreamVideoWriter，讓測試不依賴 `output.save_video` 的設定值。"""
-
-    def write(self, stream_id: int, segment_relpath: str, frame, fps: float) -> None:
-        pass
-
-    def close_stream(self, stream_id: int) -> None:
-        pass
-
-    def close_all(self) -> None:
-        pass
-
-    def abort(self) -> None:
-        pass
-
-
 class _FrameRingStub:
     """環形緩衝的替身：slot 內容與本測試無關，回傳固定大小的空影格即可。"""
 
@@ -131,21 +114,17 @@ def _run_loop(
         stream_names=["loc_cam001"],
         detector=_ScriptedDetector(per_frame),
         tracker=tracker,
-        output_root=Path(tmp_path) / "outputs",
         results_path=results_path,
         frame_shapes=[_SHAPE],
     )
-    pipeline.writer = _NullWriter()
 
     data_queue: queue.Queue = queue.Queue()
     for frame_index in range(len(per_frame)):
         data_queue.put(
             (
                 frame_index,  # slot
-                _SEGMENT,
                 frame_index,
                 _BASE + datetime.timedelta(seconds=frame_index),
-                10.0,
             )
         )
     data_queue.put(READER_DONE)

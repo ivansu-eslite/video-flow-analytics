@@ -21,8 +21,6 @@ from video_analyze.services.video_reader import (
     FramePacket,
     FrameShape,
 )
-from video_analyze.services.video_writer import MultiStreamVideoWriter
-from video_analyze.services.visualization import TrackAnnotator
 
 logger = StructuredLogger(component="inference")
 
@@ -49,27 +47,23 @@ def split_detections(boxes: Boxes) -> tuple[Boxes, np.ndarray]:
 
 
 class InferencePipeline:
-    """推理進程主迴圈：非阻塞湊批 → YOLO 偵測 → 多路 ByteTrack →
-    收集結果 → 標註 → 寫檔。
-    """
+    """推理進程主迴圈：非阻塞湊批 → YOLO 偵測 → 多路 ByteTrack → 收集結果。"""
 
     def __init__(
         self,
         stream_names: list[str],
         detector: YOLODetector,
         tracker: MultiStreamByteTracker,
-        output_root: Path,
         results_path: Path,
         frame_shapes: list[FrameShape],
     ):
-        """組裝推理迴圈所需的各個子系統（偵測、追蹤、寫檔、收集結果）。
+        """組裝推理迴圈所需的各個子系統（偵測、追蹤、收集結果）。
 
         Args:
             stream_names: 各路攝影機的 `stream_dirname`，索引即 stream_id，
                 同時作為 `TrackingResultCollector` 記錄的 camera_id。
             detector: 已載入模型的 YOLO 偵測器（跨批次重用）。
             tracker: 多路 ByteTrack 狀態管理器（跨批次重用，維持軌跡延續）。
-            output_root: 標註影片輸出根目錄。
             results_path: 追蹤結果 parquet 的目標路徑。
             frame_shapes: 各路的 `FrameShape`，索引即 stream_id；逐列寫進追蹤結果
                 parquet，供下游做解析度相關的參數換算。
@@ -83,8 +77,6 @@ class InferencePipeline:
         self._next_stream_start = 0
         self.detector = detector
         self.tracker = tracker
-        self.writer = MultiStreamVideoWriter(output_root=output_root)
-        self.annotator = TrackAnnotator()
         # 跨批次重用：它記著每條軌跡上一次成功推算的落腳點偏移量
         self.foot_estimator = FootPointEstimator(settings.foot_point.method)
         self.collector = TrackingResultCollector(results_path)
@@ -100,14 +92,10 @@ class InferencePipeline:
         data_queues: list[mp.Queue],
         free_queues: list[mp.Queue],
         rings: list[FrameRing],
-    ) -> tuple[list[FramePacket], list[int], list[int]]:
+    ) -> tuple[list[FramePacket], list[int]]:
         # slot 讀出後立即歸還 free_queue；在途影格數受環形緩衝 slot 數上限，不爆記憶體。
-        # 讀到 READER_DONE 只記進 newly_finished、不在此關閉 writer：本批已收但未寫出的
-        # 同路影格若此時 close_stream，會被 writer 背景緒搶先關檔、之後補寫時重開檔案
-        # 而截斷。
         batch_packets: list[FramePacket] = []
         batch_stream_ids: list[int] = []
-        newly_finished: list[int] = []
         fill_deadline: float | None = None
         order = [
             (self._next_stream_start + offset) % self.num_streams
@@ -126,25 +114,22 @@ class InferencePipeline:
                     except Empty:
                         break
                     progressed = True
-                    if item == READER_DONE:  # 該路正常讀完，close 延後（見上方說明）
+                    if item == READER_DONE:  # 該路正常讀完
                         self.finished_streams.add(stream_id)
-                        newly_finished.append(stream_id)
                         break
                     if item == READER_FAILED:
                         # 讀取進程中途例外，寧可中止整個推理迴圈也不寫出截斷的結果
                         raise RuntimeError(
                             f"讀取進程（stream_id={stream_id}）中途例外結束，中止推理。"
                         )
-                    slot, relpath, frame_index, timestamp, fps = item
+                    slot, frame_index, timestamp = item
                     frame = rings[stream_id].read_slot(slot)
                     free_queues[stream_id].put(slot)  # 立即歸還 slot 供 reader 覆寫
                     batch_packets.append(
                         FramePacket(
                             frame=frame,
-                            segment_relpath=relpath,
                             frame_index=frame_index,
                             timestamp=timestamp,
-                            fps=fps,
                         )
                     )
                     batch_stream_ids.append(stream_id)
@@ -160,7 +145,7 @@ class InferencePipeline:
                 if now >= fill_deadline:
                     break
                 time.sleep(_FILL_POLL)
-        return batch_packets, batch_stream_ids, newly_finished
+        return batch_packets, batch_stream_ids
 
     def start_loop(
         self,
@@ -170,9 +155,8 @@ class InferencePipeline:
     ) -> None:
         """執行推理主迴圈直到所有路都讀完，並負責結果的落盤/清理。
 
-        成功跑完會 `writer.close_all()` 並 `collector.save()`（原子性
-        rename 成正式 parquet）；任何例外都會先 `collector.discard()` 與
-        `writer.abort()` 清理不完整輸出，再重新拋出（fail-loud）。
+        成功跑完會 `collector.save()`（原子性 rename 成正式 parquet）；任何
+        例外都會先 `collector.discard()` 清理不完整輸出，再重新拋出（fail-loud）。
 
         Args:
             data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
@@ -181,23 +165,16 @@ class InferencePipeline:
 
         Raises:
             RuntimeError: 任一路讀取進程回報 `READER_FAILED`。
-            BaseException: writer 背景執行緒或其他子系統拋出的例外，會原樣
-                重新拋出。
+            BaseException: 其他子系統拋出的例外，會原樣重新拋出。
         """
         logger.info("模組化推理流程啟動...")
         start = time.perf_counter()
         try:
             while len(self.finished_streams) < self.num_streams:
-                batch_packets, batch_stream_ids, newly_finished = self._collect_batch(
+                batch_packets, batch_stream_ids = self._collect_batch(
                     data_queues, free_queues, rings
                 )
                 if not batch_packets:
-                    if newly_finished:
-                        # 沒有影格但有路剛讀完（例如空批同時收到 READER_DONE），
-                        # 仍要關其 writer
-                        for stream_id in newly_finished:
-                            self.writer.close_stream(stream_id)
-                        continue
                     # 所有 queue 當下都沒有資料，短暫休眠避免忙等待耗盡 CPU
                     time.sleep(0.001)
                     continue
@@ -226,20 +203,11 @@ class InferencePipeline:
                         frame_height=shape.height,
                     )
                     self.fps_meter.record(self.stream_names[stream_id])
-                    annotated_frame = self.annotator.draw_bboxes(packet.frame, tracks)
-                    self.writer.write(
-                        stream_id, packet.segment_relpath, annotated_frame, packet.fps
-                    )
-                # 本批已全部 write()，才可安全 close_stream（避免截斷，見上方說明）
-                for stream_id in newly_finished:
-                    self.writer.close_stream(stream_id)
-            # 在 close_all/save 之前印，數字只反映純處理，且即使 save 失敗仍看得到
+            # 在 save 之前印，數字只反映純處理，且即使 save 失敗仍看得到
             self._log_fps_summary(time.perf_counter() - start)
-            self.writer.close_all()  # 會把 writer 背景緒的中途例外重拋到這裡
-            self.collector.save()  # 僅全部串流（含編碼）跑完才原子性改名成正式檔名
+            self.collector.save()  # 僅全部串流跑完才原子性改名成正式檔名
         except BaseException:
             self.collector.discard()  # fail-loud：不留下不完整結果
-            self.writer.abort()
             raise
 
     def _log_fps_summary(self, elapsed_seconds: float) -> None:

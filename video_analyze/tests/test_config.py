@@ -31,7 +31,6 @@ from video_analyze.models.config import (
 _ENV_OVERRIDES = (
     "TRACKER",
     "MODEL",
-    "OUTPUT",
     "INPUT",
     "FOOT_POINT",
     "FOOT_POINT__METHOD",
@@ -92,7 +91,6 @@ def test_config_sections_match_shared_contract():
         "tracker",
         "model",
         "foot_point",
-        "output",
         "input",
     }
     assert AppConfig.model_fields["input"].annotation is vfa_config.InputConfig
@@ -146,7 +144,6 @@ def test_uses_defaults_when_toml_missing(tmp_path):
     assert config.model.classes == [0, 2]
     assert config.tracker.track_buffer == 30
     assert config.input.bucket_dir == "bucket_name"
-    assert config.output.save_video is False
 
 
 def test_reads_values_from_toml(tmp_path):
