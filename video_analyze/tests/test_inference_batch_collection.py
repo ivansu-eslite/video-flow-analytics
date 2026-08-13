@@ -64,9 +64,38 @@ def test_batches_rotate_across_streams_when_all_have_data(tmp_path):
         assert len(packets) == pipeline._target_batch
         sources_per_batch.append(set(stream_ids))
 
-    # 每批仍只來自單一路：不引入混解析度批次
+    # 每路都預先塞滿，起點那路一次就取到滿批，因此每批只有單一來源——這是本 fixture
+    # 的產物，不是實作保證（供不上時仍會混來源，見
+    # `test_batch_mixes_sources_when_the_starting_stream_runs_short`）
     assert all(len(sources) == 1 for sources in sources_per_batch)
     assert set.union(*sources_per_batch) == set(range(num_streams))
+
+
+def test_batch_mixes_sources_when_the_starting_stream_runs_short(tmp_path):
+    """起點那路供不上滿批時，同一批會由下一路補齊——混來源批次仍可能發生。
+
+    正式執行時各路解碼速度不同（4K 那路補滿一批要數百 ms），輪替過後回到同一路時
+    queue 未必已補滿。混來源批次的影格尺寸可能不同，ultralytics 會走
+    `same_shapes=False` 的 letterbox 分支，前處理隨批次組成變動——這是 CLAUDE.md 記載
+    的「`tracking_results.parquet` 不可重現」來源之一，本次改動沒有消除它。
+    """
+    num_streams = 3
+    pipeline = _make_pipeline(num_streams, tmp_path)
+    data_queues = [pyqueue.Queue() for _ in range(num_streams)]
+    free_queues = [pyqueue.Queue() for _ in range(num_streams)]
+    rings = [_RingStub() for _ in range(num_streams)]
+    short = pipeline._target_batch // 4
+    _fill(data_queues[0], short)  # 起點那路只剩零星幾格
+    for q in data_queues[1:]:
+        _fill(q, 200)
+
+    packets, stream_ids, _finished = pipeline._collect_batch(
+        data_queues, free_queues, rings
+    )
+
+    assert len(packets) == pipeline._target_batch
+    assert stream_ids[:short] == [0] * short
+    assert set(stream_ids) == {0, 1}
 
 
 def test_full_batch_still_fills_from_a_single_remaining_stream(tmp_path):
@@ -106,4 +135,6 @@ def test_frame_order_within_a_stream_is_preserved_across_rotated_batches(tmp_pat
             indices_by_stream[stream_id].append(packet.frame_index)
 
     for indices in indices_by_stream.values():
-        assert indices == sorted(indices)
+        # 連續且不重複：只驗非遞減的話，重送（`[0, 0, 1]`）與漏格（`[0, 1, 5]`）都會過，
+        # 而這兩者正是會打壞 `track_id` 延續與 `timestamp` 推導的情況
+        assert indices == list(range(len(indices)))
