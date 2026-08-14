@@ -170,9 +170,10 @@ Negative
 - **記憶體由 1.67 GiB 增為 3.34 GiB**（九路各 32 格）。`mp.RawArray` 在 Linux 優先落
   `/dev/shm`，空間不足時**靜默** fallback 到磁碟（變成檔案 mmap，效能崩掉但不報錯），
   部署前要在容器內確認 `df -h /dev/shm` ≥ 4 GiB。CPython 是逐塊判斷的，九路各配一塊，
-  因此可能前幾路進 `/dev/shm`、後幾路掉出去。`create_ring_buffer` 逐塊 log 出 `size_mb`
-  與當下的 `shm_available_mb`，兩者對著看就能事後判斷哪一塊落到磁碟；**主動擋下**（累計
-  檢查 ＋ fail loud）是 issue #106，本次只留訊號、不擋。
+  因此可能前幾路進 `/dev/shm`、後幾路掉出去。`create_ring_buffer` 逐塊 log 出 `size_mb`、
+  `shm_available_mb` 與 **`backing_dirs`**——最後一項比對配置前後 `/proc/self/maps` 上的
+  arena 映射，記的是這塊**實際**落在哪，不是由可用空間推論（同機其他行程也在動用
+  `/dev/shm`，推論會失準）。**主動擋下**是 issue #106，本次只留訊號、不擋。
 - **`MODEL__BATCH` 的環境變數覆寫會連帶放大緩衝**，記憶體隨 batch 線性成長（batch = 16 →
   64 格 → 6.7 GiB）。這是推導的預期行為，但部署端要知道這兩個旋鈕已經綁在一起。
 - **`frame_ring.py` 從零依賴模組變成 import `settings`**。目前無循環（`models/config.py`
