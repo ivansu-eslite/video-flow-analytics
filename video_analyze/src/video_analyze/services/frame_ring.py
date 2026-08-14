@@ -3,9 +3,25 @@ import multiprocessing as mp
 
 import numpy as np
 
+from video_analyze.models.config import settings
+
 # 每路環形緩衝的 slot 數，即 reader 能領先推理進程的影格數上限（等同背壓深度）。
-# 記憶體用量 = RING_SLOTS × 每格位元組 × 路數（如 16 × 6.2MB × 4 路 ≈ 397MB）。
-RING_SLOTS = 16
+# 由 `settings.model.batch` 推導而非寫死：推理進程改成整批推論完才歸還 slot（見
+# `view_slot`）之後，格數的約束來自批次大小，只調 batch 而沒同步調格數時 reader 會
+# 在整個推論期間拿不到空位而停擺，且沒有任何錯誤訊息。
+#
+# 兩個 ×2 的來源不同：
+# - 其一：ultralytics 對 in-memory list source 一次 forward 整個 list（`batch=` 只對
+#   檔案來源的 LoadImagesAndVideos 有效），故單次批次是 `settings.model.batch` 的 2 倍，
+#   即 `InferencePipeline._target_batch`。
+# - 其二：扣住一批之外要再留同量空位給 reader 備下一批。「2 × 一批」正是「單一路供批
+#   時 reader 完全不因缺 slot 而停」的最小值——issue #100 只改湊批的輪替起點，內層
+#   `while` 仍會把起點那一路取到滿批才換手，所以「整批來自同一路」是常態。
+#
+# 記憶體用量 = RING_SLOTS × 每格位元組 × 路數；batch = 8（32 格）時九路合計 3.34 GiB
+# （4K 三路每格 23.73 MiB、1080p 六路每格 5.93 MiB）。`MODEL__BATCH` 的環境變數覆寫
+# 會連帶放大緩衝，記憶體隨 batch 線性成長。
+RING_SLOTS = settings.model.batch * 4
 
 _CHANNELS = 3  # BGR
 
@@ -67,15 +83,20 @@ class FrameRing:
             )
         np.copyto(self._slots[slot], frame)
 
-    def read_slot(self, slot: int) -> np.ndarray:
-        """讀出指定 slot 的影格副本。
+    def view_slot(self, slot: int) -> np.ndarray:
+        """取得指定 slot 的 view，不複製。
 
-        複製成私有陣列，呼叫端即可立刻歸還 slot 供 reader 覆寫。
+        整格複製（4K 約 24MB）實測佔推理進程 14% 的時間，而 YOLO 前處理本來就會把
+        影格 letterbox 成新陣列再上傳 GPU，這份副本純屬多餘。
+
+        **代價是 slot 不能立刻歸還**：回傳的是共享記憶體本身，reader 一旦覆寫該
+        slot，這個 view 的內容就跟著變。呼叫端必須等到不再需要影格內容（推論完成）
+        才歸還 slot。
 
         Args:
             slot: 要讀取的 slot 索引。
 
         Returns:
-            該 slot 影格內容的獨立副本（非 view）。
+            指向共享記憶體的 view（非副本）。
         """
-        return self._slots[slot].copy()
+        return self._slots[slot]

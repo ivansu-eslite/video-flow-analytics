@@ -92,10 +92,15 @@ class InferencePipeline:
         data_queues: list[mp.Queue],
         free_queues: list[mp.Queue],
         rings: list[FrameRing],
-    ) -> tuple[list[FramePacket], list[int]]:
-        # slot 讀出後立即歸還 free_queue；在途影格數受環形緩衝 slot 數上限，不爆記憶體。
+    ) -> tuple[list[FramePacket], list[int], list[tuple[int, int]]]:
+        # 影格以 view 免複製取用，slot 因此不在這裡歸還，改由呼叫端在 predict 完成後
+        # 統一歸還（見 start_loop 的歸還迴圈）；在途影格數受環形緩衝 slot 數上限，
+        # 不爆記憶體。
         batch_packets: list[FramePacket] = []
         batch_stream_ids: list[int] = []
+        # 本批取用、待推論完成後歸還的 (stream_id, slot)。與 packet 同進退，故空批時
+        # 必然為空，呼叫端的空批分支不需要額外歸還
+        held_slots: list[tuple[int, int]] = []
         fill_deadline: float | None = None
         order = [
             (self._next_stream_start + offset) % self.num_streams
@@ -123,8 +128,8 @@ class InferencePipeline:
                             f"讀取進程（stream_id={stream_id}）中途例外結束，中止推理。"
                         )
                     slot, frame_index, timestamp = item
-                    frame = rings[stream_id].read_slot(slot)
-                    free_queues[stream_id].put(slot)  # 立即歸還 slot 供 reader 覆寫
+                    frame = rings[stream_id].view_slot(slot)
+                    held_slots.append((stream_id, slot))
                     batch_packets.append(
                         FramePacket(
                             frame=frame,
@@ -145,7 +150,7 @@ class InferencePipeline:
                 if now >= fill_deadline:
                     break
                 time.sleep(_FILL_POLL)
-        return batch_packets, batch_stream_ids
+        return batch_packets, batch_stream_ids, held_slots
 
     def start_loop(
         self,
@@ -164,14 +169,25 @@ class InferencePipeline:
             rings: 各路的共享記憶體環形緩衝，索引為 stream_id。
 
         Raises:
+            ValueError: 任一路的環形緩衝格數不足單次批次的 2 倍。
             RuntimeError: 任一路讀取進程回報 `READER_FAILED`。
             BaseException: 其他子系統拋出的例外，會原樣重新拋出。
         """
+        # `frame_ring.RING_SLOTS` 的推導式已保證這條成立，所以這裡防的不是「有人調
+        # batch」，而是日後兩處推導公式漂移：一批會同時扣住同一路最多 _target_batch
+        # 個 slot 直到推論結束，總數不足其 2 倍時 reader 在整個推論期間都拿不到空位、
+        # 完全停擺，而且不會有任何錯誤訊息
+        if any(ring.num_slots < 2 * self._target_batch for ring in rings):
+            raise ValueError(
+                f"環形緩衝格數需至少為單次批次（{self._target_batch}）的 2 倍，"
+                f"實得 {[ring.num_slots for ring in rings]}；"
+                "推論完才歸還 slot 的設計下，格數不足會讓讀取進程停擺。"
+            )
         logger.info("模組化推理流程啟動...")
         start = time.perf_counter()
         try:
             while len(self.finished_streams) < self.num_streams:
-                batch_packets, batch_stream_ids = self._collect_batch(
+                batch_packets, batch_stream_ids, held_slots = self._collect_batch(
                     data_queues, free_queues, rings
                 )
                 if not batch_packets:
@@ -183,6 +199,33 @@ class InferencePipeline:
                 # predict 回傳時 boxes 已具體化到 CPU（隱含同步），此 wall time 已含
                 # GPU 實際耗時，不需額外 cuda.synchronize()
                 self.fps_meter.add_detection_time(time.perf_counter() - detect_start)
+                # predict 的前處理已把影格 letterbox 成新陣列並上傳 GPU，共享記憶體
+                # 可以放行了。歸還點卡在這裡的三個方向：
+                # - 不能更早：predict 的前處理還在讀共享記憶體，早還會讓 reader 邊寫
+                #   邊被讀。
+                # - 不能更晚：下面的逐格 tracking 迴圈在 T4 上一批 16 格要數十 ms，
+                #   拖過去只是白讓 reader 空等。
+                # - `results[i].orig_img` 就是這些 slot 的 view（ultralytics
+                #   `engine/results.py` 是 `self.orig_img = orig_img`，沒有 `.copy()`），
+                #   歸還之後其內容不再可信。本迴圈不使用該欄位，但這是**本版消費路徑
+                #   的性質，不是 ultralytics 的保證**：前處理已把像素複製兩次、後處理
+                #   只取 `shape`、BYTETracker 收到的 `img` 是 None（`img` 只有 BOTSORT
+                #   的 gmc 分支會用）、結果收集只用 `frame_index` 與 `timestamp`。日後
+                #   開 `verbose=True`、呼叫 `plot()` 或升級 ultralytics 都可能讓
+                #   `orig_img` 重新被讀到，屆時要改回取副本，見 ADR-010。
+                #
+                # 刻意不包 try/finally：predict 或 READER_FAILED 拋出時 held_slots 不
+                # 歸還，該路 reader 會卡在 free_queue.get()，但不會 hang——推理進程死亡
+                # 後 pipeline.py 的 _raise_if_abnormal 偵測到非零 exitcode，
+                # _terminate_all 會殺掉所有 reader。包起來得讓 held_slots 的作用域橫跨
+                # _collect_batch 與本函式兩層，不值得。
+                for held_stream_id, held_slot in held_slots:
+                    free_queues[held_stream_id].put(held_slot)
+                # 歸還後這些 view 指向的記憶體隨時會被 reader 覆寫。設成 None 讓「日後
+                # 有人在歸還之後讀影格」從靜默讀到同一路幾格之後的畫面（內容正常、
+                # 只是錯格，比對輸出也看不出來）變成當場拋錯
+                for packet in batch_packets:
+                    packet.frame = None
                 for idx, stream_id in enumerate(batch_stream_ids):
                     packet = batch_packets[idx]
                     fbody_boxes, heads = split_detections(results[idx].boxes.cpu())

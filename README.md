@@ -242,7 +242,7 @@ cameras:
 
 技術決策記在 [docs/adr/](docs/adr/)，依影響的模組分子目錄：只動一個套件的放
 `docs/adr/<套件名>/`（`video_analyze`／`zone_mapping`／`line_counting`／`flow_report`），
-跨套件的放 `docs/adr/shared/`。
+跨套件的放 `docs/adr/shared/`。狀態非 Accepted 者於表中註明。
 
 | ADR | 影響範圍 | 主題 |
 | --- | --- | --- |
@@ -255,6 +255,8 @@ cameras:
 | [007](docs/adr/shared/007-remove-registry-snapshot.md) | shared | 移除 `camera_registry_used.yaml` 快照機制，`flow_report` 改讀 `bucket_dir` 當下的 `camera_registry.yaml`，說明為何不補回溯替代方案、以及被接受的靜默錯位範圍（修訂 ADR-005 的資料來源） |
 | [008](docs/adr/shared/008-config-section-namespace.md) | shared | 設定的頂層區塊名是跨四包的全域環境變數命名空間，`[input]` 因此由 `libs/vfa_config` 提供單一定義、欄位取聯集，說明為何不改用套件前綴、為何否決把 `bucket_minutes` 寫進 parquet metadata，並修訂「各包只保留自己讀到的區塊」那條 |
 | [009](docs/adr/shared/009-head-based-foot-point.md) | shared | 落腳點由 head 框推算並上移成 `tracking_results.parquet` 的欄位，記錄多候選 head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能進 tracker、ADR-001／003／004／006 的判定輸入點定義隨之改變，以及**計數會大幅上升**（本機重跑 zone entries 最多 74 → 264） |
+
+| [010](docs/adr/video_analyze/010-zero-copy-frame-lifetime.md)（Proposed） | `video_analyze` | 推理主迴圈免複製消費共享記憶體的畫面、slot 延後到整批推論後才歸還，記錄這條生命週期約束、`Results.orig_img` 是共享記憶體活別名的依賴（ultralytics 不保證，測試擋不住），以及環形緩衝格數為何改由 `model.batch` 推導 |
 
 **取號規則**：編號是全域流水號，與子目錄無關；新增 ADR 一律取上表的下一號，不在各子目錄
 內自行編號，因此單一子目錄內看到跳號是正常的（`shared/` 是 004、007、008、009）。理由是

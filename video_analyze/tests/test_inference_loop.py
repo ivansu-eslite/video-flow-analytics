@@ -22,6 +22,7 @@ import torch
 from ultralytics.engine.results import Boxes
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
+from video_analyze.services.frame_ring import RING_SLOTS
 from video_analyze.services.inference import InferencePipeline
 from video_analyze.services.video_reader import READER_DONE, FrameShape
 
@@ -63,12 +64,18 @@ class _FakeResult:
 
 
 class _ScriptedDetector:
-    """依序吐出預先寫好的每格偵測結果，不載入模型。"""
+    """依序吐出預先寫好的每格偵測結果，不載入模型。
 
-    def __init__(self, per_frame: list[Boxes]):
+    另在 predict 當下斷言該路的 slot 一格都還沒歸還：影格是共享記憶體的 view，
+    任何早於推論完成的歸還都會讓 reader 覆寫正在推論的畫面（見 ADR-010）。
+    """
+
+    def __init__(self, per_frame: list[Boxes], free_queue: queue.Queue):
         self._remaining = iter(per_frame)
+        self._free_queue = free_queue
 
     def predict(self, batch_frames: list[np.ndarray]) -> list[_FakeResult]:
+        assert self._free_queue.empty(), "slot 早於推論歸還，reader 會覆寫推論中的畫面"
         return [_FakeResult(boxes=next(self._remaining)) for _ in batch_frames]
 
 
@@ -98,21 +105,28 @@ class _RecordingTracker:
 
 
 class _FrameRingStub:
-    """環形緩衝的替身：slot 內容與本測試無關，回傳固定大小的空影格即可。"""
+    """環形緩衝的替身：slot 內容與本測試無關，回傳固定大小的空影格即可。
 
-    def read_slot(self, slot: int) -> np.ndarray:
+    `num_slots` 沿用正式執行的推導值，讓 `start_loop` 開頭的格數不變量檢查在測試裡
+    也跑在真實條件下。
+    """
+
+    num_slots = RING_SLOTS
+
+    def view_slot(self, slot: int) -> np.ndarray:
         return np.zeros((8, 8, 3), dtype=np.uint8)
 
 
 def _run_loop(
     tmp_path, per_frame: list[Boxes]
-) -> tuple[_RecordingTracker, pl.DataFrame]:
-    """跑一次單路的推理主迴圈，回傳追蹤器的收件紀錄與寫出的 parquet。"""
+) -> tuple[_RecordingTracker, pl.DataFrame, queue.Queue]:
+    """跑一次單路的推理主迴圈，回傳追蹤器的收件紀錄、寫出的 parquet 與 free queue。"""
     tracker = _RecordingTracker()
+    free_queue: queue.Queue = queue.Queue()
     results_path = Path(tmp_path) / "tracking_results.parquet"
     pipeline = InferencePipeline(
         stream_names=["loc_cam001"],
-        detector=_ScriptedDetector(per_frame),
+        detector=_ScriptedDetector(per_frame, free_queue),
         tracker=tracker,
         results_path=results_path,
         frame_shapes=[_SHAPE],
@@ -129,12 +143,14 @@ def _run_loop(
         )
     data_queue.put(READER_DONE)
 
-    pipeline.start_loop([data_queue], [queue.Queue()], [_FrameRingStub()])
-    return tracker, pl.read_parquet(results_path)
+    pipeline.start_loop([data_queue], [free_queue], [_FrameRingStub()])
+    return tracker, pl.read_parquet(results_path), free_queue
 
 
 def test_main_loop_hands_only_fbody_to_the_tracker(tmp_path):
-    tracker, _df = _run_loop(tmp_path, [_FRAME_0_DETECTIONS, _FRAME_1_DETECTIONS])
+    tracker, _df, _free_queue = _run_loop(
+        tmp_path, [_FRAME_0_DETECTIONS, _FRAME_1_DETECTIONS]
+    )
 
     assert tracker.received_cls == [
         [FBODY_CLASS_ID, FBODY_CLASS_ID],
@@ -144,7 +160,28 @@ def test_main_loop_hands_only_fbody_to_the_tracker(tmp_path):
 
 def test_heads_do_not_become_extra_tracks_in_the_output(tmp_path):
     """同一件事在下游的樣子：每格兩個人就是兩條軌跡，不會被 head 撐成四條。"""
-    _tracker, df = _run_loop(tmp_path, [_FRAME_0_DETECTIONS, _FRAME_1_DETECTIONS])
+    _tracker, df, _free_queue = _run_loop(
+        tmp_path, [_FRAME_0_DETECTIONS, _FRAME_1_DETECTIONS]
+    )
 
     assert df.height == 4  # 兩格 × 每格兩條軌跡
     assert sorted(df["track_id"].unique().to_list()) == [1, 2]
+
+
+def test_slots_are_returned_after_inference_not_before(tmp_path):
+    """歸還晚於推論、且整批推論完就歸還——免複製消費唯一會出錯的地方。
+
+    「不早於推論」由 `_ScriptedDetector.predict` 內的斷言擋（早歸還時該斷言先炸）；
+    這裡驗的是另一半：推論完之後 slot 確實全數還回去了。少了後半，reader 會在
+    `free_queue.get()` 上永久阻塞，整條 pipeline 停在那裡。
+    """
+    _tracker, _df, free_queue = _run_loop(
+        tmp_path, [_FRAME_0_DETECTIONS, _FRAME_1_DETECTIONS]
+    )
+
+    returned = []
+    while not free_queue.empty():
+        returned.append(free_queue.get_nowait())
+
+    # `_run_loop` 每格用一個 slot（slot 索引即 frame_index）
+    assert sorted(returned) == [0, 1]
