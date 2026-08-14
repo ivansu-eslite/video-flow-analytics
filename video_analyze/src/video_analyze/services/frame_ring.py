@@ -1,9 +1,16 @@
 import ctypes
 import multiprocessing as mp
+import os
 
 import numpy as np
+from vfa_observability import StructuredLogger
 
 from video_analyze.models.config import settings
+
+logger = StructuredLogger(component="frame_ring")
+
+# `mp.RawArray` 在 Linux 是這個目錄下的檔案 mmap（tmpfs，速度等同 RAM）
+_SHM_DIR = "/dev/shm"
 
 # 每路環形緩衝的 slot 數，即 reader 能領先推理進程的影格數上限（等同背壓深度）。
 # 由 `settings.model.batch` 推導而非寫死：推理進程改成整批推論完才歸還 slot（見
@@ -40,7 +47,30 @@ def create_ring_buffer(num_slots: int, height: int, width: int):
     Returns:
         `mp.RawArray`，可傳給子進程建構 `FrameRing`。
     """
-    return mp.RawArray(ctypes.c_uint8, num_slots * height * width * _CHANNELS)
+    total_bytes = num_slots * height * width * _CHANNELS
+    # 配置前先印大小與 `/dev/shm` 當下的可用空間，兩個數字對著看才判斷得出這塊落在哪：
+    # CPython 逐塊比對「剩餘空間 >= 本塊大小」，不夠就**靜默**改用 /tmp（磁碟上的 mmap，
+    # 讀寫崩掉但輸出完全正常、log 也不會有訊號）。九路各配一塊、逐塊判斷，因此可能前幾路
+    # 進 /dev/shm、後幾路掉出去，這行故意印在每一塊之前而不是總結一次。
+    # 主動擋下（累計檢查 ＋ fail loud）是 issue #106，本函式只負責留下訊號。
+    logger.info(
+        "配置共享記憶體環形緩衝",
+        num_slots=num_slots,
+        height=height,
+        width=width,
+        size_mb=round(total_bytes / (1024 * 1024), 2),
+        shm_available_mb=_shm_available_mb(),
+    )
+    return mp.RawArray(ctypes.c_uint8, total_bytes)
+
+
+def _shm_available_mb() -> float | None:
+    """`/dev/shm` 目前的可用空間（MiB）；非 Linux 或該路徑不存在時回傳 `None`。"""
+    try:
+        stat = os.statvfs(_SHM_DIR)
+    except OSError:
+        return None
+    return round(stat.f_bavail * stat.f_frsize / (1024 * 1024), 2)
 
 
 class FrameRing:
