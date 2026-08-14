@@ -103,9 +103,15 @@ slot 數、flush 門檻等）仍留在各自模組」，且 `models/config.py` �
 
 ### 4. 兩道 fail-loud
 
-**其一：歸還後把 `packet.frame` 與 `results[i].orig_img` 都設為 `None`。** 這兩處是指向已
-放行 slot 的僅有兩個參照，清掉之後「日後有人在歸還之後讀畫面」從靜默讀到別格畫面變成當場
-拋錯。代價是 `FramePacket.frame` 的型別放寬為 `np.ndarray | None`。
+**其一：歸還前把 `packet.frame` 與 `results[i].orig_img` 都設為 `None`。** 這兩處是**本
+專案自己持有**的、指向已放行 slot 的參照，清掉之後「日後有人在歸還之後讀畫面」從靜默讀到
+別格畫面變成當場拋錯。代價是 `FramePacket.frame` 的型別放寬為 `np.ndarray | None`。
+
+**這道保護不覆蓋 ultralytics 內部。** `LoadPilAndNumpy._single_check` 對 numpy 輸入原樣
+回傳，所以 `predictor.dataset.im0` 與 `predictor.batch[1]` 存的就是我們傳進去的那批 view；
+predictor 掛在 model 上，那兩處要到**下一次** `predict` 才被替換，期間橫跨歸還迴圈、
+tracking 迴圈與下一輪 `_collect_batch`。刻意不去清它們——動第三方套件的內部狀態，風險大於
+收益。也就是說，這道保護擋的是「我們自己的程式碼日後誤用」，不是所有可能的讀取路徑。
 
 `orig_img` 清得掉，是因為 `Results.__init__` 已把 `orig_shape` 另存一份、`Boxes` 的座標系
 也綁在 `orig_shape` 上，本迴圈之後只用 `boxes`。實測 ultralytics 8.4.75：清空後

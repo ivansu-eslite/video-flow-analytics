@@ -213,13 +213,18 @@ class InferencePipeline:
                 #   開 `verbose=True`、呼叫 `plot()` 或升級 ultralytics 都可能讓
                 #   `orig_img` 重新被讀到，屆時要改回取副本，見 ADR-010；歸還後把該
                 #   欄位一併清成 None，就是為了讓那種情況當場炸出來。
+                # - **ultralytics 內部還留著同一批 view 的別名**：`predictor.dataset.im0`
+                #   與 `predictor.batch[1]` 存的就是我們傳進去的 list（`_single_check`
+                #   對 numpy 原樣回傳），predictor 掛在 model 上、要到下一次 predict 才
+                #   被替換。那兩處我們不清——去動別人的內部狀態，風險大於收益。因此下面
+                #   這道保護擋的是「我們自己的程式碼日後誤用」，不是所有路徑。
                 #
                 # 刻意不包 try/finally：predict 或 READER_FAILED 拋出時 held_slots 不
                 # 歸還，該路 reader 會卡在 free_queue.get()，但不會 hang——推理進程死亡
                 # 後 pipeline.py 的 _raise_if_abnormal 偵測到非零 exitcode，
                 # _terminate_all 會殺掉所有 reader。包起來得讓 held_slots 的作用域橫跨
                 # _collect_batch 與本函式兩層，不值得。
-                # 先切斷這兩個指向 slot 的參照，再放行記憶體——順序不能對調：中間那段
+                # 先切斷**我們自己持有**的兩個 slot 參照，再放行記憶體——順序不能對調：中間那段
                 # 「slot 已歸還、參照還在」正是這道保護要消滅的狀態，而 zip 的 strict
                 # 也可能在此拋錯。清成 None 讓「日後有人在歸還之後讀影格」從靜默讀到
                 # 同一路幾格之後的畫面（內容正常、只是錯格，比對輸出也看不出來）變成
