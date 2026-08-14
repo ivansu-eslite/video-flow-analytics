@@ -49,16 +49,13 @@ def test_batches_rotate_across_streams_when_all_have_data(tmp_path):
     num_streams = 9
     pipeline = _make_pipeline(num_streams, tmp_path)
     data_queues = [pyqueue.Queue() for _ in range(num_streams)]
-    free_queues = [pyqueue.Queue() for _ in range(num_streams)]
     rings = [_RingStub() for _ in range(num_streams)]
     for q in data_queues:
         _fill(q, 200)
 
     sources_per_batch = []
     for _ in range(num_streams):
-        packets, stream_ids, _held = pipeline._collect_batch(
-            data_queues, free_queues, rings
-        )
+        packets, stream_ids, _held = pipeline._collect_batch(data_queues, rings)
         assert len(packets) == pipeline._target_batch
         sources_per_batch.append(set(stream_ids))
 
@@ -80,16 +77,13 @@ def test_batch_mixes_sources_when_the_starting_stream_runs_short(tmp_path):
     num_streams = 3
     pipeline = _make_pipeline(num_streams, tmp_path)
     data_queues = [pyqueue.Queue() for _ in range(num_streams)]
-    free_queues = [pyqueue.Queue() for _ in range(num_streams)]
     rings = [_RingStub() for _ in range(num_streams)]
     short = pipeline._target_batch // 4
     _fill(data_queues[0], short)  # 起點那路只剩零星幾格
     for q in data_queues[1:]:
         _fill(q, 200)
 
-    packets, stream_ids, _held = pipeline._collect_batch(
-        data_queues, free_queues, rings
-    )
+    packets, stream_ids, _held = pipeline._collect_batch(data_queues, rings)
 
     assert len(packets) == pipeline._target_batch
     assert stream_ids[:short] == [0] * short
@@ -101,15 +95,12 @@ def test_full_batch_still_fills_from_a_single_remaining_stream(tmp_path):
     num_streams = 9
     pipeline = _make_pipeline(num_streams, tmp_path)
     data_queues = [pyqueue.Queue() for _ in range(num_streams)]
-    free_queues = [pyqueue.Queue() for _ in range(num_streams)]
     rings = [_RingStub() for _ in range(num_streams)]
     pipeline.finished_streams = set(range(num_streams)) - {5}
     _fill(data_queues[5], 200)
 
     for _ in range(3):
-        packets, stream_ids, _held = pipeline._collect_batch(
-            data_queues, free_queues, rings
-        )
+        packets, stream_ids, _held = pipeline._collect_batch(data_queues, rings)
         assert len(packets) == pipeline._target_batch
         assert set(stream_ids) == {5}
 
@@ -119,16 +110,13 @@ def test_frame_order_within_a_stream_is_preserved_across_rotated_batches(tmp_pat
     num_streams = 3
     pipeline = _make_pipeline(num_streams, tmp_path)
     data_queues = [pyqueue.Queue() for _ in range(num_streams)]
-    free_queues = [pyqueue.Queue() for _ in range(num_streams)]
     rings = [_RingStub() for _ in range(num_streams)]
     for q in data_queues:
         _fill(q, 200)
 
     indices_by_stream: dict[int, list[int]] = {i: [] for i in range(num_streams)}
     for _ in range(6):
-        packets, stream_ids, _held = pipeline._collect_batch(
-            data_queues, free_queues, rings
-        )
+        packets, stream_ids, _held = pipeline._collect_batch(data_queues, rings)
         for packet, stream_id in zip(packets, stream_ids, strict=True):
             indices_by_stream[stream_id].append(packet.frame_index)
 
@@ -138,27 +126,24 @@ def test_frame_order_within_a_stream_is_preserved_across_rotated_batches(tmp_pat
         assert indices == list(range(len(indices)))
 
 
-def test_collect_batch_holds_every_slot_it_takes(tmp_path):
-    """收集期間一格都不歸還，取用的 slot 原樣交給呼叫端。
+def test_collect_batch_reports_every_slot_it_takes(tmp_path):
+    """取用的 slot 一格不漏地交給呼叫端，由呼叫端在推論後歸還。
 
-    影格是共享記憶體的 view，在這裡歸還等於允許 reader 在推論進行中覆寫仍在用的
-    畫面；覆寫進去的是同一路幾格之後的正常畫面，偵測數不會崩、輸出也完全正常，
-    只有座標靜默偏移，因此只能靠這支測試擋。
+    影格是共享記憶體的 view，收集期間歸還等於允許 reader 在推論進行中覆寫仍在用的
+    畫面（覆寫進去的是同一路幾格之後的正常畫面，偵測數不會崩、輸出也完全正常，
+    只有座標靜默偏移）。「不歸還」本身已由簽章保證——`_collect_batch` 拿不到
+    `free_queues`；這裡驗的是另一半：漏報一格，該 slot 就永遠回不到 reader 手上。
     """
     num_streams = 3
     pipeline = _make_pipeline(num_streams, tmp_path)
     data_queues = [pyqueue.Queue() for _ in range(num_streams)]
-    free_queues = [pyqueue.Queue() for _ in range(num_streams)]
     rings = [_RingStub() for _ in range(num_streams)]
     for q in data_queues:
         _fill(q, 200)
 
-    packets, stream_ids, held = pipeline._collect_batch(
-        data_queues, free_queues, rings
-    )
+    packets, stream_ids, held = pipeline._collect_batch(data_queues, rings)
 
     assert len(packets) == pipeline._target_batch
-    assert all(q.empty() for q in free_queues)
     # `_fill` 塞的 slot 是 `frame_index % 16`，故 held_slots 該逐項對上本批的來源與格
     assert held == [
         (stream_id, packet.frame_index % 16)

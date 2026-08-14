@@ -90,12 +90,11 @@ class InferencePipeline:
     def _collect_batch(
         self,
         data_queues: list[mp.Queue],
-        free_queues: list[mp.Queue],
         rings: list[FrameRing],
     ) -> tuple[list[FramePacket], list[int], list[tuple[int, int]]]:
         # 影格以 view 免複製取用，slot 因此不在這裡歸還，改由呼叫端在 predict 完成後
         # 統一歸還（見 start_loop 的歸還迴圈）；在途影格數受環形緩衝 slot 數上限，
-        # 不爆記憶體。
+        # 不爆記憶體。刻意不收 free_queues：拿不到就不可能提早歸還，比只靠測試擋強。
         batch_packets: list[FramePacket] = []
         batch_stream_ids: list[int] = []
         # 本批取用、待推論完成後歸還的 (stream_id, slot)。與 packet 同進退，故空批時
@@ -188,7 +187,7 @@ class InferencePipeline:
         try:
             while len(self.finished_streams) < self.num_streams:
                 batch_packets, batch_stream_ids, held_slots = self._collect_batch(
-                    data_queues, free_queues, rings
+                    data_queues, rings
                 )
                 if not batch_packets:
                     # 所有 queue 當下都沒有資料，短暫休眠避免忙等待耗盡 CPU
@@ -212,7 +211,8 @@ class InferencePipeline:
                 #   只取 `shape`、BYTETracker 收到的 `img` 是 None（`img` 只有 BOTSORT
                 #   的 gmc 分支會用）、結果收集只用 `frame_index` 與 `timestamp`。日後
                 #   開 `verbose=True`、呼叫 `plot()` 或升級 ultralytics 都可能讓
-                #   `orig_img` 重新被讀到，屆時要改回取副本，見 ADR-010。
+                #   `orig_img` 重新被讀到，屆時要改回取副本，見 ADR-010；歸還後把該
+                #   欄位一併清成 None，就是為了讓那種情況當場炸出來。
                 #
                 # 刻意不包 try/finally：predict 或 READER_FAILED 拋出時 held_slots 不
                 # 歸還，該路 reader 會卡在 free_queue.get()，但不會 hang——推理進程死亡
@@ -221,11 +221,15 @@ class InferencePipeline:
                 # _collect_batch 與本函式兩層，不值得。
                 for held_stream_id, held_slot in held_slots:
                     free_queues[held_stream_id].put(held_slot)
-                # 歸還後這些 view 指向的記憶體隨時會被 reader 覆寫。設成 None 讓「日後
-                # 有人在歸還之後讀影格」從靜默讀到同一路幾格之後的畫面（內容正常、
-                # 只是錯格，比對輸出也看不出來）變成當場拋錯
-                for packet in batch_packets:
+                # 歸還後這兩個欄位都指著隨時會被 reader 覆寫的記憶體，一起清成 None：
+                # 讓「日後有人在歸還之後讀影格」從靜默讀到同一路幾格之後的畫面（內容
+                # 正常、只是錯格，比對輸出也看不出來）變成當場拋錯。`orig_img` 清得掉
+                # 是因為 Results 建構時已把 `orig_shape` 另存一份，本迴圈之後只用
+                # `boxes`（其座標系也綁在 `orig_shape` 上）；zip 的 strict 順帶釘住
+                # predict 逐格回傳一個 result
+                for packet, result in zip(batch_packets, results, strict=True):
                     packet.frame = None
+                    result.orig_img = None
                 for idx, stream_id in enumerate(batch_stream_ids):
                     packet = batch_packets[idx]
                     fbody_boxes, heads = split_detections(results[idx].boxes.cpu())

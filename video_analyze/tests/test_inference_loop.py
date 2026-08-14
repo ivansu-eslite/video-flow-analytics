@@ -13,6 +13,7 @@
 import datetime
 import queue
 from dataclasses import dataclass
+from itertools import accumulate
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -66,16 +67,19 @@ class _FakeResult:
 class _ScriptedDetector:
     """依序吐出預先寫好的每格偵測結果，不載入模型。
 
-    另在 predict 當下斷言該路的 slot 一格都還沒歸還：影格是共享記憶體的 view，
-    任何早於推論完成的歸還都會讓 reader 覆寫正在推論的畫面（見 ADR-010）。
+    另記下每次 predict 當下 free queue 的長度與該批格數：影格是共享記憶體的 view，
+    任何早於推論完成的歸還都會讓 reader 覆寫正在推論的畫面（見 ADR-010），而那件事
+    只在「呼叫的當下」看得出來，事後從輸出完全看不出來。
     """
 
     def __init__(self, per_frame: list[Boxes], free_queue: queue.Queue):
         self._remaining = iter(per_frame)
         self._free_queue = free_queue
+        # 逐次 predict 的 (呼叫當下已歸還的 slot 數, 本批格數)
+        self.predict_log: list[tuple[int, int]] = []
 
     def predict(self, batch_frames: list[np.ndarray]) -> list[_FakeResult]:
-        assert self._free_queue.empty(), "slot 早於推論歸還，reader 會覆寫推論中的畫面"
+        self.predict_log.append((self._free_queue.qsize(), len(batch_frames)))
         return [_FakeResult(boxes=next(self._remaining)) for _ in batch_frames]
 
 
@@ -119,14 +123,18 @@ class _FrameRingStub:
 
 def _run_loop(
     tmp_path, per_frame: list[Boxes]
-) -> tuple[_RecordingTracker, pl.DataFrame, queue.Queue]:
-    """跑一次單路的推理主迴圈，回傳追蹤器的收件紀錄、寫出的 parquet 與 free queue。"""
+) -> tuple[_RecordingTracker, pl.DataFrame, queue.Queue, _ScriptedDetector]:
+    """跑一次單路的推理主迴圈。
+
+    回傳追蹤器的收件紀錄、寫出的 parquet，以及歸還時序要看的 free queue 與偵測器。
+    """
     tracker = _RecordingTracker()
     free_queue: queue.Queue = queue.Queue()
+    detector = _ScriptedDetector(per_frame, free_queue)
     results_path = Path(tmp_path) / "tracking_results.parquet"
     pipeline = InferencePipeline(
         stream_names=["loc_cam001"],
-        detector=_ScriptedDetector(per_frame, free_queue),
+        detector=detector,
         tracker=tracker,
         results_path=results_path,
         frame_shapes=[_SHAPE],
@@ -144,11 +152,11 @@ def _run_loop(
     data_queue.put(READER_DONE)
 
     pipeline.start_loop([data_queue], [free_queue], [_FrameRingStub()])
-    return tracker, pl.read_parquet(results_path), free_queue
+    return tracker, pl.read_parquet(results_path), free_queue, detector
 
 
 def test_main_loop_hands_only_fbody_to_the_tracker(tmp_path):
-    tracker, _df, _free_queue = _run_loop(
+    tracker, _df, _free_queue, _detector = _run_loop(
         tmp_path, [_FRAME_0_DETECTIONS, _FRAME_1_DETECTIONS]
     )
 
@@ -160,7 +168,7 @@ def test_main_loop_hands_only_fbody_to_the_tracker(tmp_path):
 
 def test_heads_do_not_become_extra_tracks_in_the_output(tmp_path):
     """同一件事在下游的樣子：每格兩個人就是兩條軌跡，不會被 head 撐成四條。"""
-    _tracker, df, _free_queue = _run_loop(
+    _tracker, df, _free_queue, _detector = _run_loop(
         tmp_path, [_FRAME_0_DETECTIONS, _FRAME_1_DETECTIONS]
     )
 
@@ -171,17 +179,24 @@ def test_heads_do_not_become_extra_tracks_in_the_output(tmp_path):
 def test_slots_are_returned_after_inference_not_before(tmp_path):
     """歸還晚於推論、且整批推論完就歸還——免複製消費唯一會出錯的地方。
 
-    「不早於推論」由 `_ScriptedDetector.predict` 內的斷言擋（早歸還時該斷言先炸）；
-    這裡驗的是另一半：推論完之後 slot 確實全數還回去了。少了後半，reader 會在
-    `free_queue.get()` 上永久阻塞，整條 pipeline 停在那裡。
+    每次 predict 當下已歸還的 slot 數，必須恰好等於**先前各批**的格數總和：多一格
+    就代表本批的 slot 在推論中被放行，reader 可以覆寫正在推論的畫面。餵超過一批的
+    量，讓跨批的歸還順序也被涵蓋（只驗單批的話，第二批之後歸還早一步也看不出來）。
+    末尾再驗全數歸還——漏還的話 reader 會卡在 `free_queue.get()`，整條 pipeline 停住。
     """
-    _tracker, _df, free_queue = _run_loop(
-        tmp_path, [_FRAME_0_DETECTIONS, _FRAME_1_DETECTIONS]
+    num_frames = 20  # > _target_batch（batch=8 → 16），確保跑到第二批
+    _tracker, _df, free_queue, detector = _run_loop(
+        tmp_path, [_FRAME_0_DETECTIONS] * num_frames
     )
+
+    assert len(detector.predict_log) >= 2, "沒跑到第二批，跨批歸還沒被涵蓋"
+    returned_before = [entry[0] for entry in detector.predict_log]
+    batch_sizes = [entry[1] for entry in detector.predict_log]
+    assert returned_before == list(accumulate([0, *batch_sizes[:-1]]))
 
     returned = []
     while not free_queue.empty():
         returned.append(free_queue.get_nowait())
 
     # `_run_loop` 每格用一個 slot（slot 索引即 frame_index）
-    assert sorted(returned) == [0, 1]
+    assert sorted(returned) == list(range(num_frames))

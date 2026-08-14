@@ -75,6 +75,9 @@ PR #103 移除；日後若要加回來，是要重新引入取副本的介面，
   `self.orig_img = orig_img`，沒有 `.copy()`（已動態驗證 `Results.orig_img is view` 為
   True）。歸還之後該欄位的內容不再可信。
 
+歸還的職責因此整個歸呼叫端：`_collect_batch` 只把取用的 `(stream_id, slot)` 回報上去，
+**連 `free_queues` 都不再收**——拿不到就不可能提早歸還，比留著參數再用測試盯強。
+
 ### 3. `RING_SLOTS` 由 `settings.model.batch` 推導，不寫死
 
 ```python
@@ -100,10 +103,17 @@ slot 數、flush 門檻等）仍留在各自模組」，且 `models/config.py` �
 
 ### 4. 兩道 fail-loud
 
-**其一：歸還後把 `packet.frame` 設為 `None`。** 把「日後有人在歸還之後讀 `packet.frame`」
-從靜默讀到別格畫面變成當場拋錯。代價是 `FramePacket.frame` 的型別放寬為
-`np.ndarray | None`。**這是活別名唯一擋得住的地方**——測試與控制組比對都擋不住它，因為
-讀到的是內容正常的畫面。
+**其一：歸還後把 `packet.frame` 與 `results[i].orig_img` 都設為 `None`。** 這兩處是指向已
+放行 slot 的僅有兩個參照，清掉之後「日後有人在歸還之後讀畫面」從靜默讀到別格畫面變成當場
+拋錯。代價是 `FramePacket.frame` 的型別放寬為 `np.ndarray | None`。
+
+`orig_img` 清得掉，是因為 `Results.__init__` 已把 `orig_shape` 另存一份、`Boxes` 的座標系
+也綁在 `orig_shape` 上，本迴圈之後只用 `boxes`。實測 ultralytics 8.4.75：清空後
+`orig_shape`、`boxes.orig_shape`、`boxes.xyxy` 皆不受影響，而 `plot()` 直接拋
+`AttributeError`——正是希望它發生的時機。
+
+**這道保護是活別名唯一擋得住的地方**：測試與控制組比對都擋不住它，因為讀到的是內容正常
+的畫面。
 
 **其二：`start_loop` 開頭的格數不變量檢查**（任一路 `ring.num_slots < 2 × _target_batch`
 即拋 `ValueError`）。Decision 3 的推導式已保證它成立，所以它防的不是「有人調 batch」，而是
@@ -130,7 +140,8 @@ slot 數、flush 門檻等）仍留在各自模組」，且 `models/config.py` �
 
 四條裡任何一條變動都會讓這個依賴浮上來：開 `verbose=True`、呼叫 `plot()`、改用 BOTSORT、
 或升級 ultralytics（`orig_img` 的處理是實作細節，不在其 API 契約裡）。屆時要改回取副本，
-而不是調歸還時機。
+而不是調歸還時機——Decision 4 把 `orig_img` 清成 `None`，就是要讓那一刻以 `AttributeError`
+的形式出現，而不是以「座標偏了幾十 px 的正常輸出」的形式出現。
 
 ## Consequences
 
@@ -149,8 +160,10 @@ Negative
   拿到的是同一路幾格之後的正常畫面，偵測數不會崩，只會靜默偏移。
 - **地端 5090 跑過不等於 T4 安全**：覆寫窗口的長度等於 `predict` 耗時，5090 上短得多，
   reader 來不及繞完一圈覆寫。
-- **`Results.orig_img` 的活別名依賴無法由測試擋住**（見 Decision 6），只有註解、本 ADR 與
-  `packet.frame = None` 這道保護。
+- **`Results.orig_img` 的活別名依賴無法由測試擋住**（見 Decision 6）：測試不會「讀到錯格
+  畫面」，因為那需要真實的 reader 併發覆寫。擋得住它的只有註解、本 ADR，以及歸還後把
+  `packet.frame` 與 `results[i].orig_img` 清成 `None` 這道保護——後者能讓誤用當場拋錯，但
+  無法讓誤用者事先知道為什麼不能那樣寫。
 - **記憶體由 1.67 GiB 增為 3.34 GiB**（九路各 32 格）。`mp.RawArray` 在 Linux 優先落
   `/dev/shm`，空間不足時**靜默** fallback 到磁碟（變成檔案 mmap，效能崩掉但不報錯），
   部署前要在容器內確認 `df -h /dev/shm` ≥ 4 GiB。
