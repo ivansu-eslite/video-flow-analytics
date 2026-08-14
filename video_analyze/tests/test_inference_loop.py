@@ -12,7 +12,6 @@
 
 import datetime
 import queue
-from dataclasses import dataclass
 from itertools import accumulate
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,7 +19,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import polars as pl
 import torch
-from ultralytics.engine.results import Boxes
+from ultralytics.engine.results import Boxes, Results
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
 from video_analyze.services.frame_ring import RING_SLOTS
@@ -31,6 +30,7 @@ _TAIPEI = ZoneInfo("Asia/Taipei")
 _BASE = datetime.datetime(2026, 5, 1, 9, 0, tzinfo=_TAIPEI)
 _ORIG_SHAPE = (1080, 1920)
 _SHAPE = FrameShape(height=1080, width=1920)
+_CLASS_NAMES = {HEAD_CLASS_ID: "head", FBODY_CLASS_ID: "fbody"}
 
 
 def _boxes(rows: list[tuple[float, float, float, float, float, int]]) -> Boxes:
@@ -57,15 +57,13 @@ _FRAME_1_DETECTIONS = _boxes(
 )
 
 
-@dataclass
-class _FakeResult:
-    """`detector.predict` 回傳元素中主迴圈唯一用到的部分。"""
-
-    boxes: Boxes
-
-
 class _ScriptedDetector:
     """依序吐出預先寫好的每格偵測結果，不載入模型。
+
+    回傳**真正的 `Results`**（而非只帶 `boxes` 的替身）：主迴圈在歸還 slot 前會把
+    `result.orig_img` 清成 `None`，那道保護只有對真實物件才驗得到——替身是普通
+    dataclass，`orig_img` 賦值必定成功，日後 ultralytics 把該欄位改成唯讀或加上
+    `__slots__` 時，production 每批都拋錯而測試全綠。
 
     另記下每次 predict 當下 free queue 的長度與該批格數：影格是共享記憶體的 view，
     任何早於推論完成的歸還都會讓 reader 覆寫正在推論的畫面（見 ADR-010），而那件事
@@ -77,10 +75,22 @@ class _ScriptedDetector:
         self._free_queue = free_queue
         # 逐次 predict 的 (呼叫當下已歸還的 slot 數, 本批格數)
         self.predict_log: list[tuple[int, int]] = []
+        # 交出去的 Results，供呼叫端檢查歸還前是否已切斷對共享記憶體的參照
+        self.returned_results: list[Results] = []
 
-    def predict(self, batch_frames: list[np.ndarray]) -> list[_FakeResult]:
+    def predict(self, batch_frames: list[np.ndarray]) -> list[Results]:
         self.predict_log.append((self._free_queue.qsize(), len(batch_frames)))
-        return [_FakeResult(boxes=next(self._remaining)) for _ in batch_frames]
+        results = [
+            Results(
+                orig_img=frame,
+                path="scripted.mkv",
+                names=_CLASS_NAMES,
+                boxes=next(self._remaining).data,
+            )
+            for frame in batch_frames
+        ]
+        self.returned_results.extend(results)
+        return results
 
 
 class _RecordingTracker:
@@ -200,3 +210,5 @@ def test_slots_are_returned_after_inference_not_before(tmp_path):
 
     # `_run_loop` 每格用一個 slot（slot 索引即 frame_index）
     assert sorted(returned) == list(range(num_frames))
+    # 歸還前先切斷對共享記憶體的參照：`orig_img` 是該 slot 的活別名（ADR-010）
+    assert all(result.orig_img is None for result in detector.returned_results)

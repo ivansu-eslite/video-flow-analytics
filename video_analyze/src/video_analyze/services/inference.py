@@ -219,17 +219,18 @@ class InferencePipeline:
                 # 後 pipeline.py 的 _raise_if_abnormal 偵測到非零 exitcode，
                 # _terminate_all 會殺掉所有 reader。包起來得讓 held_slots 的作用域橫跨
                 # _collect_batch 與本函式兩層，不值得。
-                for held_stream_id, held_slot in held_slots:
-                    free_queues[held_stream_id].put(held_slot)
-                # 歸還後這兩個欄位都指著隨時會被 reader 覆寫的記憶體，一起清成 None：
-                # 讓「日後有人在歸還之後讀影格」從靜默讀到同一路幾格之後的畫面（內容
-                # 正常、只是錯格，比對輸出也看不出來）變成當場拋錯。`orig_img` 清得掉
-                # 是因為 Results 建構時已把 `orig_shape` 另存一份，本迴圈之後只用
-                # `boxes`（其座標系也綁在 `orig_shape` 上）；zip 的 strict 順帶釘住
-                # predict 逐格回傳一個 result
+                # 先切斷這兩個指向 slot 的參照，再放行記憶體——順序不能對調：中間那段
+                # 「slot 已歸還、參照還在」正是這道保護要消滅的狀態，而 zip 的 strict
+                # 也可能在此拋錯。清成 None 讓「日後有人在歸還之後讀影格」從靜默讀到
+                # 同一路幾格之後的畫面（內容正常、只是錯格，比對輸出也看不出來）變成
+                # 當場拋錯。`orig_img` 清得掉是因為 Results 建構時已把 `orig_shape`
+                # 另存一份，本迴圈之後只用 `boxes`（其座標系也綁在 `orig_shape` 上）；
+                # strict 順帶釘住 predict 逐格回傳一個 result
                 for packet, result in zip(batch_packets, results, strict=True):
                     packet.frame = None
                     result.orig_img = None
+                for held_stream_id, held_slot in held_slots:
+                    free_queues[held_stream_id].put(held_slot)
                 for idx, stream_id in enumerate(batch_stream_ids):
                     packet = batch_packets[idx]
                     fbody_boxes, heads = split_detections(results[idx].boxes.cpu())
