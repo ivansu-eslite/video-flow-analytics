@@ -48,11 +48,17 @@ def create_ring_buffer(num_slots: int, height: int, width: int):
         `mp.RawArray`，可傳給子進程建構 `FrameRing`。
     """
     total_bytes = num_slots * height * width * _CHANNELS
-    # 配置前先印大小與 `/dev/shm` 當下的可用空間，兩個數字對著看才判斷得出這塊落在哪：
-    # CPython 逐塊比對「剩餘空間 >= 本塊大小」，不夠就**靜默**改用 /tmp（磁碟上的 mmap，
-    # 讀寫崩掉但輸出完全正常、log 也不會有訊號）。九路各配一塊、逐塊判斷，因此可能前幾路
-    # 進 /dev/shm、後幾路掉出去，這行故意印在每一塊之前而不是總結一次。
-    # 主動擋下（累計檢查 ＋ fail loud）是 issue #106，本函式只負責留下訊號。
+    # CPython 逐塊比對「`/dev/shm` 剩餘空間 >= 本塊大小」，不夠就**靜默**改用 /tmp（磁碟上
+    # 的 mmap，讀寫崩掉但輸出完全正常、log 也不會有訊號）。九路各配一塊、逐塊判斷，因此
+    # 可能前幾路進 /dev/shm、後幾路掉出去。
+    #
+    # `backing_dirs` 記的是這塊**實際**落在哪：比對配置前後的 arena 映射，新出現的那個就是
+    # 本次配置的。不用「可用空間 vs 大小」去推論，是因為那是預測（同機其他行程也在動用
+    # /dev/shm，且檢查與配置之間有時間差），而這裡讀得到已發生的事實。`shm_available_mb`
+    # 仍保留，但作用是容量餘裕（還剩多少、下次調大 batch 會不會爆），不是判斷落點。
+    # 主動擋下是 issue #106，本函式只負責留下訊號。
+    arenas_before = _arena_paths()
+    buffer = mp.RawArray(ctypes.c_uint8, total_bytes)
     logger.info(
         "配置共享記憶體環形緩衝",
         num_slots=num_slots,
@@ -60,8 +66,11 @@ def create_ring_buffer(num_slots: int, height: int, width: int):
         width=width,
         size_mb=round(total_bytes / (1024 * 1024), 2),
         shm_available_mb=_shm_available_mb(),
+        backing_dirs=sorted(
+            {os.path.dirname(path) for path in _arena_paths() - arenas_before}
+        ),
     )
-    return mp.RawArray(ctypes.c_uint8, total_bytes)
+    return buffer
 
 
 def _shm_available_mb() -> float | None:
@@ -71,6 +80,27 @@ def _shm_available_mb() -> float | None:
     except OSError:
         return None
     return round(stat.f_bavail * stat.f_frsize / (1024 * 1024), 2)
+
+
+def _arena_paths() -> set[str]:
+    """本行程目前的 multiprocessing arena 映射路徑（檔名帶 `pym-` 前綴）。
+
+    這些檔案配置後隨即被 `unlink`，故 `/proc/self/maps` 上標著 `(deleted)`，但**目錄仍
+    看得到**，落在 `/dev/shm` 或 `/tmp` 一目了然。無 `/proc` 的平台回傳空集合，呼叫端
+    因而得到空的 `backing_dirs`（不是錯誤——這條資訊本來就只有 Linux 有）。
+    """
+    try:
+        with open("/proc/self/maps") as maps:
+            lines = maps.readlines()
+    except OSError:
+        return set()
+    paths = set()
+    for line in lines:
+        fields = line.split()
+        # 格式：address perms offset dev inode pathname [(deleted)]
+        if len(fields) >= 6 and "/pym-" in fields[5]:
+            paths.add(fields[5])
+    return paths
 
 
 class FrameRing:

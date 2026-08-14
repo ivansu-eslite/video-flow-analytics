@@ -9,6 +9,7 @@
 import numpy as np
 import pytest
 
+from video_analyze.services import frame_ring
 from video_analyze.services.frame_ring import FrameRing, create_ring_buffer
 
 _HEIGHT = 4
@@ -52,6 +53,23 @@ def test_view_slot_does_not_alias_other_slots():
     ring.write_slot(2, _frame(99))
 
     assert np.array_equal(view, _frame(10))
+
+
+def test_allocation_still_works_where_the_shm_diagnostics_are_unavailable(monkeypatch):
+    """`/dev/shm` 不存在（非 Linux／受限環境）時照樣配置得出來，只是少了診斷欄位。
+
+    `shm_available_mb` 與 `backing_dirs` 是給人看的訊號，不是配置的前提條件；查不到就
+    留空，不能反過來讓整條 pipeline 起不來。
+    """
+    monkeypatch.setattr(frame_ring, "_SHM_DIR", "/nonexistent-shm")
+
+    assert frame_ring._shm_available_mb() is None
+
+    ring = FrameRing(
+        create_ring_buffer(_NUM_SLOTS, _HEIGHT, _WIDTH), _NUM_SLOTS, _HEIGHT, _WIDTH
+    )
+    ring.write_slot(0, _frame(5))
+    assert np.array_equal(ring.view_slot(0), _frame(5))
 
 
 def test_write_slot_rejects_a_frame_of_a_different_shape():
