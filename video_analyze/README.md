@@ -280,12 +280,15 @@ zone 與 line 幾何都不會被驗證。
 解析度，再以多進程拆成 N 個讀取進程 ＋ 1 個推理進程：
 
 - **影格走共享記憶體、不走 pickle**（`frame_ring.py`）：每路一塊固定格數的環形緩衝
-  （`mp.RawArray`），queue 只傳 slot 索引，避免每格影格逐格 pickle 的高成本。此設計
-  **假設同一攝影機整天解析度固定**。
+  （`mp.RawArray`），queue 只傳 slot 索引，避免每格影格逐格 pickle 的高成本。推理進程
+  直接消費 slot 的 view、不複製出私有副本（`view_slot`）。此設計**假設同一攝影機整天
+  解析度固定**。
 - **讀取進程**：無空 slot 時阻塞，形成對推理進程的天然背壓。**時間戳 = 該片段檔名時間 ＋
   片段內幀序 / fps**（逐段計算，不能用全日累計幀數推算）。
 - **推理進程**：非阻塞輪詢各路 queue 湊批，維持 GPU 批次效率；每個 packet 依序經
   偵測 → 拆出 fbody／head（只有 fbody 進 tracker）→ 追蹤 → 推算落腳點 → 累積追蹤結果。
+  影格既然是共享記憶體的 view，**整批推論完成才歸還 slot**（生命週期約束見
+  [ADR-010](../docs/adr/video_analyze/010-zero-copy-frame-lifetime.md)）。
 
 ### fail-loud 錯誤處理
 

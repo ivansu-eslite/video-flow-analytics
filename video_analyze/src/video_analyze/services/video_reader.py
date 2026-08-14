@@ -56,12 +56,14 @@ class FramePacket:
     """讀取進程送往推理進程的單格資料。
 
     Attributes:
-        frame: 影格畫面（BGR）。
+        frame: 影格畫面（BGR）。推理進程取的是共享記憶體的 view（見
+            `FrameRing.view_slot`），**歸還 slot 之後會被設成 `None`**——那之後該
+            記憶體隨時會被 reader 覆寫，讓存取直接拋錯比靜默讀到別格畫面好。
         frame_index: 該影格在所屬片段內的序號（從 0 起算）。
         timestamp: 由片段起始時間 + 幀序（`frame_index / fps`）推得的時間戳。
     """
 
-    frame: np.ndarray
+    frame: np.ndarray | None
     frame_index: int
     timestamp: datetime
 

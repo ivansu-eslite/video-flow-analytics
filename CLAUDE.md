@@ -38,7 +38,7 @@ uv run --package line_counting line_counting       # 計數線進出人數統計
 uv run --package flow_report   flow_report         # 報表彙總 → report.xlsx
 
 uv run --directory <pkg> ruff check .              # lint；<pkg> = video_analyze / zone_mapping / line_counting / flow_report
-uv run --directory <pkg> pytest                    # 測試（四包各 9／3／3／3 支測試檔）
+uv run --directory <pkg> pytest                    # 測試（四包各 10／3／3／3 支測試檔）
 
 uv run --directory libs/vfa_registry pytest        # 共用 lib 的測試（4 支）自成一套，不在四包底下
 uv run --directory libs/vfa_registry ruff check .
@@ -66,7 +66,7 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 
 技術決策記在 [docs/adr/](docs/adr/)，依影響的模組分子目錄：只動一個套件的放
 `docs/adr/<套件名>/`，跨套件的放 `docs/adr/shared/`；編號是全域流水號、與子目錄無關，
-新增一律取下一號。九支 ADR 的清單、影響範圍與各自主題見
+新增一律取下一號。十支 ADR 的清單、影響範圍與各自主題見
 [README.md 的「架構決策紀錄」](README.md#架構決策紀錄)（唯一索引，本檔不另列一份）。
 
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
