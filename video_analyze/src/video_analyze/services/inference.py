@@ -13,6 +13,15 @@ from video_analyze.services.detector import YOLODetector
 from video_analyze.services.foot_point import FootPointEstimator
 from video_analyze.services.fps_meter import FpsMeter
 from video_analyze.services.frame_ring import FrameRing
+from video_analyze.services.letterbox import (
+    INFER_HEIGHT,
+    INFER_WIDTH,
+    clip_to_content_inplace,
+    content_box,
+    letterbox_params,
+    unscale_boxes_inplace,
+    unscale_points_inplace,
+)
 from video_analyze.services.tracker import MultiStreamByteTracker
 from video_analyze.services.tracking_results import TrackingResultCollector
 from video_analyze.services.video_reader import (
@@ -65,11 +74,44 @@ class InferencePipeline:
             detector: 已載入模型的 YOLO 偵測器（跨批次重用）。
             tracker: 多路 ByteTrack 狀態管理器（跨批次重用，維持軌跡延續）。
             results_path: 追蹤結果 parquet 的目標路徑。
-            frame_shapes: 各路的 `FrameShape`，索引即 stream_id；逐列寫進追蹤結果
-                parquet，供下游做解析度相關的參數換算。
+            frame_shapes: 各路的**原始** `FrameShape`，索引即 stream_id；逐列寫進
+                追蹤結果 parquet 供下游做解析度相關的參數換算，同時是本迴圈把框與
+                落腳點映射回原始解析度的依據（見 `services/letterbox.py`）。
+
+        Raises:
+            ValueError: 任一路的 `FrameShape` 剛好等於推論尺寸——那代表呼叫端傳進來
+                的是縮放後的尺寸而非原始解析度，見下方註解。
         """
+        # 影格在讀取端就縮成推論尺寸了，`frame_shapes` 卻**必須維持原始解析度**：傳成
+        # 推論尺寸的話反算參數會退化成恆等（scale=1、pad=0），框與落腳點靜默停在
+        # 640×384 尺度，而 parquet 的 frame_width 也一起寫成 640——下游 zone／line 只
+        # 檢查這兩欄存在、不檢查值是否合理（ADR-004／ADR-006），幾何全部縮到約 1/3 而
+        # 不報錯。代價是「來源本身真的就是 640×384」會被一起擋掉（那種輸入其實跑得動，
+        # letterbox 會原樣放行、反算是恆等）；推論尺寸是 5:3、不是任何常見的攝影機規格，
+        # 拿誤判換掉一條靜默路徑划算，訊息裡也寫明了這個情況
+        infer_shaped = [
+            index
+            for index, shape in enumerate(frame_shapes)
+            if (shape.height, shape.width) == (INFER_HEIGHT, INFER_WIDTH)
+        ]
+        if infer_shaped:
+            raise ValueError(
+                f"frame_shapes 有 {len(infer_shaped)} 路（stream_id={infer_shaped}）"
+                f"等於推論尺寸 {INFER_WIDTH}×{INFER_HEIGHT}，需傳入各路的原始解析度："
+                "它要寫進 parquet 供下游換算 1080p 基準像素，也是座標反算的依據，"
+                "傳成推論尺寸會讓兩者一起靜默出錯。若這幾路的來源**真的**是 "
+                f"{INFER_WIDTH}×{INFER_HEIGHT}（不是傳錯值），請改這道檢查——"
+                "那種輸入本身跑得動。"
+            )
         self.stream_names = stream_names
         self.frame_shapes = frame_shapes
+        # 每路一組 (scale, pad_x, pad_y) 與一個內容區，都跟著 stream_id 走
+        self._unscale_params = [
+            letterbox_params(shape.height, shape.width) for shape in frame_shapes
+        ]
+        self._content_boxes = [
+            content_box(shape.height, shape.width) for shape in frame_shapes
+        ]
         self.num_streams = len(stream_names)
         self.finished_streams = set()
         # 記住上一次湊批的起點，下一批從下一路開始繞一圈，避免固定從 0 起跑讓單一路
@@ -238,7 +280,14 @@ class InferencePipeline:
                     free_queues[held_stream_id].put(held_slot)
                 for idx, stream_id in enumerate(batch_stream_ids):
                     packet = batch_packets[idx]
-                    fbody_boxes, heads = split_detections(results[idx].boxes.cpu())
+                    detections = results[idx].boxes.cpu()
+                    # 先裁進填充帶以內，再拆分：改動前 ultralytics 在反算座標時就把框
+                    # 裁進畫面了，少了這一步，4K 的框會在反算時外擴最多 8 px（每個推論
+                    # 像素放大 6 倍），而 head 配對與 tracker 也會看到與改動前不同的框
+                    clip_to_content_inplace(
+                        detections.data, self._content_boxes[stream_id]
+                    )
+                    fbody_boxes, heads = split_detections(detections)
                     track_start = time.perf_counter()
                     tracks = self.tracker.update(stream_id, fbody_boxes)
                     self.fps_meter.add_tracking_time(time.perf_counter() - track_start)
@@ -246,6 +295,18 @@ class InferencePipeline:
                     # 才與同列寫進 parquet 的 bbox 自洽（tracker 回傳的 idx 也不是
                     # 傳入陣列的索引，無法拿來回填，見 tracker.py 的 Returns 說明）
                     foot_points = self.foot_estimator.estimate(stream_id, tracks, heads)
+                    # 反算的位置只能在這裡：影格在讀取端就縮過，YOLO 與 tracker 全程在
+                    # 推論尺度上工作，寫出去的座標卻必須是原始解析度（下游拿它跟攝影機
+                    # 幾何比對）。**不可以移到 `estimate` 之前**——`heads` 是這裡唯一沒
+                    # 反算的陣列，先把 `tracks` 換算回原始解析度會讓兩者尺度不一致，
+                    # `_match_head` 全數回 None、每列退回框底邊中點，而列數、track_id、
+                    # bbox 全部正常（ADR-009 要修掉的偏移就這樣靜默回來）。在推論尺度上
+                    # 配對是安全的：三個判準（中心落在框內、面積比、主軸傾角）在等比縮放
+                    # ＋等量平移下都不變
+                    unscale_boxes_inplace(tracks, *self._unscale_params[stream_id])
+                    unscale_points_inplace(
+                        foot_points, *self._unscale_params[stream_id]
+                    )
                     shape = self.frame_shapes[stream_id]
                     self.collector.add(
                         camera_id=self.stream_names[stream_id],

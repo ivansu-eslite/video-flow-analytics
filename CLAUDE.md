@@ -72,10 +72,10 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
 
 `tracking_results.parquet` 帶 `frame_width`／`frame_height`（issue #63）：值來自
-`video_analyze` 本來就為配置環形緩衝而探測的 `frame_shapes`，逐列重複寫入。**這兩欄不是
-給 `video_analyze` 自己用的**——`line_counting` 與 `zone_mapping` 都是純 CPU 套件、部署時
-不掛載影片，只能從這裡取得尺寸，把設定檔的 1080p 基準像素（`crossing_band_px_1080p`／
-`boundary_band_px_1080p`）換算成各攝影機的實際像素。因此：
+`video_analyze` 以 `probe_frame_shape` 探測首格得到的 `frame_shapes`，逐列重複寫入。
+**這兩欄不是給 `video_analyze` 自己用的**——`line_counting` 與 `zone_mapping` 都是純 CPU
+套件、部署時不掛載影片，只能從這裡取得尺寸，把設定檔的 1080p 基準像素
+（`crossing_band_px_1080p`／`boundary_band_px_1080p`）換算成各攝影機的實際像素。因此：
 
 - 缺這兩欄的舊 parquet 會被 `line_counting` 與 `zone_mapping` 兩包都 **fail loud 擋下**
   （不給 fallback：「找不到尺寸就當 1080p」會讓 4K 攝影機靜默套用只有一半寬的判定區域，
@@ -84,6 +84,10 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 - `video_analyze` 日後改 `TRACKING_RESULTS_SCHEMA` 要一併考慮 `line_counting` 與
   `zone_mapping` 會不會直接崩；換算與檢查的位置、以及為何不改用「人形肩寬百分比」當尺規，
   見 ADR-004。
+- 影格縮放移到讀取端之後（issue #108），`frame_shapes` 不再用來配置環形緩衝（緩衝改照
+  推論尺寸 640×384 配置），但**仍必須是原始解析度**：除了寫進這兩欄，它也是推論端把框與
+  落腳點映射回原始解析度的參數來源。傳成推論尺寸會讓兩者一起靜默出錯（座標停在推論尺度、
+  `frame_width` 寫成 640），故 `InferencePipeline.__init__` 直接擋下這個值。
 
 ### 落腳點是資料欄位，不是各包各自算的公式（跨套件硬性契約）
 
@@ -197,9 +201,8 @@ fail loud；沒有任何 `lines` 定義則整批跳過出入口三個分頁、�
 
 ### `tracking_results.parquet` 不可重現（非拆分相關，屬既有特性）
 
-`video_analyze` 的批次跨串流組成受時序影響（非阻塞輪詢湊批）、`bucket_name1` fixture 為
-混解析度會讓 letterbox 隨批次組成變動，加上 **ByteTrack 的 `track_id` 指派本身在重跑間
-會改變**（同一輸入重跑兩次即可能有數千列 key 對不上、座標差可達數百 px）。因此
+`video_analyze` 的批次跨串流組成受時序影響（非阻塞輪詢湊批），加上 **ByteTrack 的
+`track_id` 指派本身在重跑間會改變**（同一輸入重跑兩次即可能有數千列 key 對不上、座標差可達數百 px）。因此
 `tracking_results.parquet` 逐值比對對「邏輯是否正確」沒有驗收力；`zone_counts.parquet`
 經 `time_bucket` 聚合後穩定（同輸入重跑可逐值/byte 級一致），是**交付期／大重構做 golden
 回歸比對**時更可靠的標的（vfa 日常改動的把關是各包 pytest、不依賴 golden；golden 產在

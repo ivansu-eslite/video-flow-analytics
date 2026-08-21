@@ -6,7 +6,9 @@ from video_analyze.services.detector import (
     _basename,
     _log_model_metadata,
     _validate_classes,
+    _validate_imgsz,
 )
+from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
 
 
 class _FakeModel:
@@ -127,3 +129,33 @@ def test_yolo_detector_raises_when_model_path_missing(monkeypatch, tmp_path):
 
     with pytest.raises(FileNotFoundError):
         YOLODetector()
+
+
+class _FakeModelWithOverrides:
+    """只帶 `_validate_imgsz` 會用到的 `overrides`。"""
+
+    def __init__(self, overrides):
+        self.overrides = overrides
+
+
+def test_validate_imgsz_accepts_a_matching_weight():
+    _validate_imgsz(_FakeModelWithOverrides({"imgsz": INFER_WIDTH}))
+    _validate_imgsz(_FakeModelWithOverrides({"imgsz": [INFER_HEIGHT, INFER_WIDTH]}))
+
+
+def test_validate_imgsz_rejects_a_weight_trained_at_another_size():
+    """換上以別的 imgsz 訓練的權重要當場擋下。
+
+    讀取端已把影格縮成 `INFER_WIDTH` × `INFER_HEIGHT`，`predict` 會再照權重的 imgsz
+    縮放一次——先縮小再放大回去，細節回不來、召回率靜默下降，而輸出的欄位、座標、
+    列數全部正常。
+    """
+    with pytest.raises(ValueError, match="imgsz"):
+        _validate_imgsz(_FakeModelWithOverrides({"imgsz": 1280}))
+
+
+def test_validate_imgsz_only_warns_when_the_weight_has_no_imgsz(capsys):
+    """metadata 缺漏不是已知的錯誤組合，記警告就好，不擋整天的分析。"""
+    _validate_imgsz(_FakeModelWithOverrides({}))
+
+    assert "imgsz" in capsys.readouterr().out

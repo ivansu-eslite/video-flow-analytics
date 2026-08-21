@@ -1,17 +1,23 @@
 import datetime
+import queue
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pytest
 
+from video_analyze.services import video_reader
+from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
 from video_analyze.services.video_reader import FrameShape, _parse_segment_start
 
 
 def test_frame_shape_unpacks_as_height_width():
     """欄位順序是 `(height, width)`（沿用 numpy 的 `frame.shape`）。
 
-    `pipeline.py` 仍以 `height, width = shape` 解包去配置環形緩衝，順序若被調換，
-    緩衝會配成轉置的尺寸而在 `write_slot` 才炸開；寫進 parquet 的尺寸則會靜默相反。
+    環形緩衝改照推論尺寸配置之後，這份尺寸剩下的兩個消費端都是靜默的：寫進 parquet
+    的 `frame_width`／`frame_height`，以及 `letterbox_params(height, width)` 算出的
+    座標反算參數。順序若被調換，兩邊都不會有型別錯誤，只會讓下游的解析度換算與反算
+    出來的座標一起算錯。
     """
     shape = FrameShape(height=1080, width=1920)
 
@@ -55,3 +61,88 @@ def test_parse_segment_start_rejects_when_taipei_day_crosses_dir_day():
         _parse_segment_start(
             Path("loc_cam/2026/07/08/160000.000Z.mkv"), datetime.date(2026, 7, 8)
         )
+
+
+class _FakeCapture:
+    """`cv2.VideoCapture` 的替身，依序吐出指定的影格。"""
+
+    def __init__(self, frames):
+        self._frames = iter(frames)
+
+    def isOpened(self):  # noqa: N802 — 對齊 cv2 的介面命名
+        return True
+
+    def get(self, _prop):
+        return 30.0
+
+    def read(self):
+        frame = next(self._frames, None)
+        return (False, None) if frame is None else (True, frame)
+
+    def release(self):
+        pass
+
+
+class _RingStub:
+    """環形緩衝的替身，只記下每次寫入的形狀。"""
+
+    num_slots = 4
+
+    def __init__(self):
+        self.written = []
+
+    def write_slot(self, slot, frame):
+        self.written.append(frame.shape)
+
+
+def _reader_over(monkeypatch, frames, source_shape):
+    """組一個讀取器，讓 `_read_segment` 讀到 `frames` 這幾格。"""
+    monkeypatch.setattr(
+        video_reader.cv2, "VideoCapture", lambda _path: _FakeCapture(frames)
+    )
+    free_queue: queue.Queue = queue.Queue()
+    for slot in range(_RingStub.num_slots):
+        free_queue.put(slot)
+    return video_reader.DailyStreamVideoReader(
+        stream_id=0,
+        segments=[],
+        data_queue=queue.Queue(),
+        free_queue=free_queue,
+        ring=_RingStub(),
+        source_shape=source_shape,
+    )
+
+
+def _segment() -> video_reader.SegmentInfo:
+    return video_reader.SegmentInfo(
+        path=Path("loc_cam/2026/07/08/030000.000Z.mkv"),
+        start=datetime.datetime(2026, 7, 8, 11, 0, tzinfo=_TAIPEI),
+    )
+
+
+def test_reader_rejects_a_resolution_change_mid_stream(monkeypatch):
+    """整天解析度改變必須當場中止，不能被 letterbox 抹平後靜默算錯。
+
+    縮放前移之前，這件事由 `FrameRing.write_slot` 的形狀檢查順便擋下（緩衝依首格
+    解析度配置）；letterbox 把任何尺寸都變成推論尺寸之後那道網就失效了，而後果全是
+    靜默的：反算參數仍是首格那組（1080p→4K 差一半）、`frame_width` 每列照樣寫首格的
+    值，連下游「該攝影機 frame_width 唯一」的檢查都照樣通過。
+    """
+    frames = [
+        np.zeros((1080, 1920, 3), dtype=np.uint8),
+        np.zeros((2160, 3840, 3), dtype=np.uint8),  # 中途換成 4K
+    ]
+    reader = _reader_over(monkeypatch, frames, FrameShape(height=1080, width=1920))
+
+    with pytest.raises(ValueError, match="解析度"):
+        reader._read_segment(_segment())
+
+
+def test_reader_letterboxes_every_frame_to_the_inference_size(monkeypatch):
+    """解析度一致時照常讀完，且寫進 slot 的一律是推論尺寸。"""
+    frames = [np.zeros((1080, 1920, 3), dtype=np.uint8) for _ in range(3)]
+    reader = _reader_over(monkeypatch, frames, FrameShape(height=1080, width=1920))
+
+    reader._read_segment(_segment())
+
+    assert reader.ring.written == [(INFER_HEIGHT, INFER_WIDTH, 3)] * 3
