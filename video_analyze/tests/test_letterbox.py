@@ -16,6 +16,7 @@ from video_analyze.services.letterbox import (
     INFER_HEIGHT,
     INFER_WIDTH,
     clip_to_content_inplace,
+    content_box,
     letterbox,
     letterbox_params,
     unscale_boxes_inplace,
@@ -171,7 +172,7 @@ def test_clip_keeps_boxes_inside_the_source_frame_after_unscaling(shape):
         ]
     )
 
-    clip_to_content_inplace(boxes, pad_x, pad_y)
+    clip_to_content_inplace(boxes, content_box(height, width))
     unscale_boxes_inplace(boxes, scale, pad_x, pad_y)
 
     assert boxes[:, [0, 2]].min() >= -0.5
@@ -184,5 +185,28 @@ def test_clip_keeps_boxes_inside_the_source_frame_after_unscaling(shape):
 
 def test_clip_tolerates_empty_detections():
     """空畫面沒有偵測是常態，`(0, 6)` 與 1D 空陣列都不能炸。"""
-    clip_to_content_inplace(np.empty((0, 6)), 0.0, 12.0)
-    clip_to_content_inplace(np.array([]), 0.0, 12.0)
+    content = content_box(*_1080P)
+    clip_to_content_inplace(np.empty((0, 6)), content)
+    clip_to_content_inplace(np.array([]), content)
+
+
+def test_padding_offset_matches_the_params_for_an_odd_aspect_ratio():
+    """填充量必須是**內容實際起點**的整數格，不是 `.5` 的分數。
+
+    ultralytics 的 `ops.scale_boxes` 用 `round(pad - 0.1)` 反算，置中除不盡時內容是從
+    整數那一格開始的。回傳分數的話每個座標都會偏約 0.75 個原始像素，而 16:9 剛好整除
+    （pad 0 與 12）看不出來——這裡用 4:3 來源把兩者釘在一起：影格填滿 255，letterbox
+    之後第一個非填充值的列／欄就該等於 `letterbox_params` 給的 pad。
+    """
+    height, width = 576, 704  # 4:3，縮完 469×384，左右除不盡（171 / 2）
+    _scale, pad_x, pad_y = letterbox_params(height, width)
+    assert (pad_x, pad_y) == (85, 0)
+
+    out = letterbox(np.full((height, width, 3), 255, dtype=np.uint8))
+
+    columns = np.flatnonzero((out != 114).any(axis=(0, 2)))
+    rows = np.flatnonzero((out != 114).any(axis=(1, 2)))
+    assert columns[0] == pad_x
+    assert rows[0] == pad_y
+    # 內容區的右／下界同樣要對得上（除不盡的那半格算在右／下）
+    assert (columns[-1] + 1, rows[-1] + 1) == content_box(height, width)[2:]

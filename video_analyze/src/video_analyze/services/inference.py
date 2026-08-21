@@ -17,6 +17,7 @@ from video_analyze.services.letterbox import (
     INFER_HEIGHT,
     INFER_WIDTH,
     clip_to_content_inplace,
+    content_box,
     letterbox_params,
     unscale_boxes_inplace,
     unscale_points_inplace,
@@ -85,8 +86,9 @@ class InferencePipeline:
         # 推論尺寸的話反算參數會退化成恆等（scale=1、pad=0），框與落腳點靜默停在
         # 640×384 尺度，而 parquet 的 frame_width 也一起寫成 640——下游 zone／line 只
         # 檢查這兩欄存在、不檢查值是否合理（ADR-004／ADR-006），幾何全部縮到約 1/3 而
-        # 不報錯。正式來源 `probe_frame_shape` 是 16:9，永遠不會等於 5:3 的推論尺寸，
-        # 故這道檢查不會擋到合法輸入
+        # 不報錯。代價是「來源本身真的就是 640×384」會被一起擋掉（那種輸入其實跑得動，
+        # letterbox 會原樣放行、反算是恆等）；推論尺寸是 5:3、不是任何常見的攝影機規格，
+        # 拿誤判換掉一條靜默路徑划算，訊息裡也寫明了這個情況
         infer_shaped = [
             index
             for index, shape in enumerate(frame_shapes)
@@ -97,13 +99,18 @@ class InferencePipeline:
                 f"frame_shapes 有 {len(infer_shaped)} 路（stream_id={infer_shaped}）"
                 f"等於推論尺寸 {INFER_WIDTH}×{INFER_HEIGHT}，需傳入各路的原始解析度："
                 "它要寫進 parquet 供下游換算 1080p 基準像素，也是座標反算的依據，"
-                "傳成推論尺寸會讓兩者一起靜默出錯。"
+                "傳成推論尺寸會讓兩者一起靜默出錯。若這幾路的來源**真的**是 "
+                f"{INFER_WIDTH}×{INFER_HEIGHT}（不是傳錯值），請改這道檢查——"
+                "那種輸入本身跑得動。"
             )
         self.stream_names = stream_names
         self.frame_shapes = frame_shapes
-        # 每路一組 (scale, pad_x, pad_y)，跟著 stream_id 走
+        # 每路一組 (scale, pad_x, pad_y) 與一個內容區，都跟著 stream_id 走
         self._unscale_params = [
             letterbox_params(shape.height, shape.width) for shape in frame_shapes
+        ]
+        self._content_boxes = [
+            content_box(shape.height, shape.width) for shape in frame_shapes
         ]
         self.num_streams = len(stream_names)
         self.finished_streams = set()
@@ -277,8 +284,9 @@ class InferencePipeline:
                     # 先裁進填充帶以內，再拆分：改動前 ultralytics 在反算座標時就把框
                     # 裁進畫面了，少了這一步，4K 的框會在反算時外擴最多 8 px（每個推論
                     # 像素放大 6 倍），而 head 配對與 tracker 也會看到與改動前不同的框
-                    _scale, pad_x, pad_y = self._unscale_params[stream_id]
-                    clip_to_content_inplace(detections.data, pad_x, pad_y)
+                    clip_to_content_inplace(
+                        detections.data, self._content_boxes[stream_id]
+                    )
                     fbody_boxes, heads = split_detections(detections)
                     track_start = time.perf_counter()
                     tracks = self.tracker.update(stream_id, fbody_boxes)

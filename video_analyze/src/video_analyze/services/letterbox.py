@@ -27,12 +27,17 @@ INFER_HEIGHT = 384
 _PAD_VALUE = 114  # 與 ultralytics LetterBox 的預設填充值一致
 
 
-def letterbox_params(orig_height: int, orig_width: int) -> tuple[float, float, float]:
-    """算出等比縮放的比例與置中填充量。
+def letterbox_params(orig_height: int, orig_width: int) -> tuple[float, int, int]:
+    """算出等比縮放的比例與左／上緣的填充量。
 
-    與 ultralytics `LetterBox` 同一套算法：取長短邊比例的較小者，縮完置中填充。
-    1080p 與 4K 都是 16:9，因此兩者都縮成 640×360、上下各填 12——**填充量相同、
-    只有 `scale` 不同**，這也是混解析度批次在 rect 模式下能共用同一形狀的原因。
+    與 ultralytics 同一套算法：取長短邊比例的較小者，縮完置中填充。1080p 與 4K 都是
+    16:9，因此兩者都縮成 640×360、上下各填 12——**填充量相同、只有 `scale` 不同**，
+    這也是不同解析度的來源在 rect 模式下能共用同一形狀的原因。
+
+    填充量取 `round(pad - 0.1)` 的整數而非 `.5` 的分數，是為了與 ultralytics 的
+    `ops.scale_boxes` 逐字一致：置中填充在單邊除不盡時，內容實際是從整數那一格開始的
+    （左／上取小、右／下取大）。回傳分數的話，非 16:9 來源的每個 x 都會偏約 0.75 個
+    原始像素——16:9 剛好整除（pad 0 與 12），看不出來。
 
     Args:
         orig_height: 原始影格高度（pixel）。
@@ -40,13 +45,13 @@ def letterbox_params(orig_height: int, orig_width: int) -> tuple[float, float, f
 
     Returns:
         `(scale, pad_x, pad_y)`；`scale` 是原圖到推論尺寸的縮放比例，兩個 pad 是
-        單邊填充量（可能是 .5，故為 float）。
+        **左緣與上緣**的填充量（縮放後的內容就從這個座標開始）。
     """
     scale = min(INFER_WIDTH / orig_width, INFER_HEIGHT / orig_height)
     new_width = round(orig_width * scale)
     new_height = round(orig_height * scale)
-    pad_x = (INFER_WIDTH - new_width) / 2
-    pad_y = (INFER_HEIGHT - new_height) / 2
+    pad_x = round((INFER_WIDTH - new_width) / 2 - 0.1)
+    pad_y = round((INFER_HEIGHT - new_height) / 2 - 0.1)
     return scale, pad_x, pad_y
 
 
@@ -70,22 +75,44 @@ def letterbox(frame: np.ndarray) -> np.ndarray:
         # 結果與改動前對不起來，而那個差異看起來會像是「把縮放搬到讀取端造成的」
         interpolation=cv2.INTER_LINEAR,
     )
-    top = round(pad_y - 0.1)
-    bottom = round(pad_y + 0.1)
-    left = round(pad_x - 0.1)
-    right = round(pad_x + 0.1)
+    # 右／下緣吃掉除不盡的那半格（單邊除不盡時比左／上多 1），與 ultralytics 的
+    # `round(pad + 0.1)` 等值。內容的起點就是 `letterbox_params` 給的 pad，反算才對得回去
+    bottom = INFER_HEIGHT - resized.shape[0] - pad_y
+    right = INFER_WIDTH - resized.shape[1] - pad_x
     return cv2.copyMakeBorder(
         resized,
-        top,
+        pad_y,
         bottom,
-        left,
+        pad_x,
         right,
         cv2.BORDER_CONSTANT,
         value=(_PAD_VALUE, _PAD_VALUE, _PAD_VALUE),
     )
 
 
-def clip_to_content_inplace(boxes, pad_x: float, pad_y: float) -> None:
+def content_box(orig_height: int, orig_width: int) -> tuple[int, int, int, int]:
+    """縮放後的畫面內容在推論尺度上佔的矩形（填充帶以內的範圍）。
+
+    右／下邊界不能用 `INFER_WIDTH - pad_x` 反推：置中填充除不盡時右／下比左／上多
+    1 px，那樣算會讓裁切邊界鬆掉一格（4K 下等於原始解析度的 6 px）。
+
+    Args:
+        orig_height: 原始影格高度（pixel）。
+        orig_width: 原始影格寬度（pixel）。
+
+    Returns:
+        `(x1, y1, x2, y2)`，推論尺度上的內容區。
+    """
+    scale, pad_x, pad_y = letterbox_params(orig_height, orig_width)
+    return (
+        pad_x,
+        pad_y,
+        pad_x + round(orig_width * scale),
+        pad_y + round(orig_height * scale),
+    )
+
+
+def clip_to_content_inplace(boxes, content: tuple[int, int, int, int]) -> None:
     """把推論尺度的框就地裁進 letterbox 的內容區（填充帶以內）。
 
     改動前這件事由 ultralytics 做：`predict` 反算座標時順手 `clip_boxes` 把框裁進原圖
@@ -101,15 +128,15 @@ def clip_to_content_inplace(boxes, pad_x: float, pad_y: float) -> None:
     Args:
         boxes: 形狀 `(N, >=4)`、前四欄為 `x1, y1, x2, y2` 的陣列或 torch tensor
             （兩者的 `.clip(min, max)` 語義相同）。
-        pad_x: 單邊水平填充量，來自 `letterbox_params`。
-        pad_y: 單邊垂直填充量。
+        content: 該路的內容區 `(x1, y1, x2, y2)`，由 `content_box` 算出。
     """
     if len(boxes) == 0:
         return
-    boxes[:, 0] = boxes[:, 0].clip(pad_x, INFER_WIDTH - pad_x)
-    boxes[:, 2] = boxes[:, 2].clip(pad_x, INFER_WIDTH - pad_x)
-    boxes[:, 1] = boxes[:, 1].clip(pad_y, INFER_HEIGHT - pad_y)
-    boxes[:, 3] = boxes[:, 3].clip(pad_y, INFER_HEIGHT - pad_y)
+    x1, y1, x2, y2 = content
+    boxes[:, 0] = boxes[:, 0].clip(x1, x2)
+    boxes[:, 2] = boxes[:, 2].clip(x1, x2)
+    boxes[:, 1] = boxes[:, 1].clip(y1, y2)
+    boxes[:, 3] = boxes[:, 3].clip(y1, y2)
 
 
 def unscale_boxes_inplace(
@@ -123,8 +150,8 @@ def unscale_boxes_inplace(
     Args:
         boxes: 形狀 `(N, >=4)` 的陣列，前四欄為框座標。
         scale: `letterbox_params` 給的縮放比例。
-        pad_x: 單邊水平填充量。
-        pad_y: 單邊垂直填充量。
+        pad_x: 左緣填充量。
+        pad_y: 上緣填充量。
     """
     if boxes.size == 0:
         return
@@ -146,8 +173,8 @@ def unscale_points_inplace(
     Args:
         points: 形狀 `(N, 2)` 的陣列，兩欄為 `x, y`。
         scale: `letterbox_params` 給的縮放比例。
-        pad_x: 單邊水平填充量。
-        pad_y: 單邊垂直填充量。
+        pad_x: 左緣填充量。
+        pad_y: 上緣填充量。
     """
     if points.size == 0:
         return

@@ -7,6 +7,7 @@ from ultralytics.engine.results import Results
 from vfa_observability import StructuredLogger
 
 from video_analyze.models.config import settings
+from video_analyze.services.letterbox import INFER_WIDTH
 
 logger = StructuredLogger(component="detector")
 
@@ -90,6 +91,37 @@ def _validate_classes(model: YOLO) -> None:
         )
 
 
+def _validate_imgsz(model: YOLO) -> None:
+    """驗證權重帶的 `imgsz` 與讀取端縮放用的 `INFER_WIDTH`（長邊）一致。
+
+    影格改由讀取端縮成 `INFER_WIDTH` × `INFER_HEIGHT`（issue #108），這個尺寸是**寫死
+    的常數**，而 `model_path` 是設定／環境變數可換的。換上以其他 `imgsz` 訓練的權重時，
+    `predict` 會照權重的 `imgsz` 再縮放一次：先被縮小、再被放大回去，細節已經沒了——
+    偵測召回率靜默下降，而座標、欄位、列數全部正常。與 `_validate_classes` 同一類防呆。
+
+    讀不到 `imgsz` 時只記警告、不擋：那是 metadata 缺漏，不是已知的錯誤組合。
+
+    Args:
+        model: 已載入權重的 `ultralytics.YOLO` 實例。
+
+    Raises:
+        ValueError: 權重的 `imgsz` 長邊與 `INFER_WIDTH` 不同。
+    """
+    imgsz = getattr(model, "overrides", {}).get("imgsz")
+    if imgsz is None:
+        logger.warning("權重未帶 imgsz，無法驗證是否與讀取端的縮放尺寸一致。")
+        return
+    long_side = max(imgsz) if isinstance(imgsz, (list, tuple)) else imgsz
+    if long_side != INFER_WIDTH:
+        raise ValueError(
+            f"權重的 imgsz={imgsz} 與讀取端縮放用的長邊 {INFER_WIDTH} 不符："
+            "影格在讀取端就已縮成推論尺寸，predict 會照權重的 imgsz 再縮放一次，"
+            "細節回不來而召回率靜默下降。請改用同 imgsz 的權重，或一併調整 "
+            "services/letterbox.py 的 INFER_WIDTH／INFER_HEIGHT（兩者要同時對得上 "
+            "stride 32 的倍數）。"
+        )
+
+
 class YOLODetector:
     """YOLO 偵測器包裝層，隔離強耦合"""
 
@@ -105,6 +137,8 @@ class YOLODetector:
 
         Raises:
             FileNotFoundError: `model_path` 指定的權重檔不存在。
+            ValueError: `classes` 指定了權重沒有的類別 id（`_validate_classes`），或
+                權重的 `imgsz` 與讀取端的縮放尺寸不符（`_validate_imgsz`）。
         """
         model_path = settings.model.model_path
         if not Path(model_path).is_file():
@@ -122,6 +156,7 @@ class YOLODetector:
         self.model = YOLO(model_path).to(device)
         _log_model_metadata(self.model)
         _validate_classes(self.model)
+        _validate_imgsz(self.model)
 
     def predict(self, batch_frames: list[np.ndarray]) -> list[Results]:
         """對一批影格執行物件偵測，僅保留 `settings.model.classes` 指定的類別

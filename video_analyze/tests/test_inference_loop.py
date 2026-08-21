@@ -282,8 +282,8 @@ def test_frame_shapes_of_inference_size_are_rejected(tmp_path):
 
     緩衝改吃推論尺寸之後，順手把 `frame_shapes` 也改成推論尺寸是很自然的下一步，而
     後果全是靜默的：反算參數退化成恆等（scale=1、pad=0），座標停在 640×384，parquet
-    的 `frame_width` 同時寫成 640。正式來源 `probe_frame_shape` 是 16:9，不會等於 5:3
-    的推論尺寸，所以這道檢查不會擋到合法輸入。
+    的 `frame_width` 同時寫成 640。代價是真的以推論尺寸為來源解析度的攝影機也會被擋
+    （那種輸入其實跑得動），但推論尺寸是 5:3、不是常見的攝影機規格，訊息也指到這件事。
     """
     with pytest.raises(ValueError, match="推論尺寸"):
         InferencePipeline(
