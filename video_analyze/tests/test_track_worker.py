@@ -144,6 +144,12 @@ def _run_worker(
 
     `track_queue` 用 `queue.Queue` 取代 `mp.Queue`（介面相同），不拉起任何子進程。
     `last_signal` 換成 `TRACK_FAILED` 就能驗推論進程崩潰時的失效路徑。
+
+    餵進去的 `Boxes` 先 `clone()` 一份：`to_payload` 對已在 CPU 的 tensor 回傳的是**共享
+    記憶體的 numpy view**，而正式執行時 `mp.Queue` 會 pickle（等於複製），這裡用
+    `queue.Queue` 就沒有那道複製。不 clone 的話 `_track_one` 的 `clip_to_content_inplace`
+    會就地改掉模組層級的偵測資料，污染同檔後續測試——目前所有框都在內容區以內、裁切是
+    no-op 所以打不到，但只要有人加一個落在填充帶的框（正是 clip 要測的情境）就會踩到。
     """
     trackers = _install_recording_tracker(monkeypatch)
     results_path = Path(tmp_path) / "tracking_results.parquet"
@@ -151,7 +157,10 @@ def _run_worker(
     for frame_index, boxes in enumerate(per_frame):
         track_queue.put(
             to_payload(
-                0, boxes, frame_index, _BASE + datetime.timedelta(seconds=frame_index)
+                0,
+                Boxes(boxes.data.clone(), boxes.orig_shape),
+                frame_index,
+                _BASE + datetime.timedelta(seconds=frame_index),
             )
         )
     track_queue.put(last_signal)
@@ -353,3 +362,17 @@ def test_track_queue_capacity_is_a_few_batches_of_slack():
         f"鬆弛 {slack_batches} 批：太少會讓正常抖動變成互等，太多等於把 backlog 換個"
         "地方堆，還會讓 TRACK_FAILED 的送達延遲超過父進程的 terminate 時限"
     )
+
+
+def test_payload_shares_memory_with_the_source_boxes():
+    """`to_payload` 回的是共享記憶體的 view，不是副本——正式路徑靠 `mp.Queue` 的 pickle
+    複製，測試用 `queue.Queue` 時就得自己 clone（見 `_run_worker`）。
+
+    這支測試的用途是讓「哪一邊負責複製」這件事有訊號：日後若 `to_payload` 改成回副本
+    （例如加上 `.copy()`），這裡會失敗，提醒同時檢查 `_run_worker` 的 clone 還需不需要。
+    """
+    _stream_id, box_data, _frame_index, _timestamp = to_payload(
+        0, _FRAME_0_DETECTIONS, 0, _BASE
+    )
+
+    assert np.shares_memory(box_data, _FRAME_0_DETECTIONS.data.numpy())
