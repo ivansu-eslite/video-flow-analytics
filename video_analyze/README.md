@@ -288,7 +288,8 @@ zone 與 line 幾何都不會被驗證。
   4K 每格是 23.73 MiB）。此設計仍**假設同一攝影機整天解析度固定**（`probe_frame_shape`
   只探測首格）。
 - **讀取進程**：解碼後立即 letterbox 成推論尺寸再寫入 slot（`letterbox.py`）。無空 slot
-  時阻塞，形成對推理進程的天然背壓。**時間戳 = 該片段檔名時間 ＋ 片段內幀序 / fps**
+  時阻塞，形成對推理進程的天然背壓——slot 在 predict 完成當下就歸還，所以這條背壓只覆蓋
+  到推論為止，追蹤那一段由 `track_queue` 的容量上限接手。**時間戳 = 該片段檔名時間 ＋ 片段內幀序 / fps**
   （逐段計算，不能用全日累計幀數推算）。
 - **推理進程**：非阻塞輪詢各路 queue 湊批，維持 GPU 批次效率；每批推論完就把逐格的
   偵測框丟進 `track_queue`，本身不做追蹤。影格既然是共享記憶體的 view，**整批推論完成
@@ -328,9 +329,11 @@ zone 與 line 幾何都不會被驗證。
   `RuntimeError`；`KeyboardInterrupt` → 終止後以 exit code 130 收斂。
 - 追蹤明細 parquet 先寫 `.tmp`、收到 `TRACK_DONE` 才 `rename` 成正式檔名（`rename` 具
   原子性）。推論進程中途例外時送 `TRACK_FAILED`，追蹤進程收到就刪除 `.tmp` 並以非零
-  exitcode 結束，正式檔名下不會出現不完整的 parquet。**推論進程被 SIGKILL 或整機掛掉
-  不在此覆蓋範圍**：追蹤進程會卡在 `track_queue.get()` 等不到訊號、由父進程 terminate，
-  而 terminate 不走 Python 的 `except`／`finally`，`.tmp` 會留在輸出目錄。
+  exitcode 結束，正式檔名下不會出現不完整的 parquet。這條路徑**依賴 `track_queue` 的
+  容量上限**（`track_worker.TRACK_QUEUE_SLOTS`）：訊號是排在同一條佇列尾端的 in-band
+  訊號，backlog 無上限的話它會晚於父進程的 terminate 抵達而靜默失效。**推論進程被
+  SIGKILL 或整機掛掉不在覆蓋範圍**：追蹤進程會卡在 `track_queue.get()` 等不到訊號、
+  由父進程 terminate，而 terminate 不走 Python 的 `except`／`finally`，`.tmp` 會留下。
 
 ## 開發
 
