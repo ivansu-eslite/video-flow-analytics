@@ -44,8 +44,18 @@ class ModelConfig(BaseModel):
     """YOLO 偵測模型參數。
 
     Attributes:
-        model_path: 模型權重檔路徑。
-        batch: 推理批次大小。
+        model_path: TensorRT 引擎檔路徑（cwd 相對）。**只吃 `.engine`**——正式推論
+            路徑沒有 Torch 權重那條（ADR-011），指到 `.pt` 會被 `YOLODetector`
+            當場擋下。引擎綁 SM，檔名帶 `_sm<SM>` 尾綴以免兩顆不同架構的引擎混用。
+        source_weights_sha256: 釘住引擎的來源 `.pt` 內容 hash。設了就在載入時比對
+            引擎自帶的 metadata，不符即中止；留空代表不釘（只記 warning）。這是
+            唯一擋得下「換成另一顆 id 剛好都存在、語義卻不同的權重」的檢查——
+            `classes` 只驗 id 存在。
+        batch: 湊批目標。**實際單次推理批次是此值的 2 倍**（ultralytics 對
+            in-memory list source 一次 forward 整個 list），而那個實際值不得超過
+            引擎建置時綁的最大批次（見 `services/inference.py` 的檢查）。此值同時
+            推導出環形緩衝格數與 track queue 容量（`services/frame_ring.py`、
+            `services/track_worker.py`），調整前先讀那兩處的說明。
         classes: 要保留的偵測類別 id 清單，對應權重的類別定義。預設同時保留
             head 與 fbody：fbody 是追蹤目標，head 只供落腳點推算用（不進
             tracker，見 `services/track_worker.py`）。
@@ -53,7 +63,8 @@ class ModelConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    model_path: str = "20260714-153811_yolo26m_baseline.pt"
+    model_path: str = "20260714-153811_yolo26m_baseline_sm75.engine"
+    source_weights_sha256: str = ""
     batch: int = Field(default=1, ge=1)
     classes: list[int] = Field(
         default_factory=lambda: [HEAD_CLASS_ID, FBODY_CLASS_ID], min_length=1
