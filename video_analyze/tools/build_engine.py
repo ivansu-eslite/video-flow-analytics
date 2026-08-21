@@ -259,7 +259,7 @@ def main() -> None:
     environment = current_gpu_environment()
     print(
         f"建置機：{environment.gpu_name}（sm{environment.compute_capability}）、"
-        f"TensorRT {environment.tensorrt}、CUDA {environment.cuda_major}、"
+        f"TensorRT {environment.tensorrt}（{environment.tensorrt_package}）、"
         f"driver {environment.driver}、torch {torch.__version__}"
     )
 

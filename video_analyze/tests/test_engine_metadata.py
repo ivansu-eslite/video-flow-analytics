@@ -16,6 +16,7 @@ from video_analyze.services.engine_metadata import (
     VFA_METADATA_KEY,
     VFA_METADATA_SCHEMA,
     GpuEnvironment,
+    _tensorrt_package,
     read_engine_metadata,
     validate_engine_metadata,
 )
@@ -183,3 +184,37 @@ def test_validate_warns_when_the_source_weight_is_not_pinned(capsys):
     out = capsys.readouterr().out
     assert '"severity": "WARNING"' in out
     assert "source_weights_sha256" in out
+
+
+class _FakeDist:
+    def __init__(self, name):
+        self.metadata = {"Name": name}
+
+
+def test_tensorrt_package_ignores_the_bindings_and_libs_subpackages(monkeypatch):
+    """認的是主套件，不是同樣以 `tensorrt-cu` 開頭的兩個附屬套件。
+
+    `tensorrt-cu12-bindings` 與 `tensorrt-cu12-libs` 跟主套件一起裝，而
+    `importlib.metadata.distributions()` 的順序不保證——用前綴比對會隨機拿到附屬套件
+    的名字（實測就拿到過 `tensorrt-cu12-libs`）。那個值本身不算錯，但它會讓「引擎的
+    建置環境」這欄的內容隨機漂移，兩端各自漂到不同的值就變成假的不符。
+    """
+    monkeypatch.setattr(
+        "importlib.metadata.distributions",
+        lambda: [
+            _FakeDist("tensorrt_cu12_libs"),
+            _FakeDist("tensorrt_cu12_bindings"),
+            _FakeDist("tensorrt_cu12"),
+        ],
+    )
+
+    assert _tensorrt_package() == "tensorrt-cu12"
+
+
+def test_tensorrt_package_returns_none_when_not_installed(monkeypatch, capsys):
+    """取不到只記 warning、回 None——這欄的缺漏會在比對時以「不符」被擋下，
+    不需要在這裡多拋一次。"""
+    monkeypatch.setattr("importlib.metadata.distributions", lambda: [_FakeDist("torch")])
+
+    assert _tensorrt_package() is None
+    assert '"severity": "WARNING"' in capsys.readouterr().out

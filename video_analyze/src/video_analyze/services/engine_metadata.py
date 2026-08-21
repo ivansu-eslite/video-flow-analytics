@@ -109,17 +109,21 @@ def _tensorrt_package() -> str | None:
     看不出變體，只有套件名分得出來。名稱正規化成連字號（`importlib.metadata` 回的是
     `tensorrt_cu12`），比對兩端才不會因為寫法不同而誤判。
     """
+    import re
     from importlib.metadata import distributions
 
+    # 只認主套件：`tensorrt-cu12-bindings`／`tensorrt-cu12-libs` 兩個附屬套件同樣以
+    # `tensorrt-cu` 開頭，而 `distributions()` 的順序不保證，用前綴比對會隨機拿到附屬
+    # 套件的名字（實測就拿到 `tensorrt-cu12-libs`）。錨定整個名稱才擋得住。
+    pattern = re.compile(r"^tensorrt-cu\d+$")
     for dist in distributions():
         name = dist.metadata["Name"]
         if not name:
             continue
         normalized = name.lower().replace("_", "-")
-        # 只取主套件，`-bindings`／`-libs` 兩個附屬套件跟著它走
-        if normalized.startswith("tensorrt-cu"):
+        if pattern.match(normalized):
             return normalized
-    logger.warning("找不到 tensorrt-cu* 套件，該欄位以 null 記錄。")
+    logger.warning("找不到 tensorrt-cu<N> 套件，該欄位以 null 記錄。")
     return None
 
 
