@@ -398,9 +398,22 @@ zone 與 line 幾何都不會被驗證。
   由 `run_inference_pipeline` 自己的 `except` 送出同一個訊號——改吃引擎之後「載入失敗」
   從罕見變成常見的一類（引擎檔不在、SM 對不上、TensorRT 版本與映像檔不一致），而
   `track_queue` 的 pipe 寫入端 fd 被父進程與九個讀取進程一起繼承，上游死掉不會讓
-  `get()` 收到 EOF（issue #113）。**推論進程被
-  SIGKILL 或整機掛掉不在覆蓋範圍**：追蹤進程會卡在 `track_queue.get()` 等不到訊號、
-  由父進程 terminate，而 terminate 不走 Python 的 `except`／`finally`，`.tmp` 會留下。
+  `get()` 收到 EOF（issue #113）。
+- **推論進程被 SIGKILL（OOM kill、人工 kill）時連 `TRACK_FAILED` 都送不出來**，追蹤進程
+  就卡在上面那個收不到 EOF 的 `get()` 上。它等到的是父進程 `_terminate_all` 的 **SIGTERM**，
+  而追蹤進程攔下了這個訊號（`track_worker._raise_on_sigterm` 拋 `SystemExit(143)`），走的
+  仍是既有的 `collector.discard()`；不攔的話預設處置不執行 Python 的 `except`／`finally`，
+  `.tmp` 會留下。清理期間 SIGTERM 與 SIGINT 都設成 `SIG_IGN`——Ctrl+C 走的是 process group
+  的 SIGINT，本進程進到清理的同時父進程也在送 SIGTERM，連按兩次 Ctrl+C 又多一個 SIGINT，
+  任何一個落在關 writer 之後、刪檔之前都會留下整天的暫存檔。再被 SIGKILL 就靠下面那條收。
+- **整機重啟／追蹤進程本身被 SIGKILL** 沒有任何 in-process 的機制擋得住，改由**下一次寫
+  同一條路徑的執行**在啟動時清掉（`tracking_results.claim_tmp_slot`）。判準是「還有沒有
+  進程持有這個暫存檔的 `flock`」而不是檔名或 mtime：拿得到鎖代表持有者已經不在，殘檔就地
+  `ftruncate` 清空（不 `unlink`，否則鎖會留在沒有檔名的 inode 上而守不住）；拿不到鎖代表
+  另一個執行正在寫同一條路徑，**當場 fail loud，一個 byte 都不動**。因此同一個 bucket 的
+  同一天不能有兩個執行並行（那本來就會兩邊交錯寫進同一個暫存檔），要並行請分開 bucket
+  或分開日期。收尾時刪檔與改名都認 inode 而不認路徑：暫存檔若已被換成別份，`discard()`
+  留著不動、`save()` 直接 fail loud（那時本次結果已隨原本的檔案一起遺失）。
 
 ## 開發
 
