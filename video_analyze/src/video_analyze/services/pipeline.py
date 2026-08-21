@@ -14,6 +14,7 @@ from video_analyze.services.frame_ring import (
     create_ring_buffer,
 )
 from video_analyze.services.inference import InferencePipeline
+from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
 from video_analyze.services.tracker import MultiStreamByteTracker
 from video_analyze.services.video_reader import (
     FrameShape,
@@ -61,16 +62,19 @@ def run_inference_pipeline(
         data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
         free_queues: 各路歸還環形緩衝 slot 用的佇列，索引為 stream_id。
         ring_buffers: 各路 `create_ring_buffer` 建立的共享記憶體。
-        frame_shapes: 各路的 `FrameShape`，索引與 `ring_buffers` 對應；
-            除了配置環形緩衝，也逐列寫進追蹤結果 parquet。
+        frame_shapes: 各路的**原始** `FrameShape`，索引與 `ring_buffers` 對應；
+            緩衝已改照推論尺寸配置，這裡它只逐列寫進追蹤結果 parquet，並供推論端
+            算框與落腳點的反算參數（見 `services/letterbox.py`）。
         stream_names: 各路攝影機的 `stream_dirname`。
         results_path: 追蹤結果 parquet 的目標路徑。
     """
     detector = YOLODetector()
     tracker = MultiStreamByteTracker(num_streams=len(stream_names))
+    # 緩衝存的是讀取端已縮好的影格，故用推論尺寸而非 frame_shapes；沿用原始解析度會讓
+    # `np.frombuffer(...).reshape` 在本子進程當場拋 ValueError
     rings = [
-        FrameRing(buffer, RING_SLOTS, height, width)
-        for buffer, (height, width) in zip(ring_buffers, frame_shapes)
+        FrameRing(buffer, RING_SLOTS, INFER_HEIGHT, INFER_WIDTH)
+        for buffer in ring_buffers
     ]
     pipeline = InferencePipeline(
         stream_names=stream_names,
@@ -143,7 +147,8 @@ def analyze_daily(
             raise ValueError(f"{cam.stream_dirname} 在 {date} 沒有任何影片片段")
         stream_names.append(cam.stream_dirname)
         segments_per_stream.append(segments)
-        # 依首格解析度一次配置該路的共享環形緩衝（假設整天解析度固定）
+        # 探測首格取該路的原始解析度（假設整天固定）：供 parquet 的尺寸欄位與推論端
+        # 的座標反算用，**不是**用來配置環形緩衝（緩衝照推論尺寸配）
         frame_shapes.append(probe_frame_shape(segments[0]))
 
     results_path = output_root / date.isoformat() / TRACKING_RESULTS_FILENAME
@@ -152,9 +157,11 @@ def analyze_daily(
     # 影格走共享記憶體環形緩衝，queue 只傳輕量索引，避免每格 6MB 走 pickle + pipe
     data_queues = [mp.Queue() for _ in range(num_streams)]
     free_queues = [mp.Queue() for _ in range(num_streams)]
+    # 讀取端已把影格縮成推論尺寸，緩衝只需存 640×384（4K 每格 23.73 MiB → 0.70 MiB）。
+    # frame_shapes 仍然要留著、且必須是原始解析度：它要寫進 parquet，也是推論端反算
+    # 座標的依據（見 `services/letterbox.py`）
     ring_buffers = [
-        create_ring_buffer(RING_SLOTS, height, width)
-        for height, width in frame_shapes
+        create_ring_buffer(RING_SLOTS, INFER_HEIGHT, INFER_WIDTH) for _ in frame_shapes
     ]
     processes: list[mp.Process] = []
 
@@ -180,7 +187,6 @@ def analyze_daily(
         processes.append(infer_proc)
 
         for i, segments in enumerate(segments_per_stream):
-            height, width = frame_shapes[i]
             reader_proc = mp.Process(
                 target=run_video_reader,
                 args=(
@@ -190,8 +196,6 @@ def analyze_daily(
                     free_queues[i],
                     ring_buffers[i],
                     RING_SLOTS,
-                    height,
-                    width,
                 ),
             )
             reader_proc.start()

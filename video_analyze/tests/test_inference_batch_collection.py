@@ -34,7 +34,7 @@ def _make_pipeline(num_streams: int, tmp_path: Path) -> InferencePipeline:
         detector=None,
         tracker=None,
         results_path=tmp_path / "outputs" / "tracking_results.parquet",
-        frame_shapes=[FrameShape(height=4, width=4)] * num_streams,
+        frame_shapes=[FrameShape(height=1080, width=1920)] * num_streams,
     )
 
 

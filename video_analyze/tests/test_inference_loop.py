@@ -1,10 +1,20 @@
-"""推理主迴圈的接線契約測試：交給 tracker 的只有 fbody。
+"""推理主迴圈的接線契約測試：哪一份資料交給誰、在哪一步做。
 
-`split_detections` 拆得對不對由 test_inference_split.py 釘住，這裡釘的是另一件事
-——主迴圈實際把拆出來的**哪一份**交給 `tracker.update`。把引數改回未拆分的偵測
-結果（`results[idx].boxes.cpu()`），拆分函式的測試依然全綠，但同一個人會多出一條
-頭部軌跡，`track_id` 的語義從「一個人」變成「一個偵測目標」，下游的不重複訪客與
-進出人數直接翻倍，而 `tracking_results.parquet` 本身完全正常。
+三件事都是「主迴圈接錯線，但被接的函式自己的測試全綠、parquet 也完全正常」：
+
+1. **交給 tracker 的只有 fbody**。`split_detections` 拆得對不對由
+   test_inference_split.py 釘住，這裡釘的是主迴圈實際把拆出來的**哪一份**交給
+   `tracker.update`。把引數改回未拆分的偵測結果（`results[idx].boxes.cpu()`），同一個
+   人會多出一條頭部軌跡，`track_id` 的語義從「一個人」變成「一個偵測目標」，下游的
+   不重複訪客與進出人數直接翻倍。
+2. **座標反算在落腳點推算之後**。影格在讀取端就縮成推論尺寸（issue #108），框與落腳點
+   要在寫出前映射回原始解析度；反算若提早到 `estimate` 之前，`heads` 與 `tracks` 會落在
+   不同尺度上而配不到頭，每列靜默退回框底邊中點。
+3. **`frame_shapes` 是原始解析度，不是推論尺寸**。傳成推論尺寸會讓反算退化成恆等、
+   parquet 的 `frame_width` 一起寫成 640。
+
+因此本檔的偵測資料一律以**推論尺度**（640×384）表示——那就是縮放前移之後 YOLO 實際
+輸出的座標系。
 
 主迴圈在多進程 pipeline 裡，但它與子進程之間只隔著佇列與環形緩衝的介面，因此這裡
 用 stub 取代佇列、環形緩衝、偵測器與追蹤器直接跑 `start_loop`，不拉起任何子進程。
@@ -18,41 +28,56 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import polars as pl
+import pytest
 import torch
 from ultralytics.engine.results import Boxes, Results
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
 from video_analyze.services.frame_ring import RING_SLOTS
 from video_analyze.services.inference import InferencePipeline
+from video_analyze.services.letterbox import (
+    INFER_HEIGHT,
+    INFER_WIDTH,
+    letterbox_params,
+)
 from video_analyze.services.video_reader import READER_DONE, FrameShape
 
 _TAIPEI = ZoneInfo("Asia/Taipei")
 _BASE = datetime.datetime(2026, 5, 1, 9, 0, tzinfo=_TAIPEI)
-_ORIG_SHAPE = (1080, 1920)
+# 偵測結果的座標系：影格在讀取端就縮好了，ultralytics 的 `orig_shape` 也是這個尺寸
+_INFER_SHAPE = (INFER_HEIGHT, INFER_WIDTH)
+# 該路的原始解析度，也就是反算的目標尺度
 _SHAPE = FrameShape(height=1080, width=1920)
+_SCALE, _PAD_X, _PAD_Y = letterbox_params(_SHAPE.height, _SHAPE.width)
 _CLASS_NAMES = {HEAD_CLASS_ID: "head", FBODY_CLASS_ID: "fbody"}
+
+
+def _to_source(x: float, y: float) -> tuple[float, float]:
+    """把推論尺度的一個點換算成原始解析度，供期望值使用。"""
+    return (x - _PAD_X) / _SCALE, (y - _PAD_Y) / _SCALE
 
 
 def _boxes(rows: list[tuple[float, float, float, float, float, int]]) -> Boxes:
     """`rows` 為 `(x1, y1, x2, y2, conf, cls)`，與 ultralytics 的 data 佈局一致。"""
-    return Boxes(torch.tensor(rows, dtype=torch.float32), _ORIG_SHAPE)
+    return Boxes(torch.tensor(rows, dtype=torch.float32), _INFER_SHAPE)
 
 
 # 兩格偵測：各兩個 fbody，配上罩得住的 head，第二格另有一顆配不到人的孤兒 head。
+# 座標都在 640×384 之內：縮放前移之後，YOLO 收到的與吐出的都是推論尺度。
 _FRAME_0_DETECTIONS = _boxes(
     [
-        (100.0, 100.0, 140.0, 150.0, 0.9, HEAD_CLASS_ID),
-        (80.0, 90.0, 200.0, 400.0, 0.8, FBODY_CLASS_ID),
-        (620.0, 110.0, 660.0, 160.0, 0.7, HEAD_CLASS_ID),
-        (600.0, 100.0, 700.0, 500.0, 0.6, FBODY_CLASS_ID),
+        (30.0, 45.0, 44.0, 62.0, 0.9, HEAD_CLASS_ID),
+        (27.0, 42.0, 67.0, 145.0, 0.8, FBODY_CLASS_ID),
+        (205.0, 40.0, 220.0, 58.0, 0.7, HEAD_CLASS_ID),
+        (200.0, 36.0, 233.0, 166.0, 0.6, FBODY_CLASS_ID),
     ]
 )
 _FRAME_1_DETECTIONS = _boxes(
     [
-        (105.0, 105.0, 145.0, 155.0, 0.9, HEAD_CLASS_ID),
-        (85.0, 95.0, 205.0, 405.0, 0.8, FBODY_CLASS_ID),
-        (610.0, 100.0, 700.0, 500.0, 0.6, FBODY_CLASS_ID),
-        (1500.0, 900.0, 1540.0, 950.0, 0.5, HEAD_CLASS_ID),
+        (31.0, 46.0, 45.0, 63.0, 0.9, HEAD_CLASS_ID),
+        (28.0, 43.0, 68.0, 146.0, 0.8, FBODY_CLASS_ID),
+        (203.0, 36.0, 234.0, 166.0, 0.6, FBODY_CLASS_ID),
+        (500.0, 300.0, 514.0, 317.0, 0.5, HEAD_CLASS_ID),
     ]
 )
 
@@ -212,3 +237,59 @@ def test_slots_are_returned_after_inference_not_before(tmp_path):
     assert sorted(returned) == list(range(num_frames))
     # 歸還前先切斷對共享記憶體的參照：`orig_img` 是該 slot 的活別名（ADR-010）
     assert all(result.orig_img is None for result in detector.returned_results)
+
+
+def test_boxes_and_foot_points_are_mapped_back_to_the_source_resolution(tmp_path):
+    """**反算必須在落腳點推算之後**：框與落腳點都要回到原始解析度，且互相自洽。
+
+    第一格第一條軌跡：fbody `(27, 42, 67, 145)`、配到的 head `(30, 45, 44, 62)`，
+    在推論尺度上 `foot = 2 × C_fbody − H = (57, 142)`（`H` 為 head 框頂邊中點），
+    換算回 1080p 是 `(171, 390)`；框底邊中點則是 `(141, 399)`。
+
+    把反算移到 `estimate` 之前，`heads` 仍在推論尺度、`tracks` 已回原始解析度，
+    `_match_head` 全數回 `None`，落腳點正好退回那個框底邊中點——列數、`track_id`、
+    bbox 全部正常，只有落腳點靜默偏掉（ADR-009 要修掉的偏移就這樣回來）。
+    """
+    _tracker, df, _free_queue, _detector = _run_loop(tmp_path, [_FRAME_0_DETECTIONS])
+    row = df.filter(pl.col("track_id") == 1).row(0, named=True)
+
+    expected_box = [*_to_source(27.0, 42.0), *_to_source(67.0, 145.0)]
+    assert [row["x1"], row["y1"], row["x2"], row["y2"]] == pytest.approx(
+        expected_box, abs=0.5
+    )
+    expected_foot = _to_source(57.0, 142.0)
+    assert (row["foot_x"], row["foot_y"]) == pytest.approx(expected_foot, abs=0.5)
+    # 反算提早做的話會落在這裡：換算過的框底邊中點
+    bottom_center = ((row["x1"] + row["x2"]) / 2, row["y2"])
+    assert (row["foot_x"], row["foot_y"]) != pytest.approx(bottom_center, abs=0.5)
+
+
+def test_frame_size_columns_stay_at_the_source_resolution(tmp_path):
+    """尺寸欄位寫的是原始解析度，不是推論尺寸。
+
+    這兩欄是 `line_counting`／`zone_mapping` 換算 1080p 基準像素的唯一來源，兩包都只
+    檢查欄位存在、不檢查值合理性（ADR-004／ADR-006）：寫成 640 的話下游幾何全部縮到
+    約 1/3 而不報錯。
+    """
+    _tracker, df, _free_queue, _detector = _run_loop(tmp_path, [_FRAME_0_DETECTIONS])
+
+    assert df["frame_width"].unique().to_list() == [_SHAPE.width]
+    assert df["frame_height"].unique().to_list() == [_SHAPE.height]
+
+
+def test_frame_shapes_of_inference_size_are_rejected(tmp_path):
+    """`frame_shapes` 傳成推論尺寸要當場拋錯，這是上一支測試那條路徑的來源。
+
+    緩衝改吃推論尺寸之後，順手把 `frame_shapes` 也改成推論尺寸是很自然的下一步，而
+    後果全是靜默的：反算參數退化成恆等（scale=1、pad=0），座標停在 640×384，parquet
+    的 `frame_width` 同時寫成 640。正式來源 `probe_frame_shape` 是 16:9，不會等於 5:3
+    的推論尺寸，所以這道檢查不會擋到合法輸入。
+    """
+    with pytest.raises(ValueError, match="推論尺寸"):
+        InferencePipeline(
+            stream_names=["loc_cam001"],
+            detector=_ScriptedDetector([], queue.Queue()),
+            tracker=_RecordingTracker(),
+            results_path=Path(tmp_path) / "tracking_results.parquet",
+            frame_shapes=[FrameShape(height=INFER_HEIGHT, width=INFER_WIDTH)],
+        )

@@ -10,8 +10,10 @@ from video_analyze.services.video_reader import FrameShape, _parse_segment_start
 def test_frame_shape_unpacks_as_height_width():
     """欄位順序是 `(height, width)`（沿用 numpy 的 `frame.shape`）。
 
-    `pipeline.py` 仍以 `height, width = shape` 解包去配置環形緩衝，順序若被調換，
-    緩衝會配成轉置的尺寸而在 `write_slot` 才炸開；寫進 parquet 的尺寸則會靜默相反。
+    環形緩衝改照推論尺寸配置之後，這份尺寸剩下的兩個消費端都是靜默的：寫進 parquet
+    的 `frame_width`／`frame_height`，以及 `letterbox_params(height, width)` 算出的
+    座標反算參數。順序若被調換，兩邊都不會有型別錯誤，只會讓下游的解析度換算與反算
+    出來的座標一起算錯。
     """
     shape = FrameShape(height=1080, width=1920)
 

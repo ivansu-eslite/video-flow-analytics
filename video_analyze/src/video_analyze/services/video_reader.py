@@ -9,6 +9,11 @@ import cv2
 import numpy as np
 
 from video_analyze.services.frame_ring import FrameRing
+from video_analyze.services.letterbox import (
+    INFER_HEIGHT,
+    INFER_WIDTH,
+    letterbox,
+)
 
 # 讀取進程正常讀完整天片段時放入 queue 的結束訊號；與 READER_FAILED 對稱，讓推理進程
 # 能明確區分「正常讀完」與「中途例外」兩種結束，而非依賴裸 None。
@@ -56,9 +61,9 @@ class FramePacket:
     """讀取進程送往推理進程的單格資料。
 
     Attributes:
-        frame: 影格畫面（BGR）。推理進程取的是共享記憶體的 view（見
-            `FrameRing.view_slot`），**歸還 slot 之後會被設成 `None`**——那之後該
-            記憶體隨時會被 reader 覆寫，讓存取直接拋錯比靜默讀到別格畫面好。
+        frame: 影格畫面（BGR，已在讀取端縮成推論尺寸）。推理進程取的是共享記憶體的
+            view（見 `FrameRing.view_slot`），**歸還 slot 之後會被設成 `None`**——
+            那之後該記憶體隨時會被 reader 覆寫，讓存取直接拋錯比靜默讀到別格畫面好。
         frame_index: 該影格在所屬片段內的序號（從 0 起算）。
         timestamp: 由片段起始時間 + 幀序（`frame_index / fps`）推得的時間戳。
     """
@@ -103,9 +108,15 @@ def _parse_segment_start(path: Path, day: date) -> datetime:
 
 
 def probe_frame_shape(segment: SegmentInfo) -> FrameShape:
-    """讀出片段首格以取得影像尺寸，供父進程一次配置該路的環形緩衝。
+    """讀出片段首格以取得該路的**原始**影像尺寸。
 
     假設單一攝影機整天解析度固定，故只探測第一支片段的首格即可。
+
+    影格在讀取端就被縮成推論尺寸，環形緩衝也照那個尺寸配置，所以這裡回傳的值**不再
+    用來配置緩衝**，剩下的兩個用途都需要原始解析度：逐列寫進 `tracking_results.parquet`
+    的 `frame_width`／`frame_height`（下游 zone／line 兩包換算 1080p 基準像素的唯一
+    來源，見 ADR-004／ADR-006），以及餵 `letterbox_params` 算該路的反算參數。**不可
+    改成回傳推論尺寸**——parquet 會靜默寫成 640×384，而兩個下游只檢查欄位存在。
 
     Args:
         segment: 要探測的片段（通常是當天第一支片段）。
@@ -163,8 +174,9 @@ def discover_segments(
 class DailyStreamVideoReader:
     """依時間序逐段讀取單一攝影機一整天的片段。
 
-    影格 memcpy 進共享環形緩衝的 slot、queue 只傳「slot 索引 + metadata」，避免逐格
-    pickle。無空 slot 時阻塞，形成對推理進程的天然背壓。
+    影格先 letterbox 成推論尺寸（見 `services/letterbox.py`）再 memcpy 進共享環形緩衝的
+    slot、queue 只傳「slot 索引 + metadata」，避免逐格 pickle。無空 slot 時阻塞，形成對
+    推理進程的天然背壓。
     """
 
     def __init__(
@@ -204,6 +216,10 @@ class DailyStreamVideoReader:
                 ret, frame = cap.read()
                 if not ret:
                     break
+                # 縮到推論尺寸這件事本來在推論進程內由 ultralytics 做（每格 1.84 ms、
+                # 佔該進程 8.5%），而那是序列瓶頸；N 個讀取進程各自做則是並行的。
+                # 代價是框與落腳點的反算改由推論端負責，見 services/letterbox.py。
+                frame = letterbox(frame)
                 slot = self.free_queue.get()  # 無空 slot 時阻塞（背壓）
                 self.ring.write_slot(slot, frame)
                 timestamp = segment.start + timedelta(seconds=frame_index / fps)
@@ -244,10 +260,12 @@ def run_video_reader(
     free_queue: mp.Queue,
     ring_buffer,
     num_slots: int,
-    height: int,
-    width: int,
 ) -> None:
     """讀取子進程的進入點：建構 `FrameRing` 與 `DailyStreamVideoReader` 並執行。
+
+    尺寸不由呼叫端傳入，直接取 `INFER_*`：`_read_segment` 寫進 slot 之前已把影格
+    letterbox 成推論尺寸，緩衝的尺寸因此不再是「該路的解析度」這種 per-stream 屬性，
+    而是與 `letterbox()` 綁在一起的固定約定。留成參數只會讓日後有人又傳回原始解析度。
 
     Args:
         stream_id: 該路攝影機的編號。
@@ -256,9 +274,7 @@ def run_video_reader(
         free_queue: 供推理進程歸還已消費 slot 的佇列。
         ring_buffer: `create_ring_buffer` 建立的共享記憶體。
         num_slots: 環形緩衝的 slot 數。
-        height: 影格高度（pixel）。
-        width: 影格寬度（pixel）。
     """
-    ring = FrameRing(ring_buffer, num_slots, height, width)
+    ring = FrameRing(ring_buffer, num_slots, INFER_HEIGHT, INFER_WIDTH)
     reader = DailyStreamVideoReader(stream_id, segments, data_queue, free_queue, ring)
     reader.run()

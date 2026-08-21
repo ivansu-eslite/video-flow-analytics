@@ -25,9 +25,11 @@ _SHM_DIR = "/dev/shm"
 #   時 reader 完全不因缺 slot 而停」的最小值——issue #100 只改湊批的輪替起點，內層
 #   `while` 仍會把起點那一路取到滿批才換手，所以「整批來自同一路」是常態。
 #
-# 記憶體用量 = RING_SLOTS × 每格位元組 × 路數；batch = 8（32 格）時九路合計 3.34 GiB
-# （4K 三路每格 23.73 MiB、1080p 六路每格 5.93 MiB）。`MODEL__BATCH` 的環境變數覆寫
-# 會連帶放大緩衝，記憶體隨 batch 線性成長。
+# 記憶體用量 = RING_SLOTS × 每格位元組 × 路數。影格於讀取端就縮成推論尺寸（640×384，
+# 見 `services/letterbox.py`），每格一律 0.70 MiB 而與來源解析度無關，batch = 8（32 格）
+# 時九路合計 202.5 MiB。縮放前移之前存的是原始解析度（4K 每格 23.73 MiB、1080p 每格
+# 5.93 MiB，九路合計 3.34 GiB）。`MODEL__BATCH` 的環境變數覆寫會連帶放大緩衝，記憶體隨
+# batch 線性成長。
 RING_SLOTS = settings.model.batch * 4
 
 _CHANNELS = 3  # BGR
@@ -107,8 +109,8 @@ class FrameRing:
     """單一路的共享記憶體環形緩衝，避免每格 6MB 影格走 pickle + pipe（實測該 IPC
     佔推理進程時間約 60%，是搬走影片編碼後的新瓶頸）。
 
-    假設同一路整天解析度固定（緩衝依首格尺寸一次配置）；尺寸不符時 write_slot
-    直接拋 ValueError（fail-loud），不會靜默寫壞。
+    緩衝依**推論尺寸**一次配置（讀取端寫入前已 letterbox），因此尺寸不再隨來源解析度
+    變動；尺寸不符時 write_slot 直接拋 ValueError（fail-loud），不會靜默寫壞。
     """
 
     def __init__(self, buffer, num_slots: int, height: int, width: int):
@@ -134,12 +136,14 @@ class FrameRing:
             frame: 要寫入的影格，形狀須與緩衝建立時的 `frame_shape` 一致。
 
         Raises:
-            ValueError: `frame.shape` 與緩衝的 `frame_shape` 不符。
+            ValueError: `frame.shape` 與緩衝的 `frame_shape` 不符。緩衝照推論尺寸配置，
+                所以最可能的成因是呼叫端漏了 `letterbox()`（其次是同一路整天解析度
+                並非固定，那是配置時的假設）。
         """
         if frame.shape != self.frame_shape:
             raise ValueError(
-                f"影格解析度 {frame.shape} 與環形緩衝 {self.frame_shape} 不符"
-                "（假設單一攝影機整天解析度固定）"
+                f"影格解析度 {frame.shape} 與環形緩衝 {self.frame_shape} 不符："
+                "寫入前需先 letterbox 成推論尺寸（見 services/letterbox.py）"
             )
         np.copyto(self._slots[slot], frame)
 
@@ -147,7 +151,9 @@ class FrameRing:
         """取得指定 slot 的 view，不複製。
 
         整格複製（4K 約 24MB）實測佔推理進程 14% 的時間，而 YOLO 前處理本來就會把
-        影格 letterbox 成新陣列再上傳 GPU，這份副本純屬多餘。
+        影格搬成新陣列再上傳 GPU，這份副本純屬多餘。該量測是在縮放前移之前做的（slot
+        存原始解析度），現在每格只有 0.70 MiB、省下來的絕對時間小得多，但下面那條生命
+        週期約束不變。
 
         **代價是 slot 不能立刻歸還**：回傳的是共享記憶體本身，reader 一旦覆寫該
         slot，這個 view 的內容就跟著變。呼叫端必須等到不再需要影格內容（推論完成）

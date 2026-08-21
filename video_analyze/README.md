@@ -263,7 +263,8 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | `services/tracking_results.py` | 追蹤明細累積與 parquet 寫出 |
 | `services/fps_meter.py` | 處理 FPS 統計 |
 | `services/frame_ring.py` | 共享記憶體環形緩衝 |
-| `services/video_reader.py` | 逐日掃描片段、讀影格 |
+| `services/letterbox.py` | 縮放到推論尺寸與座標反算（正反兩半共用同一組參數） |
+| `services/video_reader.py` | 逐日掃描片段、讀影格、縮到推論尺寸 |
 
 I/O 邊界（讀寫檔、子進程、影像解碼）依 argus 慣例一律放 `services/`，不另立
 頂層 adapter/io 層。log 用共用 lib `vfa_observability` 的 `StructuredLogger`
@@ -281,14 +282,25 @@ zone 與 line 幾何都不會被驗證。
 
 - **影格走共享記憶體、不走 pickle**（`frame_ring.py`）：每路一塊固定格數的環形緩衝
   （`mp.RawArray`），queue 只傳 slot 索引，避免每格影格逐格 pickle 的高成本。推理進程
-  直接消費 slot 的 view、不複製出私有副本（`view_slot`）。此設計**假設同一攝影機整天
-  解析度固定**。
-- **讀取進程**：無空 slot 時阻塞，形成對推理進程的天然背壓。**時間戳 = 該片段檔名時間 ＋
-  片段內幀序 / fps**（逐段計算，不能用全日累計幀數推算）。
+  直接消費 slot 的 view、不複製出私有副本（`view_slot`）。緩衝依**推論尺寸**（640×384）
+  配置——影格在讀取端就縮好了，故每格一律 0.70 MiB 而與來源解析度無關（縮放前移之前
+  4K 每格是 23.73 MiB）。此設計仍**假設同一攝影機整天解析度固定**（`probe_frame_shape`
+  只探測首格）。
+- **讀取進程**：解碼後立即 letterbox 成推論尺寸再寫入 slot（`letterbox.py`）。無空 slot
+  時阻塞，形成對推理進程的天然背壓。**時間戳 = 該片段檔名時間 ＋ 片段內幀序 / fps**
+  （逐段計算，不能用全日累計幀數推算）。
 - **推理進程**：非阻塞輪詢各路 queue 湊批，維持 GPU 批次效率；每個 packet 依序經
-  偵測 → 拆出 fbody／head（只有 fbody 進 tracker）→ 追蹤 → 推算落腳點 → 累積追蹤結果。
-  影格既然是共享記憶體的 view，**整批推論完成才歸還 slot**（生命週期約束見
+  偵測 → 拆出 fbody／head（只有 fbody 進 tracker）→ 追蹤 → 推算落腳點 → **框與落腳點
+  映射回原始解析度** → 累積追蹤結果。影格既然是共享記憶體的 view，**整批推論完成才歸還
+  slot**（生命週期約束見
   [ADR-010](../docs/adr/video_analyze/010-zero-copy-frame-lifetime.md)）。
+
+**縮放前移的代價**：ultralytics 只知道自己收到 640×384，`orig_shape` 也是那個尺寸，
+輸出的框就停在推論尺度上，反算因此變成本包的責任（`letterbox.py` 的
+`unscale_boxes_inplace`／`unscale_points_inplace`）。反算**插在落腳點推算之後**：`heads`
+是唯一沒有反算的陣列，提早反算 `tracks` 會讓兩者尺度不一致而配不到頭，每列靜默退回框
+底邊中點。`probe_frame_shape` 的原始解析度因此有兩個消費端（parquet 的尺寸欄位、反算
+參數），兩者都不能換成推論尺寸。
 
 ### fail-loud 錯誤處理
 
@@ -300,6 +312,10 @@ zone 與 line 幾何都不會被驗證。
   的日期目錄，寧可中止也不靜默寫錯天。此檢查在 `discover_segments` 掃描時、於主進程
   執行，**任一路踩到就整天中止**（不是只跳過該攝影機或該片段）。
 - 其餘片段的開檔 / 讀 FPS 失敗 → 讀取子進程拋錯、以非零 exitcode 結束。
+- **`frame_shapes` 傳成推論尺寸 → `InferencePipeline.__init__` 拋 `ValueError`**。那代表
+  拿到的是縮放後的尺寸而非原始解析度，反算會退化成恆等、parquet 的 `frame_width` 也一起
+  寫成 640，而下游 zone／line 只檢查欄位存在（ADR-004／ADR-006）。影格尺寸與緩衝配置
+  不符（例如讀取端漏了 `letterbox()`）則由 `write_slot` 擋下。
 - `analyze_daily` 以 0.5 秒輪詢所有子進程；任一非零結束 → 先終止所有子進程再拋
   `RuntimeError`；`KeyboardInterrupt` → 終止後以 exit code 130 收斂。
 - 追蹤明細 parquet 先寫 `.tmp`、全部串流結束後才 `rename` 成正式檔名（`rename` 具
