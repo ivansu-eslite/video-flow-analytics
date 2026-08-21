@@ -19,6 +19,14 @@ dependencies = [
     "polars==1.42.0",
     "pyarrow==24.0.0",
     "lap==0.5.13",
+    # 正式推論路徑是 TensorRT 引擎（ADR-011），故它是 runtime 依賴而非建置工具的
+    # extra。可用版本帶是 **10.8 ～ 10.16**：sm120（開發機 RTX 5090）自 10.8.0 起才
+    # 有 kernel，而 11.0.0 起 strongly-typed 成為預設、移除了 `BuilderFlag.FP16`，
+    # FP16 改要靠額外的量化工具烤進中介格式（見 issue #110 第一則 comment）。帶內取
+    # 已實測過的 10.13.3.9：其 `libnvinfer_builder_resource` 確認含 sm75（T4）與
+    # sm120 兩組 kernel。**升版時要重跑那條 strings 檢查**——帶上緣（10.16.x）沒驗過。
+    # `-cu12` 尾綴不可省：不加尾綴的 `tensorrt` 現在解析到 11.x 的 cu13 wheel。
+    "tensorrt-cu12==10.13.3.9",
     "vfa_config",
     "vfa_observability",
     "vfa_registry",
