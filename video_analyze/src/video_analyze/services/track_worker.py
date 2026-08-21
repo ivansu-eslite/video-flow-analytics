@@ -15,16 +15,23 @@
 
 推論進程被 SIGKILL 或整機掛掉時收不到那個訊號：`track_queue` 的 pipe 寫入端 fd 被父進程
 與九個讀取進程一起繼承，寫入端永遠不會全部關閉，`get()` 收不到 EOF、只會一直等
-（issue #113）；最後由父進程 `_terminate_all` 收掉，而 terminate 不走 Python 的
-`except`／`finally`，暫存檔會留在輸出目錄。那種殘檔沒有任何進程會回來收，改由**下一次
-寫同一條路徑的執行**在啟動時清掉（`tracking_results.claim_tmp_slot`）。
+（issue #113）。暫存檔因此靠另外兩道，都不需要動 queue 的內部狀態：
+
+- **本進程攔下 SIGTERM**。等下去的結局是父進程 `_terminate_all` 的 SIGTERM，而它是
+  攔得到的——handler 拋出的例外會從 `track_queue.get()` 內部往外傳，走既有的
+  `except BaseException: collector.discard()`。
+- **啟動時認領輸出位置**（`tracking_results.claim_tmp_slot`）。整機重啟這種「兩個進程
+  都沒機會執行清理」的情境沒有任何 in-process 的機制擋得住，只能由下一次寫同一條路徑
+  的執行順手清掉。
 """
 
 import multiprocessing as mp
 import os
+import signal
 import time
 from datetime import datetime
 from pathlib import Path
+from types import FrameType
 
 import numpy as np
 import torch
@@ -230,6 +237,28 @@ def _track_one(
     return tracks, foot_points
 
 
+def _raise_on_sigterm(signum: int, _frame: FrameType | None) -> None:
+    """SIGTERM 的 handler：拋 `SystemExit` 讓既有的清理路徑走得到。
+
+    本進程等不到 `TRACK_FAILED` 的情況（推論進程被 SIGKILL、整機 OOM）最後都收斂成
+    同一件事：父進程的 `_terminate_all` 送 SIGTERM。預設處置是直接結束進程，不走
+    Python 的 `except`／`finally`，`.tmp` 就留在輸出目錄了。
+
+    攔下來拋例外，`run_track_worker` 既有的 `except BaseException: collector.discard()`
+    就會執行——**這裡不新增任何清理路徑，只是讓既有那條被走到**。阻塞中的
+    `track_queue.get()` 也擋不住：signal handler 在主執行緒跑，拋出的例外從 `get()`
+    內部往外傳（實測見 PR）。
+
+    用 `SystemExit` 而不是自訂例外：`multiprocessing` 會把它的 code 直接當 exitcode，
+    不印 traceback——關機路徑上那份 traceback 只是雜訊。128 + 訊號編號是 shell 對
+    「被訊號終止」的慣例（SIGTERM → 143）。
+
+    ⚠ 只涵蓋第一個 SIGTERM。清理途中再被送一次（或被 SIGKILL）仍會留下暫存檔，那條
+    由下次啟動的 `claim_tmp_slot` 收掉。
+    """
+    raise SystemExit(128 + signum)
+
+
 def run_track_worker(
     track_queue: mp.Queue,
     stream_names: list[str],
@@ -281,6 +310,7 @@ def run_track_worker(
     # 把空窗算進來會壓低 `overall_fps`，讓印出的餘裕系統性偏大——而那個數字是容量決策的
     # 依據，偏大的方向正好是會誤事的方向
     first_payload_at: float | None = None
+    previous_sigterm = signal.signal(signal.SIGTERM, _raise_on_sigterm)
     try:
         while True:
             item = track_queue.get()
@@ -326,8 +356,10 @@ def run_track_worker(
         collector.discard()  # fail-loud：不留下不完整結果
         raise
     finally:
-        # 鎖的存續期到「暫存檔不再會被寫」為止。正式執行時進程接著就結束了，kernel 也
-        # 會做同一件事；顯式關掉是為了在測試中 in-process 呼叫本函式時不累積 fd
+        # handler 與鎖的存續期都到「暫存檔不再會被寫」為止。還原 handler 是為了在
+        # 測試中 in-process 呼叫本函式時不留下副作用；關 fd 則是釋放 flock——正式執行
+        # 時進程接著就結束了，kernel 也會做同一件事
+        signal.signal(signal.SIGTERM, previous_sigterm)
         os.close(lock_fd)
 
 

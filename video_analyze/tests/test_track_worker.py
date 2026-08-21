@@ -18,8 +18,9 @@
 推進），以及**`TRACK_FAILED` 要清掉暫存檔**（推論進程的 `collector.discard()` 隨
 collector 一起搬走了，那條路徑改由訊號覆蓋）。
 
-issue #113 再補一條收尾路徑：**啟動時認領輸出位置**——上一次執行被 SIGKILL 留下的殘檔要
-清掉，但別的執行正在寫同一條路徑時要當場擋下，而不是把它的暫存檔清掉。
+issue #113 再補兩條收尾路徑：推論進程被 SIGKILL 時 `TRACK_FAILED` 送不出來，本進程等到的
+是父進程 terminate 的 **SIGTERM**，要攔下來走既有的清理；以及**啟動時認領輸出位置**，
+別的執行正在寫同一條路徑時要當場擋下，而不是把它的暫存檔清掉。
 
 因此本檔的偵測資料一律以**推論尺度**（640×384）表示——那就是 payload 內座標的尺度。
 真正的 `MultiStreamByteTracker` 會做 Kalman 平滑而算不出可斷言的期望值，故以每個輸入
@@ -30,6 +31,7 @@ import datetime
 import fcntl
 import os
 import queue
+import signal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -381,6 +383,83 @@ def test_payload_shares_memory_with_the_source_boxes():
     )
 
     assert np.shares_memory(box_data, _FRAME_0_DETECTIONS.data.numpy())
+
+
+class _SigtermAfterGets(queue.Queue):
+    """第 N 次 `get()` 回傳之後對自己送 SIGTERM，模擬父進程的 `_terminate_all`。
+
+    正式路徑上訊號是打斷阻塞中的 `mp.Queue.get()`（handler 拋出的例外從 `get()` 內部
+    往外傳）；這裡用同步送達換取確定性，驗的是「handler 有裝上、且拋出的例外會走到
+    `collector.discard()`」這段接線。
+    """
+
+    def __init__(self, kill_after: int, on_kill):
+        super().__init__()
+        self._remaining = kill_after
+        self._on_kill = on_kill
+
+    def get(self, *args, **kwargs):
+        item = super().get(*args, **kwargs)
+        self._remaining -= 1
+        if self._remaining == 0:
+            self._on_kill()
+            os.kill(os.getpid(), signal.SIGTERM)
+        return item
+
+
+def test_sigterm_discards_the_partial_output(tmp_path, monkeypatch):
+    """收到 SIGTERM 要清掉暫存檔：那是推論進程被 SIGKILL 之後唯一還走得到的路徑。
+
+    上游被 SIGKILL 時 `TRACK_FAILED` 送不出來（`track_queue` 的 pipe 寫入端 fd 被父進程
+    與九個讀取進程一起繼承，`get()` 收不到 EOF），本進程等到的是父進程 terminate 的
+    SIGTERM。不攔的話預設處置直接結束進程，不走 `except`／`finally`，`.tmp` 就留在
+    輸出目錄了。
+
+    把 flush 門檻降到 1，讓 `.tmp` 在訊號抵達前真的被建出來——`saw_tmp` 釘住這件事，
+    否則這支測試會在什麼都沒發生的情況下通過。
+    """
+    monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
+    _install_recording_tracker(monkeypatch)
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    saw_tmp: list[bool] = []
+
+    def _fallback(signum, frame):
+        # 保險絲：handler 沒被裝上時 SIGTERM 會當場殺掉整個 pytest 進程，那看起來像
+        # crash 而不是測試失敗。run_track_worker 會換掉它，並在離開時還原
+        raise AssertionError("run_track_worker 沒有裝上 SIGTERM handler")
+
+    track_queue = _SigtermAfterGets(
+        kill_after=2, on_kill=lambda: saw_tmp.append(tmp_file.exists())
+    )
+    for frame_index in range(2):
+        track_queue.put(
+            to_payload(
+                0,
+                Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE),
+                frame_index,
+                _BASE + datetime.timedelta(seconds=frame_index),
+            )
+        )
+
+    previous = signal.signal(signal.SIGTERM, _fallback)
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            run_track_worker(
+                track_queue=track_queue,
+                stream_names=["loc_cam001"],
+                frame_shapes=[_SHAPE],
+                results_path=results_path,
+            )
+        assert excinfo.value.code == 143  # 128 + SIGTERM
+        # 離開時要還原成呼叫前的 handler：本函式在測試中是 in-process 呼叫的
+        assert signal.getsignal(signal.SIGTERM) is _fallback
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert saw_tmp == [True], "訊號抵達時還沒有暫存檔，這支測試沒驗到東西"
+    assert not tmp_file.exists()
+    assert not results_path.exists()
 
 
 def test_a_run_on_a_path_another_process_is_writing_is_refused(tmp_path, monkeypatch):
