@@ -11,13 +11,17 @@
 
 推論進程中途例外時送 `TRACK_FAILED`，本進程收到就清掉 `.tmp` 暫存檔再拋錯；與
 `video_reader.py` 的 `READER_DONE`／`READER_FAILED` 同一套設計——明確的訊號而非裸
-`None`，讓「正常結束」與「上游崩潰」不可能被混為一談。⚠ 這**只覆蓋「推論進程自己拋
-例外」**：它被 SIGKILL 或整機掛掉時，本進程會卡在 `track_queue.get()` 等不到任何訊號，
-由父進程 `_terminate_all` 收掉，而 terminate 不走 Python 的 `except`／`finally`，暫存檔
-會留在輸出目錄。那條路徑要靠啟動時掃殘留才擋得住，不在本模組的範圍內。
+`None`，讓「正常結束」與「上游崩潰」不可能被混為一談。
+
+推論進程被 SIGKILL 或整機掛掉時收不到那個訊號：`track_queue` 的 pipe 寫入端 fd 被父進程
+與九個讀取進程一起繼承，寫入端永遠不會全部關閉，`get()` 收不到 EOF、只會一直等
+（issue #113）；最後由父進程 `_terminate_all` 收掉，而 terminate 不走 Python 的
+`except`／`finally`，暫存檔會留在輸出目錄。那種殘檔沒有任何進程會回來收，改由**下一次
+寫同一條路徑的執行**在啟動時清掉（`tracking_results.claim_tmp_slot`）。
 """
 
 import multiprocessing as mp
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +45,10 @@ from video_analyze.services.letterbox import (
     unscale_points_inplace,
 )
 from video_analyze.services.tracker import MultiStreamByteTracker
-from video_analyze.services.tracking_results import TrackingResultCollector
+from video_analyze.services.tracking_results import (
+    TrackingResultCollector,
+    claim_tmp_slot,
+)
 from video_analyze.services.video_reader import FrameShape
 
 logger = StructuredLogger(component="track_worker")
@@ -250,10 +257,14 @@ def run_track_worker(
 
     Raises:
         ValueError: 任一路的 `FrameShape` 等於推論尺寸（見 `_reject_inference_sized_shapes`）。
-        RuntimeError: 推論進程回報 `TRACK_FAILED`。
+        RuntimeError: 推論進程回報 `TRACK_FAILED`，或這條輸出路徑的暫存檔正被另一個
+            執行中的進程持有（見 `tracking_results.claim_tmp_slot`）。
         BaseException: 其他子系統拋出的例外，會原樣重新拋出。
     """
     _reject_inference_sized_shapes(frame_shapes)
+    # 認領要在下面的 try 之外：認領失敗代表那個 `.tmp` 屬於另一個**執行中**的進程，
+    # 此時掉進 `except` 去 `collector.discard()` 會刪掉別人正在寫的檔
+    lock_fd = claim_tmp_slot(results_path)
     tracker = MultiStreamByteTracker(num_streams=len(stream_names))
     # 跨格重用：它記著每條軌跡上一次成功推算的落腳點偏移量
     foot_estimator = FootPointEstimator(settings.foot_point.method)
@@ -314,6 +325,10 @@ def run_track_worker(
     except BaseException:
         collector.discard()  # fail-loud：不留下不完整結果
         raise
+    finally:
+        # 鎖的存續期到「暫存檔不再會被寫」為止。正式執行時進程接著就結束了，kernel 也
+        # 會做同一件事；顯式關掉是為了在測試中 in-process 呼叫本函式時不累積 fd
+        os.close(lock_fd)
 
 
 def _log_fps_summary(fps_meter: FpsMeter, elapsed_seconds: float) -> None:

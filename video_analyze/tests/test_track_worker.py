@@ -18,12 +18,17 @@
 推進），以及**`TRACK_FAILED` 要清掉暫存檔**（推論進程的 `collector.discard()` 隨
 collector 一起搬走了，那條路徑改由訊號覆蓋）。
 
+issue #113 再補一條收尾路徑：**啟動時認領輸出位置**——上一次執行被 SIGKILL 留下的殘檔要
+清掉，但別的執行正在寫同一條路徑時要當場擋下，而不是把它的暫存檔清掉。
+
 因此本檔的偵測資料一律以**推論尺度**（640×384）表示——那就是 payload 內座標的尺度。
 真正的 `MultiStreamByteTracker` 會做 Kalman 平滑而算不出可斷言的期望值，故以每個輸入
 框回一條軌跡的替身取代（那正是 ByteTrack「一個偵測目標一條軌跡」的行為）。
 """
 
 import datetime
+import fcntl
+import os
 import queue
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -376,3 +381,60 @@ def test_payload_shares_memory_with_the_source_boxes():
     )
 
     assert np.shares_memory(box_data, _FRAME_0_DETECTIONS.data.numpy())
+
+
+def test_a_run_on_a_path_another_process_is_writing_is_refused(tmp_path, monkeypatch):
+    """同一條輸出路徑已有執行中的進程在寫 → 當場擋下，且不准動它的暫存檔。
+
+    認領失敗必須發生在主迴圈的 `try` **之外**：掉進 `except` 的話
+    `collector.discard()` 會把別人寫到一半的整天明細刪掉，而那個執行到最後才會在
+    `rename` 時發現檔案不見了。
+    """
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    in_flight = results_path.with_name(results_path.name + ".tmp")
+    in_flight.write_bytes(b"x" * 4096)
+    holder = os.open(in_flight, os.O_RDWR)
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    try:
+        with pytest.raises(RuntimeError, match="正被另一個執行中的進程持有"):
+            _run_worker(tmp_path, monkeypatch, [_FRAME_0_DETECTIONS])
+        assert in_flight.stat().st_size == 4096
+        assert not results_path.exists()
+    finally:
+        os.close(holder)
+
+
+def test_startup_clears_the_residue_of_a_killed_run(tmp_path, monkeypatch):
+    """上一次執行被 SIGKILL 留下的殘檔，在本次啟動、任何寫入之前就清掉。
+
+    整機重啟那種「兩個進程都沒機會執行清理」的情境沒有 in-process 的機制擋得住，只能
+    由下一次寫同一條路徑的執行順手收拾。
+
+    觀測點取在**建立 tracker 的當下**（認領之後、第一次 flush 之前）：只看跑完後
+    `.tmp` 在不在的話，正常收尾的 rename 本來就會把它帶走，這支測試會在認領根本沒發生
+    的情況下通過。
+    """
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    residue = results_path.with_name(results_path.name + ".tmp")
+    residue.write_bytes(b"x" * 4096)
+    size_at_startup: list[int] = []
+
+    def factory(num_streams: int) -> _RecordingTracker:
+        size_at_startup.append(residue.stat().st_size)
+        return _RecordingTracker(num_streams)
+
+    monkeypatch.setattr(tw, "MultiStreamByteTracker", factory)
+    track_queue: queue.Queue = queue.Queue()
+    track_queue.put(TRACK_DONE)
+
+    run_track_worker(
+        track_queue=track_queue,
+        stream_names=["loc_cam001"],
+        frame_shapes=[_SHAPE],
+        results_path=results_path,
+    )
+
+    assert size_at_startup == [0], "殘檔在寫入開始之前就該被清空"
+    assert not residue.exists()
+    assert results_path.exists()

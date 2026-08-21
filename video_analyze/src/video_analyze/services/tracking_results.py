@@ -1,3 +1,5 @@
+import fcntl
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +19,74 @@ _SCHEMA = TRACKING_RESULTS_SCHEMA
 _FLUSH_EVERY_ROWS = 200_000
 
 
+def tmp_path_for(results_path: Path) -> Path:
+    """回傳 `results_path` 對應的暫存檔路徑。
+
+    命名規則只寫在這裡：`TrackingResultCollector` 與 `claim_tmp_slot` 都由此取得。
+    兩邊各寫一次的話，日後改了後綴會讓 `claim_tmp_slot` 靜默地守著另一個檔名——
+    鎖照樣拿得到、殘檔照樣沒清掉，而且不會有任何錯誤訊息。
+    """
+    return results_path.with_name(results_path.name + ".tmp")
+
+
+def claim_tmp_slot(results_path: Path) -> int:
+    """認領這條輸出路徑的暫存檔：擋下並行寫入、清掉前一次執行留下的殘檔。
+
+    追蹤進程正常結束會 `save()`、自己拋例外會 `discard()`，兩條都不留暫存檔；但它被
+    SIGKILL 或整機斷電時兩條都走不到，`.tmp` 會留在輸出目錄（issue #113）。那種殘檔
+    沒有任何進程會回來收，只能由下一次寫同一條路徑的執行順手清掉——本函式就是那一手。
+
+    **判準是「還有沒有人持有這個 inode 的鎖」，不是檔名、不是 mtime**：多個 bucket
+    或多個日期並行時各自寫各自的 `.tmp`（輸出路徑帶 bucket 名與日期），本來就碰不到
+    彼此；真正需要判斷的是同一條路徑被兩個執行同時寫，而檔名與 mtime 都分不出「上次
+    留下的」與「另一個執行正在寫的」。`flock` 由 kernel 在持有者死亡時釋放——SIGKILL
+    與整機重啟都算——正好對上「兩個進程都沒機會執行清理」這個情境。
+
+    殘檔是 `ftruncate` 就地清空而不是 `unlink`：刪掉之後這把鎖就留在一個沒有檔名的
+    inode 上，另一個執行馬上能在新建的 inode 上取得鎖，兩邊都以為自己獨佔。就地清空
+    則 inode 不換，鎖繼續有效，空間也一樣回收得到。
+
+    回傳的 fd **必須持有到暫存檔不再被寫為止**（`run_track_worker` 持有到進程結束）：
+    fd 一關鎖就沒了。
+
+    `flock` 是 POSIX advisory lock，只在都走這個機制的進程之間有效（`pq.ParquetWriter`
+    照常開檔、照常寫，不受影響）。本 repo 只跑 Linux；輸出目錄若日後掛到 NFS，flock 的
+    語義要重新確認。
+
+    Args:
+        results_path: 追蹤結果 parquet 的正式輸出路徑。
+
+    Returns:
+        持有 `flock` 的 file descriptor。
+
+    Raises:
+        RuntimeError: 這條路徑的暫存檔正被另一個執行中的進程持有。
+    """
+    tmp_path = tmp_path_for(results_path)
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(tmp_path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(fd)
+        raise RuntimeError(
+            f"暫存檔 {tmp_path} 正被另一個執行中的進程持有，本次執行中止。"
+            "同一條輸出路徑（同一個 bucket 的同一天）不能有兩個執行同時寫——"
+            "兩邊會交錯寫進同一個暫存檔，再各自 rename 成正式檔名。"
+            "要並行請分開 bucket 或分開日期。"
+        ) from exc
+    residue_bytes = os.fstat(fd).st_size
+    if residue_bytes:
+        # 走到這裡代表上一個持有者已經不在了（否則拿不到鎖），這個檔沒有人會回來收
+        os.ftruncate(fd, 0)
+        logger.warning(
+            "清掉前一次執行留下的暫存檔",
+            path=str(tmp_path),
+            bytes=residue_bytes,
+        )
+    return fd
+
+
 class TrackingResultCollector:
     """收集每格的追蹤結果，累積到門檻列數就 flush 成一個 row group 並清空緩衝。
 
@@ -32,7 +102,7 @@ class TrackingResultCollector:
                 資料只會寫在同目錄的 `.tmp` 暫存檔。
         """
         self._results_path = results_path
-        self._tmp_path = results_path.with_name(results_path.name + ".tmp")
+        self._tmp_path = tmp_path_for(results_path)
         self._columns: dict[str, list] = {name: [] for name in _SCHEMA}
         self._pending_rows = 0
         self._total_rows = 0
@@ -119,6 +189,9 @@ class TrackingResultCollector:
             pl.DataFrame(self._columns, schema=_SCHEMA).write_parquet(
                 self._results_path
             )
+            # 這條分支不經過 rename，`claim_tmp_slot` 建出來的 0 byte 暫存檔要自己收掉，
+            # 否則正常跑完的一天也會在輸出目錄留一個看起來像半成品的檔案
+            self._tmp_path.unlink(missing_ok=True)
         logger.info(
             "追蹤結果已寫入",
             path=str(self._results_path),
