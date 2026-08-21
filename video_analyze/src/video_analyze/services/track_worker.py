@@ -262,7 +262,11 @@ def run_track_worker(
     content_boxes = [content_box(shape.height, shape.width) for shape in frame_shapes]
     fps_meter = FpsMeter()
     logger.info("追蹤進程啟動", num_streams=len(stream_names))
-    start = time.perf_counter()
+    # 計時從**第一個 payload 抵達**才起算，不含等推論進程載完 YOLO 權重的那段空窗：推論
+    # 端的 `start` 也在載完模型之後（`start_loop` 內），兩邊口徑一致，餘裕才比得出意義。
+    # 把空窗算進來會壓低 `overall_fps`，讓印出的餘裕系統性偏大——而那個數字是容量決策的
+    # 依據，偏大的方向正好是會誤事的方向
+    first_payload_at: float | None = None
     try:
         while True:
             item = track_queue.get()
@@ -273,6 +277,8 @@ def run_track_worker(
                 raise RuntimeError("推論進程中途例外結束，中止追蹤。")
             stream_id, box_data, frame_index, timestamp = item
             track_start = time.perf_counter()
+            if first_payload_at is None:
+                first_payload_at = track_start
             tracks, foot_points = _track_one(
                 tracker,
                 foot_estimator,
@@ -297,7 +303,10 @@ def run_track_worker(
             fps_meter.add_tracking_time(time.perf_counter() - track_start)
             fps_meter.record(stream_names[stream_id])  # 一格真的處理完了
         # 在 save 之前印，數字只反映純處理，且即使 save 失敗仍看得到
-        _log_fps_summary(fps_meter, time.perf_counter() - start)
+        elapsed = (
+            0.0 if first_payload_at is None else time.perf_counter() - first_payload_at
+        )
+        _log_fps_summary(fps_meter, elapsed)
         collector.save()  # 僅推論進程正常送完才原子性改名成正式檔名
     except BaseException:
         collector.discard()  # fail-loud：不留下不完整結果
