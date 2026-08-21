@@ -26,6 +26,7 @@ from itertools import accumulate
 from zoneinfo import ZoneInfo
 
 import numpy as np
+import pytest
 import torch
 from ultralytics.engine.results import Boxes, Results
 
@@ -147,10 +148,13 @@ def _run_loop(
         )
     data_queue.put(last_signal)
 
-    try:
+    if last_signal == READER_FAILED:
+        # 只有這條路徑預期拋錯，訊號本身由呼叫端斷言。無條件吞掉 RuntimeError 會讓其餘
+        # 幾支測試在主迴圈真的壞掉時仍然全綠
+        with pytest.raises(RuntimeError):
+            pipeline.start_loop([data_queue], [free_queue], [_FrameRingStub()])
+    else:
         pipeline.start_loop([data_queue], [free_queue], [_FrameRingStub()])
-    except RuntimeError:
-        pass  # READER_FAILED 的預期路徑，訊號本身由呼叫端斷言
     dispatched = []
     while not track_queue.empty():
         dispatched.append(track_queue.get_nowait())
