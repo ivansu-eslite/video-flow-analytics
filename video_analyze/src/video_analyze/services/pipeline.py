@@ -196,6 +196,10 @@ def analyze_daily(
                     free_queues[i],
                     ring_buffers[i],
                     RING_SLOTS,
+                    # 不是緩衝尺寸（緩衝照推論尺寸配），是讀取端逐格核對「整天解析度
+                    # 固定」用的探測值——letterbox 會把任何尺寸抹平，write_slot 的
+                    # 形狀檢查不再擋得住中途換解析度
+                    frame_shapes[i],
                 ),
             )
             reader_proc.start()

@@ -186,6 +186,7 @@ class DailyStreamVideoReader:
         data_queue: mp.Queue,
         free_queue: mp.Queue,
         ring: FrameRing,
+        source_shape: FrameShape,
     ):
         """綁定該路要讀取的片段清單與 IPC 通道，尚未開始實際讀取。
 
@@ -195,14 +196,23 @@ class DailyStreamVideoReader:
             data_queue: 送往推理進程的資料佇列（存放 slot 索引與 metadata）。
             free_queue: 供推理進程歸還已消費 slot 的佇列。
             ring: 該路專用的共享記憶體環形緩衝。
+            source_shape: `probe_frame_shape` 探測到的原始解析度，逐格核對用
+                （見 `_read_segment`）。
         """
         self.stream_id = stream_id
         self.segments = segments
         self.data_queue = data_queue
         self.free_queue = free_queue
         self.ring = ring
+        self.source_shape = source_shape
 
     def _read_segment(self, segment: SegmentInfo) -> None:
+        """讀完單一片段的所有影格，逐格核對解析度後縮放、寫入 slot。
+
+        Raises:
+            ValueError: 片段無法開啟、讀不到 FPS，或任一影格的解析度與
+                `source_shape` 不符（見迴圈內註解）。
+        """
         cap = cv2.VideoCapture(str(segment.path))
         if not cap.isOpened():
             cap.release()
@@ -216,6 +226,23 @@ class DailyStreamVideoReader:
                 ret, frame = cap.read()
                 if not ret:
                     break
+                # 「整天解析度固定」的 fail-loud 檢查要在這裡做：縮放前移之前，這件事
+                # 由 `FrameRing.write_slot` 的形狀檢查順便擋下（緩衝依首格解析度配置），
+                # 但 letterbox 會把任何尺寸都抹平成推論尺寸，那道網就失效了。中途換
+                # 解析度而沒擋下的後果全是靜默的：反算參數仍是首格那組，座標按錯誤的
+                # 比例縮放（1080p→4K 差一半），parquet 的 frame_width 每列照樣寫首格
+                # 的值，下游「該攝影機 frame_width 唯一」的檢查也照樣通過。
+                if frame.shape[:2] != (
+                    self.source_shape.height,
+                    self.source_shape.width,
+                ):
+                    raise ValueError(
+                        f"{segment.path} 第 {frame_index} 格的解析度 "
+                        f"{frame.shape[1]}×{frame.shape[0]} 與該路探測到的 "
+                        f"{self.source_shape.width}×{self.source_shape.height} 不符"
+                        "（假設單一攝影機整天解析度固定）：座標反算與 parquet 的尺寸"
+                        "欄位都綁在探測值上，中途變動只會讓輸出靜默算錯。"
+                    )
                 # 縮到推論尺寸這件事本來在推論進程內由 ultralytics 做（每格 1.84 ms、
                 # 佔該進程 8.5%），而那是序列瓶頸；N 個讀取進程各自做則是並行的。
                 # 代價是框與落腳點的反算改由推論端負責，見 services/letterbox.py。
@@ -235,7 +262,8 @@ class DailyStreamVideoReader:
         推理進程能區分兩者、避免把中途崩潰誤判為正常結束繼續寫出結果。
 
         Raises:
-            ValueError: 任一片段開檔或讀取 FPS 失敗（見 `_read_segment`）。
+            ValueError: 任一片段開檔／讀取 FPS 失敗，或影格解析度與探測值不符
+                （見 `_read_segment`）。
         """
         # free_queue 由 reader 自己起跑時填滿，避免「父進程先 put 再 fork」的競態
         for slot in range(self.ring.num_slots):
@@ -260,6 +288,7 @@ def run_video_reader(
     free_queue: mp.Queue,
     ring_buffer,
     num_slots: int,
+    source_shape: FrameShape,
 ) -> None:
     """讀取子進程的進入點：建構 `FrameRing` 與 `DailyStreamVideoReader` 並執行。
 
@@ -274,7 +303,11 @@ def run_video_reader(
         free_queue: 供推理進程歸還已消費 slot 的佇列。
         ring_buffer: `create_ring_buffer` 建立的共享記憶體。
         num_slots: 環形緩衝的 slot 數。
+        source_shape: 該路的原始解析度（`probe_frame_shape` 的探測值）。**這不是緩衝
+            的尺寸**（緩衝照推論尺寸配置），只用來逐格核對解析度沒有中途變動。
     """
     ring = FrameRing(ring_buffer, num_slots, INFER_HEIGHT, INFER_WIDTH)
-    reader = DailyStreamVideoReader(stream_id, segments, data_queue, free_queue, ring)
+    reader = DailyStreamVideoReader(
+        stream_id, segments, data_queue, free_queue, ring, source_shape
+    )
     reader.run()

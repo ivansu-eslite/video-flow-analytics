@@ -201,9 +201,8 @@ fail loud；沒有任何 `lines` 定義則整批跳過出入口三個分頁、�
 
 ### `tracking_results.parquet` 不可重現（非拆分相關，屬既有特性）
 
-`video_analyze` 的批次跨串流組成受時序影響（非阻塞輪詢湊批）、`bucket_name1` fixture 為
-混解析度會讓 letterbox 隨批次組成變動，加上 **ByteTrack 的 `track_id` 指派本身在重跑間
-會改變**（同一輸入重跑兩次即可能有數千列 key 對不上、座標差可達數百 px）。因此
+`video_analyze` 的批次跨串流組成受時序影響（非阻塞輪詢湊批），加上 **ByteTrack 的
+`track_id` 指派本身在重跑間會改變**（同一輸入重跑兩次即可能有數千列 key 對不上、座標差可達數百 px）。因此
 `tracking_results.parquet` 逐值比對對「邏輯是否正確」沒有驗收力；`zone_counts.parquet`
 經 `time_bucket` 聚合後穩定（同輸入重跑可逐值/byte 級一致），是**交付期／大重構做 golden
 回歸比對**時更可靠的標的（vfa 日常改動的把關是各包 pytest、不依賴 golden；golden 產在
