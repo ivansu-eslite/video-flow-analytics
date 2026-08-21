@@ -135,6 +135,9 @@ class InferencePipeline:
 
         落盤不在這裡：正常跑完送 `TRACK_DONE`，追蹤進程收到才 `save()`；中途例外送
         `TRACK_FAILED` 讓它清掉不完整的暫存檔，再把例外重新拋出（fail-loud）。
+        **本函式內的例外都送得到訊號**；在此之前就失敗的路徑（例如
+        `run_inference_pipeline` 建 `YOLODetector` 時拋錯）送不到，追蹤進程要等父進程
+        SIGTERM——那時還沒有任何 `.tmp`，損失的只是關機延遲。
 
         Args:
             data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
@@ -146,19 +149,23 @@ class InferencePipeline:
             RuntimeError: 任一路讀取進程回報 `READER_FAILED`。
             BaseException: 其他子系統拋出的例外，會原樣重新拋出。
         """
-        # `frame_ring.RING_SLOTS` 的推導式已保證這條成立，所以這裡防的不是「有人調
-        # batch」，而是日後兩處推導公式漂移：一批會同時扣住同一路最多 _target_batch
-        # 個 slot 直到推論結束，總數不足其 2 倍時 reader 在整個推論期間都拿不到空位、
-        # 完全停擺，而且不會有任何錯誤訊息
-        if any(ring.num_slots < 2 * self._target_batch for ring in rings):
-            raise ValueError(
-                f"環形緩衝格數需至少為單次批次（{self._target_batch}）的 2 倍，"
-                f"實得 {[ring.num_slots for ring in rings]}；"
-                "推論完才歸還 slot 的設計下，格數不足會讓讀取進程停擺。"
-            )
         logger.info("模組化推理流程啟動...")
         start = time.perf_counter()
         try:
+            # 這道檢查放在 try 內而非之前：追蹤進程此時已經起來、等在 queue 上，不送
+            # TRACK_FAILED 的話它要等到被父進程 SIGTERM 才結束（此時還沒有 `.tmp`，
+            # 損失的只是關機延遲，但沒理由讓一條已經有訊號的路徑走不到）。
+            #
+            # `frame_ring.RING_SLOTS` 的推導式已保證這條成立，所以這裡防的不是「有人調
+            # batch」，而是日後兩處推導公式漂移：一批會同時扣住同一路最多 _target_batch
+            # 個 slot 直到推論結束，總數不足其 2 倍時 reader 在整個推論期間都拿不到空位、
+            # 完全停擺，而且不會有任何錯誤訊息
+            if any(ring.num_slots < 2 * self._target_batch for ring in rings):
+                raise ValueError(
+                    f"環形緩衝格數需至少為單次批次（{self._target_batch}）的 2 倍，"
+                    f"實得 {[ring.num_slots for ring in rings]}；"
+                    "推論完才歸還 slot 的設計下，格數不足會讓讀取進程停擺。"
+                )
             while len(self.finished_streams) < self.num_streams:
                 batch_packets, batch_stream_ids, held_slots = self._collect_batch(
                     data_queues, rings
