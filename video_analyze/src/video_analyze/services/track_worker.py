@@ -71,8 +71,11 @@ _EMPTY_DETECTION_COLUMNS = 6
 #   backlog 成正比；而推論進程一死，父進程約 0.5 秒內就 `_terminate_all`，terminate 不走
 #   Python 的 `except`／`finally`。backlog 大到消化不完那幾秒的量時，本進程會在還沒讀到
 #   訊號時被 SIGTERM 收掉，`collector.discard()` 從未執行、`.tmp` 留在輸出目錄——也就是
-#   那條失效路徑會靜默失效。有了上限，backlog 至多這麼多格（實測約 70 ms 的工作量），
-#   訊號一定趕在 terminate 之前抵達。
+#   那條失效路徑會靜默失效。有了上限，backlog 至多這麼多格——預設 batch（8，即上限 64
+#   格）下約 70 ms 的工作量，遠小於父進程的偵測延遲，訊號趕得上。
+#   ⚠ **這是「backlog 有界」的推論，不是時序保證**：上限隨 `MODEL__BATCH` 線性成長，而
+#   父進程的偵測延遲不隨它成長，所以把 batch 調得很大時這個邊際會變薄（例如
+#   `MODEL__BATCH=64` → 上限 512 格）。調大 batch 時要一併重新評估這條路徑。
 #
 # 取「單次推論批次的 4 倍」：一批推論完會連續 put 一整批，留幾批的鬆弛才不會讓正常抖動
 # 變成兩個進程互等。`settings.model.batch` 的 ×2 與 `frame_ring.RING_SLOTS` 的第一個 ×2

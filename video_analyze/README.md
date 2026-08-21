@@ -331,7 +331,11 @@ zone 與 line 幾何都不會被驗證。
   原子性）。推論進程中途例外時送 `TRACK_FAILED`，追蹤進程收到就刪除 `.tmp` 並以非零
   exitcode 結束，正式檔名下不會出現不完整的 parquet。這條路徑**依賴 `track_queue` 的
   容量上限**（`track_worker.TRACK_QUEUE_SLOTS`）：訊號是排在同一條佇列尾端的 in-band
-  訊號，backlog 無上限的話它會晚於父進程的 terminate 抵達而靜默失效。**推論進程被
+  訊號，backlog 無上限的話它會晚於父進程的 terminate 抵達而靜默失效。這是「backlog
+  有界」的推論而非時序保證——上限隨 `MODEL__BATCH` 線性成長，父進程的偵測延遲不隨它
+  成長，故調大 batch 時要重新評估。另外，**推論主迴圈啟動之前**就失敗的路徑（例如
+  建 `YOLODetector` 時拋錯）送不到訊號，追蹤進程要等父進程 SIGTERM；那時還沒有任何
+  `.tmp`，損失的只是關機延遲。**推論進程被
   SIGKILL 或整機掛掉不在覆蓋範圍**：追蹤進程會卡在 `track_queue.get()` 等不到訊號、
   由父進程 terminate，而 terminate 不走 Python 的 `except`／`finally`，`.tmp` 會留下。
 
