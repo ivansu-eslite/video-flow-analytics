@@ -83,7 +83,7 @@ flowchart LR
 | --- | --- |
 | 執行環境 | Python `>= 3.12`（`.python-version` 釘 `3.12`） |
 | 套件管理 | [uv](https://docs.astral.sh/uv/)（安裝與執行皆透過 uv；單一 root `uv.lock`） |
-| GPU | 選用。`video_analyze` 以 `torch.cuda.is_available()` 判斷，無 GPU 時 fallback 到 CPU（明顯變慢）；`zone_mapping`／`line_counting`／`flow_report` 為純 CPU |
+| GPU | `video_analyze` **必要**：正式推論路徑是 TensorRT FP16 引擎（[ADR-011](docs/adr/video_analyze/011-single-inference-backend.md)），引擎綁 GPU 也綁架構（`_sm75` 的引擎只能在 Turing 上跑），沒有 CPU fallback，且引擎要用 `video_analyze/tools/build_engine.py` 在**目標卡上**自行建置；`zone_mapping`／`line_counting`／`flow_report` 為純 CPU |
 | 系統相依 | FFmpeg / 影像編解碼器（OpenCV 解 `mkv` 等格式）；`lap` 為 C 擴充，環境無對應 wheel 時需要編譯工具鏈 |
 
 各套件的執行期依賴與模型權重說明見各自 README；四包的推理堆疊與輸出格式相關套件版本
@@ -256,6 +256,7 @@ cameras:
 | [008](docs/adr/shared/008-config-section-namespace.md) | shared | 設定的頂層區塊名是跨四包的全域環境變數命名空間，`[input]` 因此由 `libs/vfa_config` 提供單一定義、欄位取聯集，說明為何不改用套件前綴、為何否決把 `bucket_minutes` 寫進 parquet metadata，並修訂「各包只保留自己讀到的區塊」那條 |
 | [009](docs/adr/shared/009-head-based-foot-point.md) | shared | 落腳點由 head 框推算並上移成 `tracking_results.parquet` 的欄位，記錄多候選 head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能進 tracker、ADR-001／003／004／006 的判定輸入點定義隨之改變，以及**計數會大幅上升**（本機重跑 zone entries 最多 74 → 264） |
 | [010](docs/adr/video_analyze/010-zero-copy-frame-lifetime.md) | `video_analyze` | 推理主迴圈免複製消費共享記憶體的畫面、slot 延後到整批推論後才歸還，記錄這條生命週期約束、`Results.orig_img` 是共享記憶體活別名的依賴（ultralytics 不保證，測試擋不住），以及環形緩衝格數為何改由 `model.batch` 推導 |
+| [011](docs/adr/video_analyze/011-single-inference-backend.md) | `video_analyze` | 正式推論路徑收斂為 TensorRT FP16 單一實作、Torch FP32 只作為套件外的驗證工具，記錄為何否決「可切換的後端」、`dynamic=True` 是兩個硬條件逼出來的（批次會變動、靜態引擎會讓形狀退回 640×640）、精度為何驗 metadata 而非 backend 屬性，以及 `_validate_imgsz` 為何不可照抄（引擎路徑下語義失效） |
 
 
 **取號規則**：編號是全域流水號，與子目錄無關；新增 ADR 一律取上表的下一號，不在各子目錄
