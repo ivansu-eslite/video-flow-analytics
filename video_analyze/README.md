@@ -370,8 +370,9 @@ zone 與 line 幾何都不會被驗證。
   `.engine`、引擎檔不存在（**這道 `is_file()` 前置檢查不可移除**——ultralytics 的
   `check_file` 在檔案不存在時會遞迴 glob 整個套件目錄找同名檔、把 `gs://` 改寫成公開
   HTTPS 下載、把沒有副檔名的值補成官方權重下載）、引擎 metadata 與當下環境不符
-  （compute capability／TensorRT 版本／CUDA 大版本／來源權重 hash，四項各自拋錯、訊息
-  指出是哪一項）、引擎不是 FP16 建的。沒有 CUDA 也是中止而非 fallback CPU。
+  （compute capability／TensorRT 版本／TensorRT wheel 變體／來源權重 hash，四項各自拋錯、
+  訊息指出是哪一項；驅動版本與 torch 的 CUDA 建置版本只記 warning——它們不在 TensorRT 對
+  引擎的約束裡）、引擎不是 FP16 建的。沒有 CUDA 也是中止而非 fallback CPU。
 - **實際進入推論的張量形狀不是 640×384 → 拋 `ValueError`**。讀的是 TensorRT backend 自己
   的 binding。這一項取代了 `_validate_imgsz`：dynamic 引擎不套用 metadata 的 `imgsz`，
   照抄那個檢查會得到一個看起來有在驗、其實驗不到的檢查（見 ADR-011）。

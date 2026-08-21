@@ -180,8 +180,19 @@ def _dev_stats(values: list[float]) -> dict:
     `over_outlier_pct` 是偏差超過 `DEFAULT_OUTLIER_PX` 的配對比例——判準看的是它，
     不是 `max`（理由見本檔開頭的門檻常數）。
     """
+    # 空樣本的欄位要與有樣本時**完全一致**：零配對正是這支工具最該講話的時候
+    # （引擎壞掉、精度或形狀出錯都長這樣），少一個欄位會讓 print_summary 以 KeyError
+    # 收場——報告沒寫出、check_report 沒跑到，本該印的「配對率 0% < 98%」也看不到。
     if not values:
-        return {"max": 0.0, "mean": 0.0, "p99": 0.0, "n": 0, "over_outlier_pct": 0.0}
+        return {
+            "max": 0.0,
+            "mean": 0.0,
+            "p99": 0.0,
+            "n": 0,
+            "over_outlier_px": DEFAULT_OUTLIER_PX,
+            "over_outlier_n": 0,
+            "over_outlier_pct": 0.0,
+        }
     over = sum(1 for v in values if v > DEFAULT_OUTLIER_PX)
     return {
         "max": round(max(values), 3),
@@ -218,7 +229,9 @@ def compare_backends(
             與 T4 的行為一致）。
 
     Returns:
-        報告 dict，`overall.foot_point_dev_px.max` 是判準用的那個數字。
+        報告 dict。判準由 `check_report` 套用，看的是
+        `overall.foot_point_dev_px.p99` 與 `.over_outlier_pct`，**不是 `.max`**
+        （理由見本檔開頭的門檻常數）。
 
     Raises:
         RuntimeError: 所有指定的攝影機都找不到影片。

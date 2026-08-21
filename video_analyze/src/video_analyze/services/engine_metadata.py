@@ -34,7 +34,7 @@ logger = StructuredLogger(component="engine_metadata")
 VFA_METADATA_KEY = "vfa"
 
 # 注入欄位的版本號。欄位語義改變（不只是新增）時要進位，載入端才擋得掉舊引擎。
-VFA_METADATA_SCHEMA = 1
+VFA_METADATA_SCHEMA = 2
 
 # ultralytics 寫在引擎檔開頭的 metadata 長度欄位寬度（bytes，little-endian、signed）。
 _META_LEN_BYTES = 4
@@ -55,14 +55,21 @@ class GpuEnvironment:
             `SAME_COMPUTE_CAPABILITY`，引擎的實際約束是 SM 而不是型號。
         gpu_name: GPU 型號字串，只供人閱讀與追溯，不參與比對。
         tensorrt: TensorRT 版本（如 `"10.13.3.9"`）。
-        cuda_major: 建置／載入端 torch 所綁的 CUDA 大版本（如 `"12"`）。
+        tensorrt_package: 實際安裝的 TensorRT wheel 變體（如 `"tensorrt-cu12"`）。
+            **不是從 `torch.version.cuda` 推的**——那兩個數字可以不一樣（本機現況就是
+            torch `2.12.1+cu130` 搭 `tensorrt-cu12`），拿 torch 的 CUDA 建置版本當
+            TensorRT 變體的代理，既擋不到真正的 cu12／cu13 對調，又會在 torch 換版時
+            誤擋既有引擎。改讀已安裝套件的實際名稱。
+        torch_cuda_major: 建置／載入端 torch 所綁的 CUDA 大版本（如 `"13"`）。
+            **只記錄不比對**：它不影響引擎的有效性，記著是為了追溯。
         driver: 顯示卡驅動版本字串；取不到時為 `None`。
     """
 
     compute_capability: str
     gpu_name: str
     tensorrt: str
-    cuda_major: str
+    tensorrt_package: str | None
+    torch_cuda_major: str
     driver: str | None
 
 
@@ -89,9 +96,31 @@ def current_gpu_environment() -> GpuEnvironment:
         compute_capability=f"{props.major}.{props.minor}",
         gpu_name=props.name,
         tensorrt=trt.__version__,
-        cuda_major=str(torch.version.cuda).split(".")[0],
+        tensorrt_package=_tensorrt_package(),
+        torch_cuda_major=str(torch.version.cuda).split(".")[0],
         driver=_driver_version(),
     )
+
+
+def _tensorrt_package() -> str | None:
+    """找出實際安裝的是哪一個 TensorRT wheel 變體；找不到回 `None`。
+
+    `import tensorrt` 對 `tensorrt-cu12` 與 `tensorrt-cu13` 是同一個模組名，版本號也
+    看不出變體，只有套件名分得出來。名稱正規化成連字號（`importlib.metadata` 回的是
+    `tensorrt_cu12`），比對兩端才不會因為寫法不同而誤判。
+    """
+    from importlib.metadata import distributions
+
+    for dist in distributions():
+        name = dist.metadata["Name"]
+        if not name:
+            continue
+        normalized = name.lower().replace("_", "-")
+        # 只取主套件，`-bindings`／`-libs` 兩個附屬套件跟著它走
+        if normalized.startswith("tensorrt-cu"):
+            return normalized
+    logger.warning("找不到 tensorrt-cu* 套件，該欄位以 null 記錄。")
+    return None
 
 
 def _driver_version() -> str | None:
@@ -148,7 +177,8 @@ def build_vfa_metadata(
         "compute_capability": environment.compute_capability,
         "gpu_name": environment.gpu_name,
         "tensorrt": environment.tensorrt,
-        "cuda_major": environment.cuda_major,
+        "tensorrt_package": environment.tensorrt_package,
+        "torch_cuda_major": environment.torch_cuda_major,
         "driver": environment.driver,
         "train": train_info,
     }
@@ -220,7 +250,8 @@ def validate_engine_metadata(
 
     Raises:
         ValueError: metadata 缺少 `vfa` 區塊、schema 版本不符，或權重身分／
-            compute capability／TensorRT 版本／CUDA 大版本任一項與當下環境不符。
+            compute capability／TensorRT 版本／TensorRT wheel 變體任一項與當下
+            環境不符。
     """
     vfa = metadata.get(VFA_METADATA_KEY)
     if not isinstance(vfa, dict):
@@ -255,12 +286,12 @@ def validate_engine_metadata(
             "才能滾動映像檔。"
         )
 
-    engine_cuda = vfa.get("cuda_major")
-    if engine_cuda != environment.cuda_major:
+    engine_package = vfa.get("tensorrt_package")
+    if engine_package != environment.tensorrt_package:
         raise ValueError(
-            f"引擎的建置環境 CUDA 大版本是 {engine_cuda}，當下是 "
-            f"{environment.cuda_major}。`tensorrt-cu12` 與 `tensorrt-cu13` 是不同的"
-            "套件，兩者的 runtime 不可互換。"
+            f"引擎是用 {engine_package} 建的，當下環境裝的是 "
+            f"{environment.tensorrt_package}。`tensorrt-cu12` 與 `tensorrt-cu13` 是"
+            "不同的套件，兩者的 runtime 不可互換。"
         )
 
     engine_weights = vfa.get("source_weights") or {}
@@ -280,10 +311,18 @@ def validate_engine_metadata(
             engine_source_sha256=engine_sha,
         )
 
+    # 驅動版本與 torch 的 CUDA 建置版本都只記錄不擋，理由見本函式 docstring：
+    # 兩者都不在 TensorRT 對引擎的約束裡，做成致命條件只會誤擋
     if vfa.get("driver") != environment.driver:
-        # 只記錄不擋，理由見本函式 docstring
         logger.warning(
             "引擎建置機與當下環境的顯示卡驅動版本不同（不影響引擎有效性，僅供追溯）。",
             build_driver=vfa.get("driver"),
             current_driver=environment.driver,
+        )
+    if vfa.get("torch_cuda_major") != environment.torch_cuda_major:
+        logger.warning(
+            "引擎建置機與當下環境的 torch CUDA 建置版本不同"
+            "（不影響引擎有效性，僅供追溯）。",
+            build_torch_cuda_major=vfa.get("torch_cuda_major"),
+            current_torch_cuda_major=environment.torch_cuda_major,
         )

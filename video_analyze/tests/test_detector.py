@@ -22,7 +22,10 @@ from video_analyze.services.detector import (
     _validate_classes,
     _validate_precision,
 )
-from video_analyze.services.engine_metadata import VFA_METADATA_KEY
+from video_analyze.services.engine_metadata import (
+    VFA_METADATA_KEY,
+    VFA_METADATA_SCHEMA,
+)
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
 
 
@@ -32,12 +35,13 @@ def _metadata(**overrides) -> dict:
         "batch": 16,
         "args": {"half": True, "dynamic": True, "batch": 16},
         VFA_METADATA_KEY: {
-            "schema": 1,
+            "schema": VFA_METADATA_SCHEMA,
             "source_weights": {"name": "baseline.pt", "sha256": "a" * 64},
             "compute_capability": "7.5",
             "gpu_name": "Tesla T4",
             "tensorrt": "10.13.3.9",
-            "cuda_major": "12",
+            "tensorrt_package": "tensorrt-cu12",
+            "torch_cuda_major": "12",
             "driver": "550.54.15",
             "train": {
                 "base_model": "best.pt",

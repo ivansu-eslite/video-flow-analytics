@@ -114,13 +114,16 @@ metadata 的那一份，只有它反映建置時的實際設定。
 ### 6. 三項不符即中止（訊息各自寫），驅動版本只記錄
 
 中止：**compute capability**（不是 GPU 型號字串——引擎的實際約束是 SM）、**TensorRT 版本**、
-**CUDA 大版本**（`tensorrt-cu12` 與 `tensorrt-cu13` 是不同套件），以及**來源權重的 SHA-256**
+**TensorRT wheel 變體**（`tensorrt-cu12` 與 `tensorrt-cu13` 是不同套件；比的是
+`importlib.metadata` 讀到的**實際套件名**，不是 `torch.version.cuda`——那兩個數字可以不一樣，
+本機現況就是 torch `2.12.1+cu130` 搭 `tensorrt-cu12`，拿 torch 的 CUDA 建置版本當變體的代理
+既擋不到真正的 cu12／cu13 對調，又會在 torch 換版時誤擋既有引擎），以及**來源權重的 SHA-256**
 （`[model].source_weights_sha256` 有釘才比；沒釘只記 warning，讓「沒在驗」在 log 上看得見）。
 四條各自拋、訊息各自寫，因為處置完全不同：SM 不符要在目標卡上重建，TRT 版本不符要對齊
 映像檔，權重 hash 不符是拿錯了引擎。合成一句「metadata 與環境不符」會讓看 log 的人得自己
 重跑一次才知道要修哪裡。
 
-**驅動版本只記錄、不擋**，這是本 ADR 對 plan 的一處刻意偏離。引擎的硬約束來自 TensorRT
+**驅動版本與 torch 的 CUDA 建置版本只記錄、不擋**，前者是本 ADR 對 plan 的一處刻意偏離。引擎的硬約束來自 TensorRT
 本身（SM 與 TRT 版本），驅動不在其中；而建置機（GCE T4 VM）與正式節點（Vertex CustomJob
 的容器）本來就不保證同一份映像檔與驅動——把它做成致命條件等於堵死唯一可行的建置路徑。
 不符時記 warning，留給人判斷。
@@ -163,7 +166,9 @@ argus 的 promotion 用 `Path(source_model_uri).stem` 當 `model_version`，同�
 ### 10. 比對沒過就沒有產物
 
 `build_engine.py` 先把產物落在 `.unverified` 尾綴上，跑完 metadata／精度／形狀驗證與對
-Torch FP32 的比對才改成正式檔名；任何一關沒過就把它刪掉。**不用 `.tmp` 尾綴**——那在本
+Torch FP32 的比對才改成正式檔名；任何一關沒過就把它刪掉。`--skip-compare`（T4 smoke 用）
+**也不改名**——只印警告的話磁碟上會留下一顆與通過比對的產物長得一模一樣的引擎，事後無從
+分辨；留著尾綴同時讓它載不進正式推論路徑（`YOLODetector` 要求副檔名是 `.engine`）。**不用 `.tmp` 尾綴**——那在本
 repo 已經是 `TrackingResultCollector` 的暫存檔語義。
 
 **比對的判準看 p99，不看 max**，這是對 plan 的第二處刻意偏離。plan 寫的是「偏差不超過

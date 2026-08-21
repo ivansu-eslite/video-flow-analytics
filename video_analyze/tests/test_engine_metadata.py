@@ -24,7 +24,8 @@ _ENV = GpuEnvironment(
     compute_capability="7.5",
     gpu_name="Tesla T4",
     tensorrt="10.13.3.9",
-    cuda_major="12",
+    tensorrt_package="tensorrt-cu12",
+    torch_cuda_major="12",
     driver="550.54.15",
 )
 _SHA = "a" * 64
@@ -37,7 +38,8 @@ def _vfa(**overrides) -> dict:
         "compute_capability": _ENV.compute_capability,
         "gpu_name": _ENV.gpu_name,
         "tensorrt": _ENV.tensorrt,
-        "cuda_major": _ENV.cuda_major,
+        "tensorrt_package": _ENV.tensorrt_package,
+        "torch_cuda_major": _ENV.torch_cuda_major,
         "driver": _ENV.driver,
         "train": {"ultralytics": "8.4.90", "date": "2026-07-14"},
     }
@@ -118,12 +120,26 @@ def test_validate_rejects_a_different_source_weight():
         validate_engine_metadata(metadata, _ENV, _SHA)
 
 
-def test_validate_rejects_a_different_cuda_major():
-    """`tensorrt-cu12` 與 `tensorrt-cu13` 是不同套件，runtime 不可互換。"""
-    metadata = _metadata(cuda_major="13")
+def test_validate_rejects_a_different_tensorrt_wheel_variant():
+    """`tensorrt-cu12` 與 `tensorrt-cu13` 是不同套件，runtime 不可互換。
 
-    with pytest.raises(ValueError, match="CUDA"):
+    比的是**實際安裝的套件名**，不是 `torch.version.cuda`。兩者可以不一樣——本機現況
+    就是 torch `2.12.1+cu130` 搭 `tensorrt-cu12`——拿 torch 的 CUDA 建置版本當變體的
+    代理，既擋不到真正的 cu12／cu13 對調，又會在 torch 換版時誤擋既有引擎。
+    """
+    metadata = _metadata(tensorrt_package="tensorrt-cu13")
+
+    with pytest.raises(ValueError, match="tensorrt-cu13"):
         validate_engine_metadata(metadata, _ENV, _SHA)
+
+
+def test_validate_only_warns_when_the_torch_cuda_build_differs(capsys):
+    """torch 的 CUDA 建置版本不在 TensorRT 對引擎的約束裡，只記錄不擋。"""
+    validate_engine_metadata(_metadata(torch_cuda_major="13"), _ENV, _SHA)
+
+    out = capsys.readouterr().out
+    assert '"severity": "WARNING"' in out
+    assert "torch" in out
 
 
 def test_validate_rejects_an_engine_without_the_vfa_block():

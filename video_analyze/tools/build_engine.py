@@ -241,8 +241,9 @@ def main() -> None:
     ap.add_argument(
         "--skip-compare",
         action="store_true",
-        help="只 build ＋ deserialize，不跑對 Torch FP32 的比對。**產物不可上線**，"
-        "只用於「確認這張卡建得出引擎」的 smoke。",
+        help="只 build ＋ deserialize，不跑對 Torch FP32 的比對。**產物保留 "
+        f"`{_UNVERIFIED_SUFFIX}` 尾綴、不會改成正式檔名**，只用於「確認這張卡建得出"
+        "引擎」的 smoke（T4 驗收清單的第一步）。",
     )
     ap.add_argument("--report-out", type=Path, default=None, help="比對報告 JSON 輸出路徑")
     args = ap.parse_args()
@@ -280,9 +281,7 @@ def main() -> None:
 
     try:
         verify_engine(staged, args.batch, weights_sha256)
-        if args.skip_compare:
-            print("[警告] --skip-compare：沒跑對 Torch FP32 的比對，此產物不可上線。")
-        else:
+        if not args.skip_compare:
             report = compare_backends(
                 bucket=args.bucket,
                 model_a=args.weights,
@@ -312,6 +311,17 @@ def main() -> None:
         print(f"[失敗] 已刪除未通過驗收的產物 {staged}", file=sys.stderr)
         raise
 
+    if args.skip_compare:
+        # **不改名**。只印一行警告的話，磁碟上會留下一顆與通過比對的產物長得一模一樣的
+        # 引擎，事後無從分辨——而 `--skip-compare` 正是為了 smoke 而存在，smoke 的產物
+        # 混進正式檔名是這支工具最容易造成的事故。留著尾綴也讓它跑不起來：
+        # `YOLODetector` 要求副檔名是 `.engine`，`.engine.unverified` 會被當場擋下。
+        print(
+            f"\n[未驗收] --skip-compare：沒跑對 Torch FP32 的比對，產物保留在 {staged}"
+            "，**不會改成正式檔名，也載不進正式推論路徑**。要上線請拿掉 "
+            "--skip-compare 重跑。"
+        )
+        return
     staged.rename(final_path)
     print(f"\n引擎已產出：{final_path}")
 
