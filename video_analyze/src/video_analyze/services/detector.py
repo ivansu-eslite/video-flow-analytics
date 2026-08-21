@@ -162,7 +162,7 @@ class YOLODetector:
         """對一批影格執行物件偵測，僅保留 `settings.model.classes` 指定的類別
         （預設為 head 與 fbody）。
 
-        回傳的 `Results` 內兩種類別混在一起，由 `services/inference.py` 依 `cls`
+        回傳的 `Results` 內兩種類別混在一起，由 `services/track_worker.py` 依 `cls`
         拆開——只有 fbody 進 tracker，head 供落腳點推算。
 
         Args:
