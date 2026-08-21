@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -6,7 +7,6 @@ import pyarrow.parquet as pq
 from vfa_observability import StructuredLogger
 
 from video_analyze.config.constants import TRACKING_RESULTS_SCHEMA
-from video_analyze.services.video_reader import FramePacket
 
 logger = StructuredLogger(component="tracking_results")
 
@@ -41,7 +41,8 @@ class TrackingResultCollector:
     def add(
         self,
         camera_id: str,
-        packet: FramePacket,
+        frame_index: int,
+        timestamp: datetime,
         tracks: np.ndarray,
         foot_points: np.ndarray,
         frame_width: int,
@@ -49,9 +50,13 @@ class TrackingResultCollector:
     ) -> None:
         """把某一格的追蹤結果加入緩衝，累積達門檻列數會自動 flush。
 
+        收 `frame_index`／`timestamp` 兩個純量而非整個 `FramePacket`：這裡本來就只用到
+        這兩欄，而 `FramePacket` 另外持有的影格是共享記憶體的 view，只在推論進程內有效。
+
         Args:
             camera_id: 該影格所屬攝影機的 `stream_dirname`。
-            packet: 該影格的來源資訊（frame_index、timestamp）。
+            frame_index: 該影格在所屬片段內的序號（從 0 起算）。
+            timestamp: 該影格的時間戳（台北在地時間，見 `services/video_reader.py`）。
             tracks: `MultiStreamByteTracker.update` 的輸出（列格式定義見該
                 函式的 Returns 說明）；空陣列時不新增任何列。
             foot_points: `[N, 2]` 的落腳點，逐列對應 `tracks`（見
@@ -74,8 +79,8 @@ class TrackingResultCollector:
             x1, y1, x2, y2, track_id = track[:5]
             cols = self._columns
             cols["camera_id"].append(camera_id)
-            cols["frame_id"].append(packet.frame_index)
-            cols["timestamp"].append(packet.timestamp)
+            cols["frame_id"].append(frame_index)
+            cols["timestamp"].append(timestamp)
             cols["track_id"].append(int(track_id))
             cols["x1"].append(float(x1))
             cols["y1"].append(float(y1))

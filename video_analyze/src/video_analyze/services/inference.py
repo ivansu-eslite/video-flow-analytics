@@ -310,7 +310,8 @@ class InferencePipeline:
                     shape = self.frame_shapes[stream_id]
                     self.collector.add(
                         camera_id=self.stream_names[stream_id],
-                        packet=packet,
+                        frame_index=packet.frame_index,
+                        timestamp=packet.timestamp,
                         tracks=tracks,
                         foot_points=foot_points,
                         frame_width=shape.width,
