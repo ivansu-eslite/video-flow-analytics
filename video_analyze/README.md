@@ -255,8 +255,9 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | `main.py` | 薄 CLI 外殼：進入點 `main`，讀 `settings` 組參數後呼叫 `analyze_daily` |
 | `models/config.py` | Pydantic-settings 設定模型（`config.toml`＋環境變數）與全域 `settings` 單例 |
 | `config/constants.py` | 非 Pydantic 靜態常數（`OUTPUT_ROOT`、輸出檔名與 parquet schema、CrowdHuman 類別 id `HEAD_CLASS_ID`／`FBODY_CLASS_ID`） |
-| `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理子進程生命週期） |
-| `services/inference.py` | 推理迴圈（湊批、偵測、追蹤、累積結果） |
+| `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理／追蹤子進程生命週期） |
+| `services/inference.py` | 推理迴圈（湊批、偵測、把偵測框送往追蹤進程） |
+| `services/track_worker.py` | 追蹤進程：偵測框拆分、追蹤、落腳點推算、座標反算、落盤；`TRACK_DONE`／`TRACK_FAILED` 訊號 |
 | `services/detector.py` | YOLO 偵測 |
 | `services/foot_point.py` | `FootPointEstimator`：head 框配對與落腳點推算；自行維護跨幀狀態（每條軌跡上次成功推算的偏移量，共用 head 的那些不存） |
 | `services/tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |
@@ -278,7 +279,7 @@ zone 與 line 幾何都不會被驗證。
 ### 多進程 pipeline
 
 `analyze_daily` 在主進程先 `discover_segments` 掃出當天片段、`probe_frame_shape` 讀首格
-解析度，再以多進程拆成 N 個讀取進程 ＋ 1 個推理進程：
+解析度，再以多進程拆成 N 個讀取進程 ＋ 1 個推理進程 ＋ 1 個追蹤進程：
 
 - **影格走共享記憶體、不走 pickle**（`frame_ring.py`）：每路一塊固定格數的環形緩衝
   （`mp.RawArray`），queue 只傳 slot 索引，避免每格影格逐格 pickle 的高成本。推理進程
@@ -287,20 +288,28 @@ zone 與 line 幾何都不會被驗證。
   4K 每格是 23.73 MiB）。此設計仍**假設同一攝影機整天解析度固定**（`probe_frame_shape`
   只探測首格）。
 - **讀取進程**：解碼後立即 letterbox 成推論尺寸再寫入 slot（`letterbox.py`）。無空 slot
-  時阻塞，形成對推理進程的天然背壓。**時間戳 = 該片段檔名時間 ＋ 片段內幀序 / fps**
+  時阻塞，形成對推理進程的天然背壓——slot 在 predict 完成當下就歸還，所以這條背壓只覆蓋
+  到推論為止，追蹤那一段由 `track_queue` 的容量上限接手。**時間戳 = 該片段檔名時間 ＋ 片段內幀序 / fps**
   （逐段計算，不能用全日累計幀數推算）。
-- **推理進程**：非阻塞輪詢各路 queue 湊批，維持 GPU 批次效率；每個 packet 依序經
-  偵測 → 拆出 fbody／head（只有 fbody 進 tracker）→ 追蹤 → 推算落腳點 → **框與落腳點
-  映射回原始解析度** → 累積追蹤結果。影格既然是共享記憶體的 view，**整批推論完成才歸還
-  slot**（生命週期約束見
-  [ADR-010](../docs/adr/video_analyze/010-zero-copy-frame-lifetime.md)）。
+- **推理進程**：非阻塞輪詢各路 queue 湊批，維持 GPU 批次效率；每批推論完就把逐格的
+  偵測框丟進 `track_queue`，本身不做追蹤。影格既然是共享記憶體的 view，**整批推論完成
+  才歸還 slot**（生命週期約束見
+  [ADR-010](../docs/adr/video_analyze/010-zero-copy-frame-lifetime.md)），送 payload 排在
+  歸還之後（payload 取的是推論輸出，與 slot 無關）。
+- **追蹤進程**：逐格經 裁切到內容區 → 拆出 fbody／head（只有 fbody 進 tracker）→ 追蹤
+  → 推算落腳點 → **框與落腳點映射回原始解析度** → 累積追蹤結果並落盤。追蹤與 GPU 推論
+  之間沒有資料相依（下一批的推論不需要上一批的軌跡），拆成兩個進程即可重疊。
+  **跨進程傳的是偵測框而不是影格**：每格幾十個框、幾 KB，而影格在推論完成後已無用途。
+  空格（該格沒有任何偵測）照樣送 payload、照樣呼叫 `tracker.update`——`BYTETracker` 的
+  `frame_id` 與軌跡老化都靠每格呼叫推進。
 
 **縮放前移的代價**：ultralytics 只知道自己收到 640×384，`orig_shape` 也是那個尺寸，
 輸出的框就停在推論尺度上，反算因此變成本包的責任（`letterbox.py` 的
 `unscale_boxes_inplace`／`unscale_points_inplace`）。反算**插在落腳點推算之後**：`heads`
 是唯一沒有反算的陣列，提早反算 `tracks` 會讓兩者尺度不一致而配不到頭，每列靜默退回框
 底邊中點。`probe_frame_shape` 的原始解析度因此有兩個消費端（parquet 的尺寸欄位、反算
-參數），兩者都不能換成推論尺寸。
+參數），兩者都不能換成推論尺寸——**兩者都在追蹤進程**，故 `frame_shapes` 傳給的是
+`run_track_worker` 而非推理進程。
 
 ### fail-loud 錯誤處理
 
@@ -312,14 +321,23 @@ zone 與 line 幾何都不會被驗證。
   的日期目錄，寧可中止也不靜默寫錯天。此檢查在 `discover_segments` 掃描時、於主進程
   執行，**任一路踩到就整天中止**（不是只跳過該攝影機或該片段）。
 - 其餘片段的開檔 / 讀 FPS 失敗 → 讀取子進程拋錯、以非零 exitcode 結束。
-- **`frame_shapes` 傳成推論尺寸 → `InferencePipeline.__init__` 拋 `ValueError`**。那代表
+- **`frame_shapes` 傳成推論尺寸 → `run_track_worker` 拋 `ValueError`**。那代表
   拿到的是縮放後的尺寸而非原始解析度，反算會退化成恆等、parquet 的 `frame_width` 也一起
   寫成 640，而下游 zone／line 只檢查欄位存在（ADR-004／ADR-006）。影格尺寸與緩衝配置
   不符（例如讀取端漏了 `letterbox()`）則由 `write_slot` 擋下。
 - `analyze_daily` 以 0.5 秒輪詢所有子進程；任一非零結束 → 先終止所有子進程再拋
   `RuntimeError`；`KeyboardInterrupt` → 終止後以 exit code 130 收斂。
-- 追蹤明細 parquet 先寫 `.tmp`、全部串流結束後才 `rename` 成正式檔名（`rename` 具
-  原子性）；中途例外則刪除 `.tmp`，正式檔名下不會出現不完整的 parquet。
+- 追蹤明細 parquet 先寫 `.tmp`、收到 `TRACK_DONE` 才 `rename` 成正式檔名（`rename` 具
+  原子性）。推論進程中途例外時送 `TRACK_FAILED`，追蹤進程收到就刪除 `.tmp` 並以非零
+  exitcode 結束，正式檔名下不會出現不完整的 parquet。這條路徑**依賴 `track_queue` 的
+  容量上限**（`track_worker.TRACK_QUEUE_SLOTS`）：訊號是排在同一條佇列尾端的 in-band
+  訊號，backlog 無上限的話它會晚於父進程的 terminate 抵達而靜默失效。這是「backlog
+  有界」的推論而非時序保證——上限隨 `MODEL__BATCH` 線性成長，父進程的偵測延遲不隨它
+  成長，故調大 batch 時要重新評估。另外，**推論主迴圈啟動之前**就失敗的路徑（例如
+  建 `YOLODetector` 時拋錯）送不到訊號，追蹤進程要等父進程 SIGTERM；那時還沒有任何
+  `.tmp`，損失的只是關機延遲。**推論進程被
+  SIGKILL 或整機掛掉不在覆蓋範圍**：追蹤進程會卡在 `track_queue.get()` 等不到訊號、
+  由父進程 terminate，而 terminate 不走 Python 的 `except`／`finally`，`.tmp` 會留下。
 
 ## 開發
 

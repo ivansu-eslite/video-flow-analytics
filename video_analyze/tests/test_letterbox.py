@@ -127,9 +127,10 @@ def test_points_round_trip_with_the_same_params_as_boxes(shape):
 def test_unscale_tolerates_empty_tracks():
     """沒有存活軌跡是常態（空畫面），兩種空陣列表示法都不能炸。
 
-    `MultiStreamByteTracker` 在 stream_id 不存在時回傳 1D 的 `np.array([])`，
-    無偵測時回傳 (0, 8)；前者沒有第二個維度，直接切欄會 IndexError。落腳點那側
-    `FootPointEstimator.estimate` 對空軌跡回傳 (0, 2)。
+    `MultiStreamByteTracker` 對「stream_id 不存在」與「當批無存活軌跡」兩種情形都回
+    1D 的 `np.array([])`（後者來自 ultralytics `_format_output` 的空 list comprehension），
+    而有軌跡時是 (0, 8) 的欄位佈局；1D 那個沒有第二個維度，直接切欄會 IndexError。
+    落腳點那側 `FootPointEstimator.estimate` 對空軌跡回傳 (0, 2)。
     """
     for empty in (np.array([]), np.empty((0, 8), dtype=float)):
         unscale_boxes_inplace(empty, 1 / 3, 0.0, 12.0)  # 不應拋出

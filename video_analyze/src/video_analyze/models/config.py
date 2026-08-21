@@ -48,7 +48,7 @@ class ModelConfig(BaseModel):
         batch: 推理批次大小。
         classes: 要保留的偵測類別 id 清單，對應權重的類別定義。預設同時保留
             head 與 fbody：fbody 是追蹤目標，head 只供落腳點推算用（不進
-            tracker，見 `services/inference.py`）。
+            tracker，見 `services/track_worker.py`）。
     """
 
     model_config = ConfigDict(extra="forbid")

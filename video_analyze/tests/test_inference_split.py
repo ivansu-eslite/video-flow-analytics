@@ -4,6 +4,10 @@
 契約——head 若混進去，同一個人會多出一條頭部軌跡，`track_id` 從「一個人」變成
 「一個偵測目標」，下游的不重複訪客與進出人數會直接翻倍，而輸出檔本身完全正常。
 這裡用合成的 `Boxes` 把這條契約釘住。
+
+`split_detections` 隨追蹤一起搬進 `services/track_worker.py`（issue #109）：拆分的
+下一步就是 `tracker.update`，兩者同在追蹤進程。主迴圈實際把拆出來的哪一份交給
+tracker，由 test_track_worker.py 釘住。
 """
 
 import numpy as np
@@ -11,7 +15,7 @@ import torch
 from ultralytics.engine.results import Boxes
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
-from video_analyze.services.inference import split_detections
+from video_analyze.services.track_worker import split_detections
 
 _VBODY_CLASS_ID = 1
 _ORIG_SHAPE = (1080, 1920)

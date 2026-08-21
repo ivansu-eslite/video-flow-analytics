@@ -37,7 +37,12 @@ class FpsMeter:
         self._total_detect_seconds += seconds
 
     def add_tracking_time(self, seconds: float) -> None:
-        """累計一格 `tracker.update` 的耗時。"""
+        """累計一格追蹤側的耗時。
+
+        呼叫端決定口徑：追蹤進程傳的是**該格的全部工作**（裁切、拆分、`tracker.update`、
+        落腳點、反算、累積結果），不只 `tracker.update`——`tracking_fps` 是該進程餘裕
+        評估的分子，只算其中一段會高估餘裕。
+        """
         self._total_track_seconds += seconds
 
     def summary(self, elapsed_seconds: float) -> FpsSummary:

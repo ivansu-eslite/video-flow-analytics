@@ -1,34 +1,22 @@
 import multiprocessing as mp
 import time
-from pathlib import Path
 from queue import Empty
 
-import numpy as np
-from ultralytics.engine.results import Boxes
 from vfa_observability import StructuredLogger
 
-from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
 from video_analyze.models.config import settings
 from video_analyze.services.detector import YOLODetector
-from video_analyze.services.foot_point import FootPointEstimator
 from video_analyze.services.fps_meter import FpsMeter
 from video_analyze.services.frame_ring import FrameRing
-from video_analyze.services.letterbox import (
-    INFER_HEIGHT,
-    INFER_WIDTH,
-    clip_to_content_inplace,
-    content_box,
-    letterbox_params,
-    unscale_boxes_inplace,
-    unscale_points_inplace,
+from video_analyze.services.track_worker import (
+    TRACK_DONE,
+    TRACK_FAILED,
+    to_payload,
 )
-from video_analyze.services.tracker import MultiStreamByteTracker
-from video_analyze.services.tracking_results import TrackingResultCollector
 from video_analyze.services.video_reader import (
     READER_DONE,
     READER_FAILED,
     FramePacket,
-    FrameShape,
 )
 
 logger = StructuredLogger(component="inference")
@@ -38,90 +26,34 @@ _FILL_MAX_WAIT = 0.004
 _FILL_POLL = 0.0005
 
 
-def split_detections(boxes: Boxes) -> tuple[Boxes, np.ndarray]:
-    """把一格的偵測結果拆成「要餵給 tracker 的 fbody 子集」與「head 框座標」。
-
-    head 只用來推算落腳點，**不可進 tracker**：送進去的話同一個人會多出一條頭部
-    軌跡，`track_id` 的語義從「一個人」變成「一個偵測目標」，下游的不重複訪客與
-    進出人數會直接翻倍。
-
-    Args:
-        boxes: 單格的偵測結果，需已在 CPU（`Boxes.cpu()`）。
-
-    Returns:
-        `(fbody 子集, head 框的 [M, 4] xyxy)`；沒有 head 時第二項為 `(0, 4)` 空陣列。
-    """
-    cls = boxes.cls
-    return boxes[cls == FBODY_CLASS_ID], boxes.xyxy[cls == HEAD_CLASS_ID].numpy()
-
-
 class InferencePipeline:
-    """推理進程主迴圈：非阻塞湊批 → YOLO 偵測 → 多路 ByteTrack → 收集結果。"""
+    """推理進程主迴圈：非阻塞湊批 → YOLO 偵測 → 把偵測框送往追蹤進程。
+
+    追蹤、落腳點推算、座標反算與 parquet 落盤都不在這裡——它們搬到獨立進程了
+    （見 `services/track_worker.py`），本類只負責「湊批 → 推論 → 把框丟出去」。
+    """
 
     def __init__(
         self,
         stream_names: list[str],
         detector: YOLODetector,
-        tracker: MultiStreamByteTracker,
-        results_path: Path,
-        frame_shapes: list[FrameShape],
+        track_queue: mp.Queue,
     ):
-        """組裝推理迴圈所需的各個子系統（偵測、追蹤、收集結果）。
+        """組裝推理迴圈所需的各個子系統（偵測、湊批、送往追蹤進程）。
 
         Args:
-            stream_names: 各路攝影機的 `stream_dirname`，索引即 stream_id，
-                同時作為 `TrackingResultCollector` 記錄的 camera_id。
+            stream_names: 各路攝影機的 `stream_dirname`，索引即 stream_id。
             detector: 已載入模型的 YOLO 偵測器（跨批次重用）。
-            tracker: 多路 ByteTrack 狀態管理器（跨批次重用，維持軌跡延續）。
-            results_path: 追蹤結果 parquet 的目標路徑。
-            frame_shapes: 各路的**原始** `FrameShape`，索引即 stream_id；逐列寫進
-                追蹤結果 parquet 供下游做解析度相關的參數換算，同時是本迴圈把框與
-                落腳點映射回原始解析度的依據（見 `services/letterbox.py`）。
-
-        Raises:
-            ValueError: 任一路的 `FrameShape` 剛好等於推論尺寸——那代表呼叫端傳進來
-                的是縮放後的尺寸而非原始解析度，見下方註解。
+            track_queue: 送往追蹤進程的佇列，元素格式見 `track_worker.to_payload`。
         """
-        # 影格在讀取端就縮成推論尺寸了，`frame_shapes` 卻**必須維持原始解析度**：傳成
-        # 推論尺寸的話反算參數會退化成恆等（scale=1、pad=0），框與落腳點靜默停在
-        # 640×384 尺度，而 parquet 的 frame_width 也一起寫成 640——下游 zone／line 只
-        # 檢查這兩欄存在、不檢查值是否合理（ADR-004／ADR-006），幾何全部縮到約 1/3 而
-        # 不報錯。代價是「來源本身真的就是 640×384」會被一起擋掉（那種輸入其實跑得動，
-        # letterbox 會原樣放行、反算是恆等）；推論尺寸是 5:3、不是任何常見的攝影機規格，
-        # 拿誤判換掉一條靜默路徑划算，訊息裡也寫明了這個情況
-        infer_shaped = [
-            index
-            for index, shape in enumerate(frame_shapes)
-            if (shape.height, shape.width) == (INFER_HEIGHT, INFER_WIDTH)
-        ]
-        if infer_shaped:
-            raise ValueError(
-                f"frame_shapes 有 {len(infer_shaped)} 路（stream_id={infer_shaped}）"
-                f"等於推論尺寸 {INFER_WIDTH}×{INFER_HEIGHT}，需傳入各路的原始解析度："
-                "它要寫進 parquet 供下游換算 1080p 基準像素，也是座標反算的依據，"
-                "傳成推論尺寸會讓兩者一起靜默出錯。若這幾路的來源**真的**是 "
-                f"{INFER_WIDTH}×{INFER_HEIGHT}（不是傳錯值），請改這道檢查——"
-                "那種輸入本身跑得動。"
-            )
         self.stream_names = stream_names
-        self.frame_shapes = frame_shapes
-        # 每路一組 (scale, pad_x, pad_y) 與一個內容區，都跟著 stream_id 走
-        self._unscale_params = [
-            letterbox_params(shape.height, shape.width) for shape in frame_shapes
-        ]
-        self._content_boxes = [
-            content_box(shape.height, shape.width) for shape in frame_shapes
-        ]
         self.num_streams = len(stream_names)
         self.finished_streams = set()
         # 記住上一次湊批的起點，下一批從下一路開始繞一圈，避免固定從 0 起跑讓單一路
         # 供得上時就一路取到滿批、其餘路永遠輪不到（issue #100）
         self._next_stream_start = 0
         self.detector = detector
-        self.tracker = tracker
-        # 跨批次重用：它記著每條軌跡上一次成功推算的落腳點偏移量
-        self.foot_estimator = FootPointEstimator(settings.foot_point.method)
-        self.collector = TrackingResultCollector(results_path)
+        self.track_queue = track_queue
         self.fps_meter = FpsMeter()
         # ultralytics 對 in-memory list source 一次 forward 整個 list（batch=
         # 只對檔案來源的 LoadImagesAndVideos 有效），故單次 forward 實際批次為
@@ -199,10 +131,13 @@ class InferencePipeline:
         free_queues: list[mp.Queue],
         rings: list[FrameRing],
     ) -> None:
-        """執行推理主迴圈直到所有路都讀完，並負責結果的落盤/清理。
+        """執行推理主迴圈直到所有路都讀完，並在結束或例外時通知追蹤進程。
 
-        成功跑完會 `collector.save()`（原子性 rename 成正式 parquet）；任何
-        例外都會先 `collector.discard()` 清理不完整輸出，再重新拋出（fail-loud）。
+        落盤不在這裡：正常跑完送 `TRACK_DONE`，追蹤進程收到才 `save()`；中途例外送
+        `TRACK_FAILED` 讓它清掉不完整的暫存檔，再把例外重新拋出（fail-loud）。
+        **本函式內的例外都送得到訊號**；在此之前就失敗的路徑（例如
+        `run_inference_pipeline` 建 `YOLODetector` 時拋錯）送不到，追蹤進程要等父進程
+        SIGTERM——那時還沒有任何 `.tmp`，損失的只是關機延遲。
 
         Args:
             data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
@@ -214,19 +149,23 @@ class InferencePipeline:
             RuntimeError: 任一路讀取進程回報 `READER_FAILED`。
             BaseException: 其他子系統拋出的例外，會原樣重新拋出。
         """
-        # `frame_ring.RING_SLOTS` 的推導式已保證這條成立，所以這裡防的不是「有人調
-        # batch」，而是日後兩處推導公式漂移：一批會同時扣住同一路最多 _target_batch
-        # 個 slot 直到推論結束，總數不足其 2 倍時 reader 在整個推論期間都拿不到空位、
-        # 完全停擺，而且不會有任何錯誤訊息
-        if any(ring.num_slots < 2 * self._target_batch for ring in rings):
-            raise ValueError(
-                f"環形緩衝格數需至少為單次批次（{self._target_batch}）的 2 倍，"
-                f"實得 {[ring.num_slots for ring in rings]}；"
-                "推論完才歸還 slot 的設計下，格數不足會讓讀取進程停擺。"
-            )
         logger.info("模組化推理流程啟動...")
         start = time.perf_counter()
         try:
+            # 這道檢查放在 try 內而非之前：追蹤進程此時已經起來、等在 queue 上，不送
+            # TRACK_FAILED 的話它要等到被父進程 SIGTERM 才結束（此時還沒有 `.tmp`，
+            # 損失的只是關機延遲，但沒理由讓一條已經有訊號的路徑走不到）。
+            #
+            # `frame_ring.RING_SLOTS` 的推導式已保證這條成立，所以這裡防的不是「有人調
+            # batch」，而是日後兩處推導公式漂移：一批會同時扣住同一路最多 _target_batch
+            # 個 slot 直到推論結束，總數不足其 2 倍時 reader 在整個推論期間都拿不到空位、
+            # 完全停擺，而且不會有任何錯誤訊息
+            if any(ring.num_slots < 2 * self._target_batch for ring in rings):
+                raise ValueError(
+                    f"環形緩衝格數需至少為單次批次（{self._target_batch}）的 2 倍，"
+                    f"實得 {[ring.num_slots for ring in rings]}；"
+                    "推論完才歸還 slot 的設計下，格數不足會讓讀取進程停擺。"
+                )
             while len(self.finished_streams) < self.num_streams:
                 batch_packets, batch_stream_ids, held_slots = self._collect_batch(
                     data_queues, rings
@@ -244,17 +183,18 @@ class InferencePipeline:
                 # 可以放行了。歸還點卡在這裡的三個方向：
                 # - 不能更早：predict 的前處理還在讀共享記憶體，早還會讓 reader 邊寫
                 #   邊被讀。
-                # - 不能更晚：下面的逐格 tracking 迴圈在 T4 上一批 16 格要數十 ms，
-                #   拖過去只是白讓 reader 空等。
+                # - 不能更晚：追蹤搬進獨立進程後這裡只剩「把框丟進 queue」（每格幾十
+                #   微秒），拖過去的代價比從前小，但方向不變——歸還越晚，reader 空等
+                #   越久。
                 # - `results[i].orig_img` 就是這些 slot 的 view（ultralytics
                 #   `engine/results.py` 是 `self.orig_img = orig_img`，沒有 `.copy()`），
                 #   歸還之後其內容不再可信。本迴圈不使用該欄位，但這是**本版消費路徑
                 #   的性質，不是 ultralytics 的保證**：前處理已把像素複製兩次、後處理
-                #   只取 `shape`、BYTETracker 收到的 `img` 是 None（`img` 只有 BOTSORT
-                #   的 gmc 分支會用）、結果收集只用 `frame_index` 與 `timestamp`。日後
-                #   開 `verbose=True`、呼叫 `plot()` 或升級 ultralytics 都可能讓
-                #   `orig_img` 重新被讀到，屆時要改回取副本，見 ADR-010；歸還後把該
-                #   欄位一併清成 None，就是為了讓那種情況當場炸出來。
+                #   只取 `shape`、送往追蹤進程的 payload 只取 `boxes.data`（見
+                #   `track_worker.to_payload`，影格不跨進程）。日後開 `verbose=True`、
+                #   呼叫 `plot()` 或升級 ultralytics 都可能讓 `orig_img` 重新被讀到，
+                #   屆時要改回取副本，見 ADR-010；歸還後把該欄位一併清成 None，就是
+                #   為了讓那種情況當場炸出來。
                 # - **ultralytics 內部還留著同一批 view 的別名**：`predictor.dataset.im0`
                 #   與 `predictor.batch[1]` 存的就是我們傳進去的 list（`_single_check`
                 #   對 numpy 原樣回傳），predictor 掛在 model 上、要到下一次 predict 才
@@ -278,50 +218,34 @@ class InferencePipeline:
                     result.orig_img = None
                 for held_stream_id, held_slot in held_slots:
                     free_queues[held_stream_id].put(held_slot)
+                # 送 payload 排在歸還之後：`to_payload` 取的是 `results[idx].boxes`
+                # （推論輸出，不是影格），與 slot 無關，歸還之後仍可取
                 for idx, stream_id in enumerate(batch_stream_ids):
                     packet = batch_packets[idx]
-                    detections = results[idx].boxes.cpu()
-                    # 先裁進填充帶以內，再拆分：改動前 ultralytics 在反算座標時就把框
-                    # 裁進畫面了，少了這一步，4K 的框會在反算時外擴最多 8 px（每個推論
-                    # 像素放大 6 倍），而 head 配對與 tracker 也會看到與改動前不同的框
-                    clip_to_content_inplace(
-                        detections.data, self._content_boxes[stream_id]
+                    # 追蹤、落腳點推算、座標反算與寫 parquet 都在追蹤進程做（實測追蹤
+                    # 每格 1.81 ms、佔本進程 8.4%，而它與下一批的 GPU 推論之間沒有資料
+                    # 相依）。這裡只把該格的全部偵測框丟出去，含 head——拆分也在那邊做。
+                    self.track_queue.put(
+                        to_payload(
+                            stream_id,
+                            results[idx].boxes,
+                            packet.frame_index,
+                            packet.timestamp,
+                        )
                     )
-                    fbody_boxes, heads = split_detections(detections)
-                    track_start = time.perf_counter()
-                    tracks = self.tracker.update(stream_id, fbody_boxes)
-                    self.fps_meter.add_tracking_time(time.perf_counter() - track_start)
-                    # 配對用 tracker 輸出的 Kalman 平滑框，不用 detection 框：落腳點
-                    # 才與同列寫進 parquet 的 bbox 自洽（tracker 回傳的 idx 也不是
-                    # 傳入陣列的索引，無法拿來回填，見 tracker.py 的 Returns 說明）
-                    foot_points = self.foot_estimator.estimate(stream_id, tracks, heads)
-                    # 反算的位置只能在這裡：影格在讀取端就縮過，YOLO 與 tracker 全程在
-                    # 推論尺度上工作，寫出去的座標卻必須是原始解析度（下游拿它跟攝影機
-                    # 幾何比對）。**不可以移到 `estimate` 之前**——`heads` 是這裡唯一沒
-                    # 反算的陣列，先把 `tracks` 換算回原始解析度會讓兩者尺度不一致，
-                    # `_match_head` 全數回 None、每列退回框底邊中點，而列數、track_id、
-                    # bbox 全部正常（ADR-009 要修掉的偏移就這樣靜默回來）。在推論尺度上
-                    # 配對是安全的：三個判準（中心落在框內、面積比、主軸傾角）在等比縮放
-                    # ＋等量平移下都不變
-                    unscale_boxes_inplace(tracks, *self._unscale_params[stream_id])
-                    unscale_points_inplace(
-                        foot_points, *self._unscale_params[stream_id]
-                    )
-                    shape = self.frame_shapes[stream_id]
-                    self.collector.add(
-                        camera_id=self.stream_names[stream_id],
-                        packet=packet,
-                        tracks=tracks,
-                        foot_points=foot_points,
-                        frame_width=shape.width,
-                        frame_height=shape.height,
-                    )
+                    # 本進程的口徑是「該路的一格已推論完並送出」，不是「一格已完整處理
+                    # 完」（那件事只有追蹤進程知道，它自己也記一份）。這個計數同時是
+                    # detection_fps 與 overall_fps 的分子，拿掉會讓那兩個數字變成 0
                     self.fps_meter.record(self.stream_names[stream_id])
-            # 在 save 之前印，數字只反映純處理，且即使 save 失敗仍看得到
             self._log_fps_summary(time.perf_counter() - start)
-            self.collector.save()  # 僅全部串流跑完才原子性改名成正式檔名
+            # 落盤改由追蹤進程負責（parquet 的內容都在那邊產生）。這個訊號是它唯一的
+            # 正常結束途徑，不送的話那邊會一直等在 queue 上
+            self.track_queue.put(TRACK_DONE)
         except BaseException:
-            self.collector.discard()  # fail-loud：不留下不完整結果
+            # 本進程已經沒有 collector 可以 discard 了，改用訊號請追蹤進程代為清理：
+            # 不送的話它會卡在 queue.get() 直到被父進程 terminate，而 terminate 不走
+            # Python 的 except／finally，`.tmp` 暫存檔會留在輸出目錄
+            self.track_queue.put(TRACK_FAILED)
             raise
 
     def _log_fps_summary(self, elapsed_seconds: float) -> None:
@@ -340,8 +264,9 @@ class InferencePipeline:
             elapsed_seconds=round(summary.elapsed_seconds, 1),
             overall_fps=round(summary.overall_fps, 2),
         )
+        # 不印 tracking_fps：追蹤已搬到獨立進程，本進程量不到它，印出來永遠是 0，
+        # 那是誤導而不是缺值。該進程結束時會自己印一行（見 track_worker.py）
         logger.info(
             "FPS 階段",
             detection_fps=round(summary.detection_fps, 2),
-            tracking_fps=round(summary.tracking_fps, 2),
         )

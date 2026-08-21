@@ -23,7 +23,6 @@ import pytest
 from video_analyze.config.constants import TRACKING_RESULTS_SCHEMA
 from video_analyze.services import tracking_results as tr
 from video_analyze.services.tracking_results import TrackingResultCollector
-from video_analyze.services.video_reader import FramePacket
 
 _TAIPEI = ZoneInfo("Asia/Taipei")
 _BASE = datetime.datetime(2026, 5, 1, 9, 0, tzinfo=_TAIPEI)
@@ -32,12 +31,8 @@ _BASE = datetime.datetime(2026, 5, 1, 9, 0, tzinfo=_TAIPEI)
 _WIDTH, _HEIGHT = 1920, 1080
 
 
-def _packet(frame_index: int) -> FramePacket:
-    return FramePacket(
-        frame=np.zeros((4, 4, 3), dtype=np.uint8),
-        frame_index=frame_index,
-        timestamp=_BASE + datetime.timedelta(seconds=frame_index),
-    )
+def _stamp(frame_index: int) -> datetime.datetime:
+    return _BASE + datetime.timedelta(seconds=frame_index)
 
 
 def _tracks(*rows: tuple[float, float, float, float, int]) -> np.ndarray:
@@ -60,7 +55,8 @@ def test_add_writes_all_schema_columns_with_expected_values(tmp_path):
 
     collector.add(
         camera_id="loc_cam001",
-        packet=_packet(7),
+        frame_index=7,
+        timestamp=_stamp(7),
         tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1), (50.0, 60.0, 70.0, 80.0, 2)),
         foot_points=_feet((23.0, 41.0), (64.0, 77.0)),
         frame_width=_WIDTH,
@@ -110,7 +106,8 @@ def test_add_rejects_foot_points_of_mismatched_length():
     with pytest.raises(ValueError, match="逐列對應"):
         collector.add(
             camera_id="loc_cam001",
-            packet=_packet(0),
+            frame_index=0,
+            timestamp=_stamp(0),
             tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1), (50.0, 60.0, 70.0, 80.0, 2)),
             foot_points=_feet((23.0, 41.0)),
             frame_width=_WIDTH,
@@ -125,7 +122,8 @@ def test_add_keeps_each_camera_own_frame_size(tmp_path):
 
     collector.add(
         camera_id="loc_cam001",
-        packet=_packet(0),
+        frame_index=0,
+        timestamp=_stamp(0),
         tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
         foot_points=_feet((23.0, 41.0)),
         frame_width=1920,
@@ -133,7 +131,8 @@ def test_add_keeps_each_camera_own_frame_size(tmp_path):
     )
     collector.add(
         camera_id="loc_cam002",
-        packet=_packet(0),
+        frame_index=0,
+        timestamp=_stamp(0),
         tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
         foot_points=_feet((23.0, 41.0)),
         frame_width=3840,
@@ -155,7 +154,8 @@ def test_add_with_empty_tracks_adds_no_rows(tmp_path):
 
     collector.add(
         camera_id="loc_cam001",
-        packet=_packet(0),
+        frame_index=0,
+        timestamp=_stamp(0),
         tracks=np.empty((0, 5), dtype=float),
         foot_points=np.empty((0, 2), dtype=float),
         frame_width=_WIDTH,
@@ -176,7 +176,8 @@ def test_rows_survive_flush_boundary(tmp_path, monkeypatch):
     for i in range(7):
         collector.add(
             camera_id="loc_cam001",
-            packet=_packet(i),
+            frame_index=i,
+            timestamp=_stamp(i),
             tracks=_tracks((float(i), 20.0, 30.0, 40.0, i)),
             foot_points=_feet((float(i) + 3.0, 41.0)),
             frame_width=_WIDTH,
@@ -210,7 +211,8 @@ def test_results_path_appears_only_after_save(tmp_path):
 
     collector.add(
         camera_id="loc_cam001",
-        packet=_packet(0),
+        frame_index=0,
+        timestamp=_stamp(0),
         tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
         foot_points=_feet((23.0, 41.0)),
         frame_width=_WIDTH,
@@ -232,7 +234,8 @@ def test_discard_leaves_no_partial_output(tmp_path):
 
     collector.add(
         camera_id="loc_cam001",
-        packet=_packet(0),
+        frame_index=0,
+        timestamp=_stamp(0),
         tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
         foot_points=_feet((23.0, 41.0)),
         frame_width=_WIDTH,

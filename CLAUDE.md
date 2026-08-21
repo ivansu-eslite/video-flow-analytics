@@ -85,9 +85,10 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
   `zone_mapping` 會不會直接崩；換算與檢查的位置、以及為何不改用「人形肩寬百分比」當尺規，
   見 ADR-004。
 - 影格縮放移到讀取端之後（issue #108），`frame_shapes` 不再用來配置環形緩衝（緩衝改照
-  推論尺寸 640×384 配置），但**仍必須是原始解析度**：除了寫進這兩欄，它也是推論端把框與
-  落腳點映射回原始解析度的參數來源。傳成推論尺寸會讓兩者一起靜默出錯（座標停在推論尺度、
-  `frame_width` 寫成 640），故 `InferencePipeline.__init__` 直接擋下這個值。
+  推論尺寸 640×384 配置），但**仍必須是原始解析度**：除了寫進這兩欄，它也是把框與落腳點
+  映射回原始解析度的參數來源。傳成推論尺寸會讓兩者一起靜默出錯（座標停在推論尺度、
+  `frame_width` 寫成 640），故 `run_track_worker` 直接擋下這個值——追蹤與落盤移出推論
+  進程後（issue #109），這兩個消費端都在追蹤進程，該檢查也跟著搬過去。
 
 ### 落腳點是資料欄位，不是各包各自算的公式（跨套件硬性契約）
 
@@ -99,7 +100,8 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 - **只能在上游算**：推算需要 head 框，而 head **不進 tracker**——送進去的話同一個人會多
   出一條頭部軌跡，`track_id` 的語義從「一個人」變成「一個偵測目標」，下游的不重複訪客與
   進出人數直接翻倍，而輸出檔本身完全正常。偵測 `classes` 因此是 `[0, 2]`，但
-  `services/inference.py` 只把 fbody 子集餵給 ByteTracker。
+  `services/track_worker.py` 只把 fbody 子集餵給 ByteTracker（issue #109 之前在
+  `services/inference.py`）。
 - 缺這兩欄的舊 parquet 被 `line_counting` 與 `zone_mapping` 兩包 fail loud 擋下，與影像
   尺寸欄位同一道檢查。`[foot_point].method = "bbox_bottom"` 可切回舊定義；此時
   `classes` 不必含 head，但 `method = "head"` 卻少了 head 會直接拋錯（否則每列都退回
