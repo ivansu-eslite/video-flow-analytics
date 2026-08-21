@@ -15,7 +15,7 @@ from video_analyze.services.frame_ring import (
 )
 from video_analyze.services.inference import InferencePipeline
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
-from video_analyze.services.track_worker import run_track_worker
+from video_analyze.services.track_worker import TRACK_QUEUE_SLOTS, run_track_worker
 from video_analyze.services.video_reader import (
     FrameShape,
     SegmentInfo,
@@ -169,8 +169,11 @@ def analyze_daily(
             raise RuntimeError(f"子進程異常結束（{detail}），分析已中止。")
 
     # 追蹤進程與推論進程之間只走這一條 queue，傳的是偵測框（每格幾十個框、幾 KB）
-    # 而非影格——影格在推論完成後就沒有用途（slot 當下就歸還了，見 ADR-010）
-    track_queue: mp.Queue = mp.Queue()
+    # 而非影格——影格在推論完成後就沒有用途（slot 當下就歸還了，見 ADR-010）。
+    # **上限不可省**：影格側的背壓只覆蓋到推論為止，沒有這個上限，追蹤一落後 payload 就
+    # 無上限堆在推論進程，而 TRACK_FAILED 也會晚到父進程 terminate 之後（見
+    # `track_worker.TRACK_QUEUE_SLOTS`）
+    track_queue: mp.Queue = mp.Queue(maxsize=TRACK_QUEUE_SLOTS)
 
     try:
         track_proc = mp.Process(

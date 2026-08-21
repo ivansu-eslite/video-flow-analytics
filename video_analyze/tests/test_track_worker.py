@@ -35,6 +35,7 @@ import torch
 from ultralytics.engine.results import Boxes
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
+from video_analyze.models.config import settings
 from video_analyze.services import track_worker as tw
 from video_analyze.services import tracking_results as tr
 from video_analyze.services.letterbox import (
@@ -45,6 +46,7 @@ from video_analyze.services.letterbox import (
 from video_analyze.services.track_worker import (
     TRACK_DONE,
     TRACK_FAILED,
+    TRACK_QUEUE_SLOTS,
     run_track_worker,
     to_payload,
 )
@@ -333,3 +335,21 @@ def test_payload_round_trip_preserves_confidence_and_class():
         restored.xyxy.numpy(), _FRAME_0_DETECTIONS.xyxy.numpy()
     )
     assert restored.orig_shape == _INFER_SHAPE
+
+
+def test_track_queue_capacity_is_a_few_batches_of_slack():
+    """佇列上限是背壓，不是調校參數：沒有它，追蹤一落後 payload 就無上限堆在推論進程，
+    而 `TRACK_FAILED` 也會晚到父進程 terminate 之後（見 `TRACK_QUEUE_SLOTS` 的說明）。
+
+    釘住「以單次推論批次為單位的鬆弛」這個口徑——單次批次是 `settings.model.batch` 的
+    2 倍（ultralytics 對 in-memory list source 一次 forward 整個 list），只調 batch 而
+    沒同步調這裡，鬆弛會不足一批而讓兩個進程互等。
+    """
+    single_batch = settings.model.batch * 2
+
+    assert TRACK_QUEUE_SLOTS % single_batch == 0
+    slack_batches = TRACK_QUEUE_SLOTS // single_batch
+    assert 2 <= slack_batches <= 8, (
+        f"鬆弛 {slack_batches} 批：太少會讓正常抖動變成互等，太多等於把 backlog 換個"
+        "地方堆，還會讓 TRACK_FAILED 的送達延遲超過父進程的 terminate 時限"
+    )
