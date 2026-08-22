@@ -227,8 +227,8 @@ class YOLODetector:
     Attributes:
         model: 已載入引擎的 `ultralytics.YOLO` 實例。
         max_batch: 引擎的最大批次（dynamic 引擎 optimization profile 的 batch 上限）。
-            由 `services/inference.py` 拿去跟實際批次比對——那個 ×2 的推導在那一側，
-            這裡只負責把引擎自己聲明的上限提供出去。
+            由 `services/inference.py` 拿去跟單次批次比對，兩者同尺度、設定值沒有
+            隱含倍數；這裡只負責把引擎自己聲明的上限提供出去。
     """
 
     def __init__(self):
