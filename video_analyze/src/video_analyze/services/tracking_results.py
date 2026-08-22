@@ -86,8 +86,11 @@ def claim_tmp_slot(results_path: Path) -> int:
         持有 `flock` 的 file descriptor。
 
     Raises:
-        RuntimeError: 這條路徑的暫存檔正被另一個執行中的進程持有，或連續數輪都在拿到鎖
-            的當下發現檔名已經指向別的 inode。
+        RuntimeError: 這條路徑的暫存檔正被另一個進程持有，或連續數輪都在拿到鎖的當下
+            發現檔名已經指向別的 inode。
+        OSError: 開檔、上鎖或 stat 本身失敗（例如 NFS 回 `ENOLCK`、權限不足）。這類
+            錯誤原樣往外拋，不轉成 `RuntimeError`——它們與「有人正在寫」是不同的事，
+            蓋掉會讓排查方向偏掉。
     """
     tmp_path = tmp_path_for(results_path)
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,15 +98,24 @@ def claim_tmp_slot(results_path: Path) -> int:
         fd = os.open(tmp_path, os.O_RDWR | os.O_CREAT, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            claimed = _is_file_at(fd, tmp_path)
         except BlockingIOError as exc:
             os.close(fd)
             raise RuntimeError(
-                f"暫存檔 {tmp_path} 正被另一個執行中的進程持有，本次執行中止。"
+                f"暫存檔 {tmp_path} 正被另一個進程持有，本次執行中止。"
                 "同一條輸出路徑（同一個 bucket 的同一天）不能有兩個執行同時寫——"
-                "兩邊會交錯寫進同一個暫存檔，再各自 rename 成正式檔名。"
-                "要並行請分開 bucket 或分開日期。"
+                "兩邊會交錯寫進同一個暫存檔，再各自 rename 成正式檔名；要並行請分開"
+                "bucket 或分開日期。若確定沒有別的執行在跑，持有者可能是上一次留下的"
+                "孤兒追蹤進程（父進程被 SIGKILL 之後它收不到任何訊號，會一直等在"
+                "track_queue.get() 上並占住這把鎖）："
+                "以 `pgrep -af video_analyze` 找出來收掉之後再重跑。"
             ) from exc
-        if _is_file_at(fd, tmp_path):
+        except BaseException:
+            # flock 的其他失敗（例如 NFS 上的 ENOLCK）與 _is_file_at 的 stat 失敗都原樣
+            # 往外拋，但 fd 不能跟著漏掉
+            os.close(fd)
+            raise
+        if claimed:
             break
         os.close(fd)  # 等鎖的期間這個 inode 已經不叫 `.tmp` 了，鎖到的是別人的東西
     else:

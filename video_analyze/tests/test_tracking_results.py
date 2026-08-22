@@ -313,7 +313,7 @@ def test_claim_is_refused_while_another_run_holds_the_tmp_file(tmp_path):
     fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     try:
-        with pytest.raises(RuntimeError, match="正被另一個執行中的進程持有"):
+        with pytest.raises(RuntimeError, match="正被另一個進程持有"):
             claim_tmp_slot(results_path)
         assert in_flight.stat().st_size == 4096
     finally:
