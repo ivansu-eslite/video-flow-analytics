@@ -243,6 +243,7 @@ class TrackingResultCollector:
         self._flush()
         if self._writer is not None:
             self._writer.close()
+            self._require_own_tmp()
             self._tmp_path.replace(self._results_path)
         else:
             # 全天沒有任何追蹤結果，仍要寫出一個空的 parquet（維持欄位 schema）
@@ -260,10 +261,37 @@ class TrackingResultCollector:
         )
 
     def discard(self) -> None:
-        """中途例外時呼叫：關閉暫存檔的 writer 並刪除暫存檔，不留下不完整的輸出。"""
-        if self._writer is not None:
-            self._writer.close()
-        self._remove_tmp()
+        """中途例外時呼叫：關閉暫存檔的 writer 並刪除暫存檔，不留下不完整的輸出。
+
+        關 writer 與刪檔是 `try`／`finally`：`close()` 會寫 parquet 的 footer，磁碟滿的
+        時候拋錯，而那正是最需要把半成品收掉的時候——不隔開的話刪檔整段被跳過。
+        """
+        try:
+            if self._writer is not None:
+                self._writer.close()
+        finally:
+            self._remove_tmp()
+
+    def _require_own_tmp(self) -> None:
+        """改名成正式檔名之前確認暫存檔還是自己那一份，不是的話 fail loud。
+
+        `replace()` 依路徑動作，而這個路徑此刻可能已經是別人的檔（有人手動 `rm` 掉暫存檔
+        之後另一個執行接手）。不檔的話會把對方**寫到一半**的內容改名成正式檔名，log 還
+        照樣印「追蹤結果已寫入 rows=N」，下游要到 `pl.read_parquet` 才以「must end with
+        PAR1」崩在離原因很遠的地方。
+
+        走到這裡代表本次的結果已經跟著被刪掉的 inode 一起沒了，救不回來，只能明講。
+
+        Raises:
+            RuntimeError: 暫存檔已不是本次執行寫的那一份。
+        """
+        if _identity_of(self._tmp_path) == self._tmp_identity:
+            return
+        raise RuntimeError(
+            f"暫存檔 {self._tmp_path} 已不是本次執行寫的那一份（被刪掉或換成別的檔），"
+            "不能改名成正式檔名——那會把別人寫到一半的內容當成本次結果。"
+            "本次的追蹤結果已隨著原本的檔案一起遺失，請重跑。"
+        )
 
     def _remove_tmp(self) -> None:
         """刪掉本次執行的暫存檔；這個路徑此刻若是別份（inode 不同）就一個字節都不動。

@@ -295,6 +295,9 @@ def run_track_worker(
     # tracker、落腳點推算器）被 SIGTERM 打斷都得走得到清理，否則那個窗口內收到訊號
     # 就會留下殘檔
     previous_sigterm = signal.signal(signal.SIGTERM, _raise_on_sigterm)
+    # SIGINT 不改處置（Ctrl+C 照常以 KeyboardInterrupt 進到清理），只記下來，清理期間
+    # 要連它一起擋掉
+    previous_sigint = signal.getsignal(signal.SIGINT)
     # 兩者都在 try 內才建立，故先給 None：認領失敗代表那個 `.tmp` 屬於另一個**執行中**
     # 的進程，此時 `collector` 還是 None，`except` 不會去 `discard()` 掉別人正在寫的檔
     lock_fd: int | None = None
@@ -360,11 +363,13 @@ def run_track_worker(
         _log_fps_summary(fps_meter, elapsed)
         collector.save()  # 僅推論進程正常送完才原子性改名成正式檔名
     except BaseException:
-        # 清理期間不再受理 SIGTERM。Ctrl+C 走的是 process group 的 SIGINT，本進程進到這裡
-        # 開始 discard() 的同時，父進程也在 `_terminate_all` 送 SIGTERM——handler 會在
-        # discard() 內部再拋一次例外，落在 `_writer.close()` 之後、`unlink()` 之前的話，
-        # 整天的 `.tmp` 就留下了，而外層這個 except 已經進來過、不會再跑一次
+        # 清理期間不再受理終止訊號。Ctrl+C 走的是 process group 的 SIGINT，本進程進到
+        # 這裡開始 discard() 的同時，父進程也在 `_terminate_all` 送 SIGTERM，而使用者
+        # 連按兩次 Ctrl+C 又會再來一個 SIGINT——任何一個在 `_writer.close()` 之後、
+        # `unlink()` 之前打進來，整天的 `.tmp` 就留下了，而外層這個 except 已經進來過、
+        # 不會再跑一次。清理很短（關 writer 再刪檔），真的卡住仍有父進程的 SIGKILL 收尾
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         if collector is not None:
             collector.discard()  # fail-loud：不留下不完整結果
         raise
@@ -373,6 +378,7 @@ def run_track_worker(
         # 測試中 in-process 呼叫本函式時不留下副作用；關 fd 則是釋放 flock——正式執行
         # 時進程接著就結束了，kernel 也會做同一件事
         signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
         if lock_fd is not None:
             os.close(lock_fd)
 

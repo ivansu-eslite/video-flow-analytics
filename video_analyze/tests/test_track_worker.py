@@ -660,3 +660,48 @@ def test_sigterm_during_cleanup_does_not_interrupt_it(tmp_path, monkeypatch):
 
     assert not tmp_file.exists(), "清理被 SIGTERM 打斷，暫存檔留下來了"
     assert not results_path.exists()
+
+
+def test_a_second_ctrl_c_during_cleanup_does_not_interrupt_it(tmp_path, monkeypatch):
+    """連按兩次 Ctrl+C 也不能把清理打斷。
+
+    第一次 Ctrl+C 讓本進程以 `KeyboardInterrupt` 進到清理，第二次又是一個 SIGINT；只擋
+    SIGTERM 的話它會在 `discard()` 內部打斷，落在 `_writer.close()` 之後、`unlink()`
+    之前就留下整天的暫存檔。
+    """
+    monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
+    _install_recording_tracker(monkeypatch)
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    real_discard = tr.TrackingResultCollector.discard
+
+    def _discard_interrupted_by_sigint(self) -> None:
+        os.kill(os.getpid(), signal.SIGINT)  # 使用者又按了一次 Ctrl+C
+        real_discard(self)
+
+    monkeypatch.setattr(
+        tr.TrackingResultCollector, "discard", _discard_interrupted_by_sigint
+    )
+    track_queue: queue.Queue = queue.Queue()
+    track_queue.put(
+        to_payload(0, Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE), 0, _BASE)
+    )
+    track_queue.put(TRACK_FAILED)
+
+    try:
+        with pytest.raises(RuntimeError, match="推論進程中途例外"):
+            run_track_worker(
+                track_queue=track_queue,
+                stream_names=["loc_cam001"],
+                frame_shapes=[_SHAPE],
+                results_path=results_path,
+            )
+    except KeyboardInterrupt:
+        # 沒擋 SIGINT 的話它會一路逸出到測試外，而 pytest 把 KeyboardInterrupt 當成
+        # 「使用者中止」、整個 session 停掉——那看起來像中斷而不是測試失敗
+        pytest.fail("第二次 Ctrl+C 打斷了清理：KeyboardInterrupt 逸出到 run_track_worker 之外")
+
+    # 離開時 SIGINT 的處置要還原，否則之後整個進程都不再理 Ctrl+C
+    assert signal.getsignal(signal.SIGINT) is not signal.SIG_IGN
+    assert not tmp_file.exists(), "清理被第二次 Ctrl+C 打斷，暫存檔留下來了"
+    assert not results_path.exists()

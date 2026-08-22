@@ -408,3 +408,63 @@ def test_discard_leaves_a_different_file_at_the_same_path_alone(tmp_path):
     collector.discard()
 
     assert tmp_file.stat().st_size == 128
+
+
+def test_save_refuses_to_rename_a_file_it_did_not_write(tmp_path):
+    """`replace()` 依路徑動作，而這個路徑此刻可能已經是別人的檔——那時要 fail loud。
+
+    不擋的話會把對方**寫到一半**的內容改名成正式檔名，log 還照樣印「追蹤結果已寫入
+    rows=N」，下游要到 `pl.read_parquet` 才以「must end with PAR1」崩在離原因很遠的地方。
+    """
+    results_path = tmp_path / "tracking_results.parquet"
+    tmp_file = tmp_path_for(results_path)
+    collector = TrackingResultCollector(results_path)
+    collector.add(
+        camera_id="loc_cam001",
+        frame_index=0,
+        timestamp=_stamp(0),
+        tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
+        foot_points=_feet((23.0, 41.0)),
+        frame_width=_WIDTH,
+        frame_height=_HEIGHT,
+    )
+    collector._flush()
+    tmp_file.unlink()  # 運維人員手動清掉
+    tmp_file.write_bytes(b"y" * 21)  # 另一個執行接手，正在寫的半成品
+
+    with pytest.raises(RuntimeError, match="已不是本次執行寫的那一份"):
+        collector.save()
+
+    assert not results_path.exists()
+    assert tmp_file.stat().st_size == 21  # 對方的檔還在原地，沒被改名
+
+
+def test_discard_removes_the_tmp_even_if_closing_the_writer_fails(tmp_path):
+    """`close()` 寫 parquet footer 時失敗（磁碟滿）正是最需要收掉半成品的時候。
+
+    不隔開的話刪檔整段被跳過，而「不留殘檔」是這次改動立起來的不變量。
+    """
+    results_path = tmp_path / "tracking_results.parquet"
+    tmp_file = tmp_path_for(results_path)
+    collector = TrackingResultCollector(results_path)
+    collector.add(
+        camera_id="loc_cam001",
+        frame_index=0,
+        timestamp=_stamp(0),
+        tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
+        foot_points=_feet((23.0, 41.0)),
+        frame_width=_WIDTH,
+        frame_height=_HEIGHT,
+    )
+    collector._flush()
+
+    class _FailingClose:
+        def close(self) -> None:
+            raise OSError(28, "No space left on device")
+
+    collector._writer = _FailingClose()
+
+    with pytest.raises(OSError, match="No space left"):
+        collector.discard()
+
+    assert not tmp_file.exists()
