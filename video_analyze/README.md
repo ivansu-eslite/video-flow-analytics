@@ -373,9 +373,13 @@ zone 與 line 幾何都不會被驗證。
   （compute capability／TensorRT 版本／TensorRT wheel 變體／來源權重 hash，四項各自拋錯、
   訊息指出是哪一項；驅動版本與 torch 的 CUDA 建置版本只記 warning——它們不在 TensorRT 對
   引擎的約束裡）、引擎不是 FP16 建的。沒有 CUDA 也是中止而非 fallback CPU。
+- **引擎不是 dynamic 建的 → 拋 `ValueError`**。靜態引擎會通過其餘全部載入檢查，然後在
+  第一個沒湊滿的批次上被 ultralytics 的 assert 擋下（訊息看不出原因）——而湊不滿批是
+  常態：T4 上實測一次跑完出現 16 種不同的批次大小。
 - **實際進入推論的張量形狀不是 640×384 → 拋 `ValueError`**。讀的是 TensorRT backend 自己
-  的 binding。這一項取代了 `_validate_imgsz`：dynamic 引擎不套用 metadata 的 `imgsz`，
-  照抄那個檢查會得到一個看起來有在驗、其實驗不到的檢查（見 ADR-011）。
+  的 binding。這一項取代了 `_validate_imgsz`：dynamic 引擎不套用 metadata 的 `imgsz`
+  （`predictor.py` 只在 backend 不是 dynamic 時才套用），照抄那個檢查會得到一個看起來
+  有在驗、其實驗不到的檢查（見 ADR-011）。
 - **單次批次超過引擎綁的最大批次 → 拋 `ValueError`**（`services/inference.py`，在主迴圈的
   try 內，送得出 `TRACK_FAILED`）。
 - **`frame_shapes` 傳成推論尺寸 → `run_track_worker` 拋 `ValueError`**。那代表

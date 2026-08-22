@@ -20,6 +20,7 @@ from video_analyze.services.detector import (
     _log_engine_metadata,
     _require_engine_file,
     _validate_classes,
+    _validate_dynamic,
     _validate_precision,
 )
 from video_analyze.services.engine_metadata import (
@@ -198,14 +199,36 @@ def test_infer_shape_check_accepts_the_reader_side_shape(capsys):
 
 
 def test_infer_shape_check_rejects_a_padded_square_shape():
-    """退回 640×640 要當場擋下。
+    """被填成 640×640 要當場擋下。
 
-    ultralytics 只在 `format == "pt"` 或 backend 的 `dynamic` 為真時才走 `auto`
-    letterbox；換成靜態引擎就會把短邊填到 640，像素量 1.67 倍。**症狀只有「變慢」**，
-    座標、欄位、列數全部正常——這正是 issue #108 消掉的成本靜悄悄回來的方式。
+    dynamic 引擎不套用 metadata 的 `imgsz`（`predictor.py` 只在 backend **不是**
+    dynamic 時才把它抄進 `args.imgsz`），所以 `args.imgsz` 停在預設的 640，實際形狀
+    由 `pre_transform` 的 `auto` letterbox 決定。`auto` 要
+    `same_shapes and args.rect and (format == "pt" or dynamic)` 三者同時成立才保住
+    640×384；任何一項日後翻掉，LetterBox 就會填到 640×640，像素量 1.67 倍。
+    **症狀只有「變慢」**，座標、欄位、列數全部正常——正是 issue #108 消掉的成本靜悄悄
+    回來的方式。
 
-    這一項取代了 `_validate_imgsz`：dynamic 引擎不套用 metadata 的 `imgsz`，照抄那個
-    檢查會得到一個看起來有在驗、其實驗不到的檢查。
+    這一項取代了 `_validate_imgsz`：那個檢查在 dynamic 引擎下驗的值不決定實際形狀。
     """
     with pytest.raises(ValueError, match="640"):
         _check_infer_shape_of((16, 3, 640, 640))
+
+
+def test_validate_dynamic_accepts_a_dynamic_engine():
+    _validate_dynamic(_metadata())
+
+
+def test_validate_dynamic_rejects_a_static_engine():
+    """靜態引擎要在載入時擋下，不能留給推論當下的 assert。
+
+    它會通過其餘全部載入檢查，然後在第一個沒湊滿的批次上被 ultralytics 的
+    `assert im.shape == s` 擋下——訊息只講「input size 不等於 max model size」，看不出
+    原因是引擎綁死了批次。而湊不滿批是常態而非例外：T4（n1-standard-8）上實測一次跑完
+    出現 16 種不同的批次大小，1 到 16 全都有。
+
+    接手這件事的 `_check_infer_shape` 幫不上忙——它排在 `predict` **之後**，靜態引擎
+    在 predict 裡就先崩了。
+    """
+    with pytest.raises(ValueError, match="dynamic"):
+        _validate_dynamic(_metadata(args={"half": True, "dynamic": False}))

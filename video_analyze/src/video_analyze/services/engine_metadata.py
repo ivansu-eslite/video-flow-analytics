@@ -291,7 +291,17 @@ def validate_engine_metadata(
         )
 
     engine_package = vfa.get("tensorrt_package")
-    if engine_package != environment.tensorrt_package:
+    if engine_package is None or environment.tensorrt_package is None:
+        # **「測不出來」不等於「不相容」。** 這個欄位讀的是已安裝套件的名稱，TensorRT
+        # 若不是用 wheel 裝的（tarball／deb，或 slim 映像檔把 `*.dist-info` 拿掉），
+        # runtime 完全正常卻讀不到名字。把它做成致命條件會讓整天的分析起不來，方向與
+        # 驅動版本那條一樣——只記 warning。
+        logger.warning(
+            "無法比對 TensorRT wheel 變體（其中一端讀不到套件名），此項只記錄。",
+            engine_tensorrt_package=engine_package,
+            current_tensorrt_package=environment.tensorrt_package,
+        )
+    elif engine_package != environment.tensorrt_package:
         raise ValueError(
             f"引擎是用 {engine_package} 建的，當下環境裝的是 "
             f"{environment.tensorrt_package}。`tensorrt-cu12` 與 `tensorrt-cu13` 是"

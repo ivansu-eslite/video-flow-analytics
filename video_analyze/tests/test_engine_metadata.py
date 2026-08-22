@@ -9,6 +9,7 @@
 
 import json
 import struct
+from dataclasses import replace
 
 import pytest
 
@@ -132,6 +133,20 @@ def test_validate_rejects_a_different_tensorrt_wheel_variant():
 
     with pytest.raises(ValueError, match="tensorrt-cu13"):
         validate_engine_metadata(metadata, _ENV, _SHA)
+
+
+def test_validate_only_warns_when_the_tensorrt_package_is_undetectable(capsys):
+    """讀不到套件名時只記錄不擋。
+
+    「測不出來」不等於「不相容」：TensorRT 若不是用 wheel 裝的（tarball／deb，或 slim
+    映像檔把 `*.dist-info` 拿掉），runtime 完全正常卻讀不到名字。做成致命條件會讓整天
+    的分析起不來，方向與驅動版本那條一樣。
+    """
+    environment = replace(_ENV, tensorrt_package=None)
+
+    validate_engine_metadata(_metadata(), environment, _SHA)
+
+    assert '"severity": "WARNING"' in capsys.readouterr().out
 
 
 def test_validate_only_warns_when_the_torch_cuda_build_differs(capsys):

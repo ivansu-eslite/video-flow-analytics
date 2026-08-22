@@ -10,15 +10,18 @@
 
 三個刻意的建置參數：
 
-- **`dynamic=True`**。不是為了彈性，是兩件事各自都逼出這個選擇：(1) 靜態引擎的
-  `TensorRTBackend.forward` 會 assert 輸入形狀與綁定完全相同，而推理迴圈的批次大小
-  本來就會因湊批而變動（某一路讀完時剩幾格就送幾格）；(2) ultralytics 的
-  `pre_transform` 只在 `format == "pt"` 或 `dynamic` 為真時才走 `auto` 模式，靜態引擎
-  會讓 640×384 的影格被填充成 640×640，像素量 1.67 倍——正是 issue #108 消掉的那個成本。
-- **`imgsz=(INFER_HEIGHT, INFER_WIDTH)`**。形狀在建置期固定（optimization profile 的
-  opt shape），不是在執行期驗。載入端不驗 metadata 的 `imgsz`：dynamic 引擎不套用它，
-  實際形狀由 `pre_transform` 決定，照抄 `_validate_imgsz` 會得到一個看起來有在驗、
-  其實驗不到的檢查。執行期改為逐批記錄**實際進入推論的 (H, W)**（見 `detector.py`）。
+- **`dynamic=True`**。不是為了彈性：靜態引擎的 `TensorRTBackend.forward` 會 assert
+  輸入形狀與綁定完全相同，而**湊不滿批是常態而非例外**——T4（n1-standard-8，與正式
+  節點同機型）上實測一次跑完出現了 16 種不同的批次大小，1 到 16 全都有，8 核的解碼
+  餵不滿批。靜態引擎會在第一個不滿批就崩。
+  代價是形狀不再被 metadata 釘住：`predictor.py` 的 `setup_model` 只在 backend
+  **不是** dynamic 時才把 metadata 的 `imgsz` 抄進 `args.imgsz`，所以 dynamic 引擎的
+  實際形狀改由 `pre_transform` 的 `auto` letterbox 決定（見下一條與 `detector.py` 的
+  `_check_infer_shape`）。
+- **`imgsz=(INFER_HEIGHT, INFER_WIDTH)`**。形狀在建置期固定成 optimization profile 的
+  opt shape。載入端**不驗** metadata 的 `imgsz`——dynamic 引擎不套用它（上一條），照抄
+  `_validate_imgsz` 會得到一個看起來有在驗、其實驗不到的檢查。執行期改為逐批核對
+  **實際進入推論的 (H, W)**（見 `detector.py` 的 `_check_infer_shape`）。
 - **`batch=<最大批次>`**。dynamic 引擎的 batch 維度上限就是這個值（optimization
   profile 的 max shape 取 `shape[0]`），所以它與 `config.toml` 的 `[model] batch`
   要一起定：實際單次推理批次是設定值的 2 倍（ultralytics 對 in-memory list source
@@ -298,12 +301,20 @@ def main() -> None:
                 allow_tf32=False,  # 跨機器比對的前提，不開放由 CLI 關掉
             )
             print_summary(report)
+            # 寫報告排在判準之前（沒過也要看得到數字），但**它的失敗不可以害死引擎**：
+            # 這一段在「沒過就刪產物」的 except 內，報告路徑唯讀或沒權限的話，四道門檻
+            # 其實全過的引擎會被刪掉，還印出「未通過驗收」——T4 上約 7 分鐘的建置要重跑，
+            # 而錯誤訊息指向錯的原因
             if args.report_out:
-                args.report_out.parent.mkdir(parents=True, exist_ok=True)
-                args.report_out.write_text(
-                    json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-                print(f"已寫出 {args.report_out}")
+                try:
+                    args.report_out.parent.mkdir(parents=True, exist_ok=True)
+                    args.report_out.write_text(
+                        json.dumps(report, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    print(f"已寫出 {args.report_out}")
+                except OSError as exc:
+                    print(f"[警告] 報告寫不出來（{exc}），比對結果只在上面的輸出裡。")
             failures = check_report(report, max_p99_px=args.max_foot_dev_p99_px)
             if failures:
                 raise ValueError(

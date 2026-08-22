@@ -79,19 +79,27 @@ CPU fallback（引擎路徑下從「慢」變成「一定失敗」）、`_valida
 日後要放第三支工具進 `tools/` 時，這條分界是判準：它可以載 `.pt`，但不可以被
 `src/video_analyze` 底下的任何模組 import。
 
-### 3. `dynamic=True` 不是彈性需求，是兩個硬條件各自逼出來的
+### 3. `dynamic=True` 不是彈性需求，是批次逼出來的
 
-不是「保留彈性」而選 dynamic，兩個理由分開成立、缺一都得選它：
+靜態引擎的 `TensorRTBackend.forward` 對輸入形狀是 `assert im.shape == s`，而**湊不滿批
+是常態而非例外**：T4（n1-standard-8，與正式節點同機型）上實測一次跑完出現了 **16 種**
+不同的批次大小，1 到 16 全都有——8 核的解碼餵不滿 GPU，實際批次由供料決定。靜態引擎會
+在第一個不滿批就當場失敗。
 
-- **批次大小本來就會變動**。湊批在某一路讀完、或當下供不上量時會送不滿批。靜態引擎的
-  `TensorRTBackend.forward` 對輸入形狀是 `assert im.shape == s`，第一個不滿批就當場失敗。
-- **靜態引擎會讓形狀退回 640×640**。ultralytics 的 `pre_transform` 只在
-  `format == "pt"` 或 backend 的 `dynamic` 為真時才走 `auto` letterbox；靜態引擎走不到，
-  640×384 的影格會被填充成 640×640，像素量 1.67 倍——正是 issue #108 消掉的那筆成本。
+⚠ **一個規劃階段寫錯、實作時才查清楚的理由**：本 ADR 的草稿曾把「靜態引擎會讓形狀退回
+640×640」也列為 dynamic 的理由。那是錯的——`predictor.py` 的 `setup_model` 有
+`if hasattr(self.model, "imgsz") and not getattr(self.model, "dynamic", False):
+self.args.imgsz = self.model.imgsz`，靜態引擎反而**會**套用 metadata 的 `imgsz`
+（也就是 384×640），`auto=False` 的 LetterBox 填到那個尺寸，形狀是對的。
+
+真正的因果是反過來的：**因為選了 dynamic，形狀才不再被 metadata 釘住**。dynamic 引擎
+拿不到那行的套用，`args.imgsz` 停在預設的 640，實際形狀改由 `pre_transform` 的 `auto`
+決定；`auto` 的條件是 `same_shapes and args.rect and (format == "pt" or dynamic)`，三者
+同時成立才保住 640×384。這正是 Decision 7 那道執行期形狀核對存在的理由。
 
 代價：dynamic 引擎的 optimization profile 把 max 形狀取到 2×（`(batch, 3, 768, 1280)`），
-建 execution context 就吃約 4.7 GB 顯存且不隨實際批次縮小。T4 有 15 GB，容得下，但這是
-一筆固定成本。
+建 execution context 實測吃約 1.3 GB 顯存（規劃階段估的是 4.7 GB，偏保守），且不隨實際
+批次縮小。T4 有 15 GB，容得下。
 
 ### 4. 精度驗 `metadata["args"]["half"]`，不是 backend 的 `fp16` 屬性
 
@@ -117,7 +125,9 @@ metadata 的那一份，只有它反映建置時的實際設定。
 **TensorRT wheel 變體**（`tensorrt-cu12` 與 `tensorrt-cu13` 是不同套件；比的是
 `importlib.metadata` 讀到的**實際套件名**，不是 `torch.version.cuda`——那兩個數字可以不一樣，
 本機現況就是 torch `2.12.1+cu130` 搭 `tensorrt-cu12`，拿 torch 的 CUDA 建置版本當變體的代理
-既擋不到真正的 cu12／cu13 對調，又會在 torch 換版時誤擋既有引擎），以及**來源權重的 SHA-256**
+既擋不到真正的 cu12／cu13 對調，又會在 torch 換版時誤擋既有引擎。**任一端讀不到套件名時
+只記 warning 不擋**：TensorRT 不是用 wheel 裝的話 runtime 完全正常卻讀不到名字，
+「測不出來」不等於「不相容」），以及**來源權重的 SHA-256**
 （`[model].source_weights_sha256` 有釘才比；沒釘只記 warning，讓「沒在驗」在 log 上看得見）。
 四條各自拋、訊息各自寫，因為處置完全不同：SM 不符要在目標卡上重建，TRT 版本不符要對齊
 映像檔，權重 hash 不符是拿錯了引擎。合成一句「metadata 與環境不符」會讓看 log 的人得自己
@@ -143,7 +153,13 @@ metadata 的那一份，只有它反映建置時的實際設定。
   `bindings["images"].shape`（`forward` 每次形狀變動都會更新它，那就是交給
   `context.execute_v2` 的形狀），高寬不是推論尺寸即拋錯；同一個形狀只記一次 log。
   刻意不從輸入影格重新推導一次——那只是把 `pre_transform` 的邏輯抄第二遍，抄錯了兩邊會
-  一起錯而檢查照樣通過。
+  一起錯而檢查照樣通過。它擋的是 Decision 3 那三個 `auto` 條件日後有任何一項翻掉
+  （ultralytics 改 `rect` 預設、批次混進不同尺寸的來源）——那時影格會被填到 640×640，
+  像素量 1.67 倍，而症狀只有「變慢」。
+
+**`dynamic` 本身也在載入時驗**（`_validate_dynamic`）。少了它，靜態引擎會通過其餘全部
+載入檢查，然後在第一個不滿批被 ultralytics 的 assert 擋下，訊息只講「input size 不等於
+max model size」；而接手的形狀核對排在 `predict` **之後**，永遠輪不到。
 
 這裡比 plan 多做了一步：plan 寫的是「逐批**記錄**」，實作改成「記錄**並擋下**」。理由是這
 個形狀完全由三件不會在執行期變動的事決定（讀取端的輸出尺寸、引擎是不是 dynamic、

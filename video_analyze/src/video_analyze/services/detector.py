@@ -161,15 +161,22 @@ def _check_infer_shape_of(shape: tuple[int, ...]) -> None:
     """把一個實際進入推論的張量形狀記進 log，並核對高寬是否為推論尺寸。
 
     **這一項取代了改用引擎之前的 `_validate_imgsz`**（驗權重帶的 `imgsz` 是否等於
-    `INFER_WIDTH`）。那個檢查在引擎路徑下**語義失效**：dynamic 引擎不套用 metadata 的
-    `imgsz`，實際形狀由 ultralytics 的 `pre_transform` 決定——照抄會得到一個看起來有在
-    驗、其實驗不到的檢查，比沒有更危險。形狀改為在建置期固定（`tools/build_engine.py`
-    以 `imgsz=(INFER_HEIGHT, INFER_WIDTH)` 匯出），執行期驗真正進到 backend 的那個值。
+    `INFER_WIDTH`）。那個檢查在引擎路徑下**語義失效**，而失效的機制正好就是我們選了
+    dynamic 引擎的後果：`predictor.py` 只在 backend **不是** dynamic 時才把 metadata 的
+    `imgsz` 抄進 `args.imgsz`（`setup_model` 那行的條件是
+    `not getattr(self.model, "dynamic", False)`）。dynamic 引擎因此不套用它，`args.imgsz`
+    停在預設的 640，實際形狀改由 `pre_transform` 的 `auto` letterbox 決定——照抄那個檢查
+    會得到一個看起來有在驗、其實驗不到的檢查，比沒有更危險。形狀改為在建置期固定
+    （`tools/build_engine.py` 以 `imgsz=(INFER_HEIGHT, INFER_WIDTH)` 匯出 optimization
+    profile 的 opt shape），執行期驗真正進到 backend 的那個值。
 
-    擋的是 640×384 退回 640×640：ultralytics 只在 `format == "pt"` 或 backend 的
-    `dynamic` 為真時才走 `auto` letterbox，換成靜態引擎就會把短邊填到 640，像素量
-    1.67 倍——那正是 issue #108 消掉的成本，而症狀只有「變慢」，座標、欄位、列數全部
-    正常。
+    擋的是 640×384 被填成 640×640。`auto` 的條件是
+    `same_shapes and args.rect and (format == "pt" or dynamic)`——dynamic 引擎滿足最後
+    一項，`rect` 在 predict 模式下是 True，`same_shapes` 由讀取端保證（每一格都縮成同
+    一個尺寸）。三者**同時**成立才會保住 640×384；任何一項日後翻掉（ultralytics 改
+    `rect` 預設、批次混進不同尺寸的來源），LetterBox 就會填到 `args.imgsz` 的 640×640，
+    像素量 1.67 倍——那正是 issue #108 消掉的成本，而症狀只有「變慢」，座標、欄位、
+    列數全部正常。
 
     Args:
         shape: backend binding 的 `(N, C, H, W)`。
@@ -184,6 +191,33 @@ def _check_infer_shape_of(shape: tuple[int, ...]) -> None:
             f"({INFER_HEIGHT}, {INFER_WIDTH})。影格在讀取端就縮好了，這裡多出來的"
             "填充是 ultralytics 前處理加的：像素量變成 1.67 倍而輸出完全正常。"
             "請確認引擎是以 dynamic 建的（`tools/build_engine.py` 的預設）。"
+        )
+
+
+def _validate_dynamic(metadata: dict) -> None:
+    """驗證引擎是 dynamic 建的。
+
+    **靜態引擎會通過其餘所有載入檢查**，然後在第一個沒湊滿的批次上被 ultralytics 的
+    `assert im.shape == s` 擋下——那條訊息只講「input size 不等於 max model size」，看不
+    出原因是引擎綁死了批次。而湊不滿批是常態而非例外：T4（n1-standard-8）上實測一次
+    跑完出現了 16 種不同的批次大小，1 到 16 全都有，解碼餵不滿批。
+
+    接手這件事的 `_check_infer_shape` 幫不上忙——它排在 `predict` **之後**，靜態引擎
+    在 predict 裡就先崩了，永遠輪不到它。所以這一項要在載入時驗。
+
+    Args:
+        metadata: `read_engine_metadata` 讀回的 metadata。
+
+    Raises:
+        ValueError: 引擎不是以 `dynamic=True` 匯出的。
+    """
+    dynamic = (metadata.get("args") or {}).get("dynamic")
+    if dynamic is not True:
+        raise ValueError(
+            f"引擎的匯出參數 dynamic={dynamic}，不是 dynamic 引擎。批次大小會隨供料"
+            "變動（湊不滿批是常態），靜態引擎綁死批次，第一個不滿批就會在 ultralytics "
+            "的 forward assert 失敗，而那條訊息看不出原因。請用 "
+            "`tools/build_engine.py` 重建。"
         )
 
 
@@ -211,8 +245,8 @@ class YOLODetector:
         Raises:
             ValueError: `model_path` 不是 `.engine`、引擎 metadata 與當下環境不符
                 （見 `engine_metadata.validate_engine_metadata`）、引擎不是 FP16
-                （`_validate_precision`），或 `classes` 指定了引擎沒有的類別 id
-                （`_validate_classes`）。
+                （`_validate_precision`）、引擎不是 dynamic（`_validate_dynamic`），
+                或 `classes` 指定了引擎沒有的類別 id（`_validate_classes`）。
             FileNotFoundError: `model_path` 指定的引擎檔不存在。
             RuntimeError: 沒有可用的 CUDA 裝置。
         """
@@ -225,6 +259,7 @@ class YOLODetector:
             settings.model.source_weights_sha256,
         )
         _validate_precision(metadata)
+        _validate_dynamic(metadata)
         _log_engine_metadata(metadata)
         _validate_classes(metadata)
         self.max_batch = metadata.get("batch")
