@@ -26,7 +26,6 @@ class TrackerConfig(BaseModel):
         track_buffer: 軌跡遺失後可保留等待重新關聯的幀數。
         match_thresh: 偵測框與既有軌跡配對的 IoU 門檻。
         fuse_score: 是否將信心度分數融入 IoU 距離計算。
-        gmc_method: 全域運動補償方法。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -37,7 +36,6 @@ class TrackerConfig(BaseModel):
     track_buffer: int = Field(default=30, ge=1)
     match_thresh: float = Field(default=0.8, ge=0.0, le=1.0)
     fuse_score: bool = True
-    gmc_method: str = "none"
 
 
 class ModelConfig(BaseModel):

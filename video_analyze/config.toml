@@ -5,7 +5,6 @@ new_track_thresh = 0.6
 track_buffer = 30
 match_thresh = 0.8
 fuse_score = true
-gmc_method = "none"
 
 [model]
 # TensorRT FP16 引擎（正式推論路徑只吃 .engine，見 ADR-011），路徑為 cwd 相對。

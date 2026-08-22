@@ -92,7 +92,6 @@ new_track_thresh = 0.6
 track_buffer = 30
 match_thresh = 0.8
 fuse_score = true
-gmc_method = "none"
 
 [model]
 model_path = "20260714-153811_yolo26m_baseline_sm120.engine"   # 開發機那顆；T4 用 _sm75
