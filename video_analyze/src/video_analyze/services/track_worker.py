@@ -365,13 +365,19 @@ def run_track_worker(
             0.0 if first_payload_at is None else time.perf_counter() - first_payload_at
         )
         _log_fps_summary(fps_meter, elapsed)
+        # 收尾的最後一步同樣不受理終止訊號：`save()` 關掉 writer 之後、rename 之前被打斷
+        # 的話，暫存檔此刻已經是一份**完整**的 parquet，而 `except` 的 `discard()` 會把它
+        # 刪掉——本來只要人工把 `.tmp` 改個名就救得回來的東西就沒了。`finally` 會還原
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         collector.save()  # 僅推論進程正常送完才原子性改名成正式檔名
     except BaseException:
         # 清理期間不再受理終止訊號。Ctrl+C 走的是 process group 的 SIGINT，本進程進到
         # 這裡開始 discard() 的同時，父進程也在 `_terminate_all` 送 SIGTERM，而使用者
         # 連按兩次 Ctrl+C 又會再來一個 SIGINT——任何一個在 `_writer.close()` 之後、
         # `unlink()` 之前打進來，整天的 `.tmp` 就留下了，而外層這個 except 已經進來過、
-        # 不會再跑一次。清理很短（關 writer 再刪檔），真的卡住仍有父進程的 SIGKILL 收尾
+        # 不會再跑一次。清理很短（關 writer 再刪檔），真的卡住仍有父進程的 SIGKILL 收尾。
+        # ⚠ 這是把窗口**縮到**「例外拋出到下面兩行之間」，不是關掉——用訊號就到這裡為止
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         if collector is not None:

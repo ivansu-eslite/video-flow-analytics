@@ -557,3 +557,58 @@ def test_collector_identity_comes_from_the_claim_not_from_the_path(tmp_path):
 
     assert tmp_file.read_bytes() == b"y" * 3400
     assert not results_path.exists()
+
+
+def test_zero_row_save_never_leaves_a_half_written_official_file(tmp_path, monkeypatch):
+    """零列那條分支也要先寫暫存檔再 rename，不能直接寫正式檔名。
+
+    直接寫的話 `write_parquet` 中途失敗（磁碟滿）會在**正式檔名**下留一個截斷的檔，而
+    `discard()` 只認得 `.tmp`、收不掉它，下游要到 `pl.read_parquet` 才以「must end with
+    PAR1」崩在離原因很遠的地方。
+    """
+    results_path = tmp_path / "tracking_results.parquet"
+    fd, identity = claim_tmp_slot(results_path)
+    collector = TrackingResultCollector(results_path, identity)
+
+    def _out_of_space(self, path, *args, **kwargs):
+        Path(path).write_bytes(b"PAR1_trunc")  # 寫了一半才失敗
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", _out_of_space)
+    with pytest.raises(OSError, match="No space left"):
+        collector.save()
+    monkeypatch.undo()
+    collector.discard()
+    os.close(fd)
+
+    assert not results_path.exists(), "半成品寫到正式檔名下了"
+    assert not tmp_path_for(results_path).exists()
+
+
+def test_discard_after_a_successful_save_says_nothing(tmp_path, capsys):
+    """`save()` 之後暫存檔已經改名走了，再呼叫 `discard()` 不該有任何抱怨。
+
+    不清掉身分的話，`_remove_tmp` 會拿它去比對此刻可能屬於別人的同名檔，印出「不是本次
+    執行建立的那一份」——把運維指向一個不存在的並行執行。
+    """
+    results_path = tmp_path / "tracking_results.parquet"
+    fd, identity = claim_tmp_slot(results_path)
+    collector = TrackingResultCollector(results_path, identity)
+    collector.add(
+        camera_id="loc_cam001",
+        frame_index=0,
+        timestamp=_stamp(0),
+        tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
+        foot_points=_feet((23.0, 41.0)),
+        frame_width=_WIDTH,
+        frame_height=_HEIGHT,
+    )
+    collector.save()
+    capsys.readouterr()  # 丟掉 save() 自己那行「追蹤結果已寫入」
+
+    collector.discard()
+    os.close(fd)
+
+    # `StructuredLogger` 是 print 到 stdout 的，不走 logging，所以看 capsys 而不是 caplog
+    assert "略過刪除" not in capsys.readouterr().out
+    assert results_path.exists()

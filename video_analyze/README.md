@@ -403,9 +403,12 @@ zone 與 line 幾何都不會被驗證。
   就卡在上面那個收不到 EOF 的 `get()` 上。它等到的是父進程 `_terminate_all` 的 **SIGTERM**，
   而追蹤進程攔下了這個訊號（`track_worker._raise_on_sigterm` 拋 `SystemExit(143)`），走的
   仍是既有的 `collector.discard()`；不攔的話預設處置不執行 Python 的 `except`／`finally`，
-  `.tmp` 會留下。清理期間 SIGTERM 與 SIGINT 都設成 `SIG_IGN`——Ctrl+C 走的是 process group
-  的 SIGINT，本進程進到清理的同時父進程也在送 SIGTERM，連按兩次 Ctrl+C 又多一個 SIGINT，
-  任何一個落在關 writer 之後、刪檔之前都會留下整天的暫存檔。再被 SIGKILL 就靠下面那條收。
+  `.tmp` 會留下。清理期間、以及 `save()` 的關檔＋改名期間，SIGTERM 與 SIGINT 都設成
+  `SIG_IGN`——Ctrl+C 走的是 process group 的 SIGINT，本進程進到清理的同時父進程也在送
+  SIGTERM，連按兩次 Ctrl+C 又多一個 SIGINT；任何一個落在關 writer 之後、刪檔之前都會留下
+  整天的暫存檔，落在 `save()` 的關檔與改名之間則會讓 `discard()` 刪掉一份**已經完整**的
+  parquet。這是把窗口**縮到**「例外拋出到設定 `SIG_IGN` 之間」，不是關掉；用訊號就到這裡
+  為止，再被 SIGKILL 就靠下面那條收。
 - **整機重啟／追蹤進程本身被 SIGKILL** 沒有任何 in-process 的機制擋得住，改由**下一次寫
   同一條路徑的執行**在啟動時清掉（`tracking_results.claim_tmp_slot`）。判準是「還有沒有
   進程持有這個暫存檔的 `flock`」而不是檔名或 mtime：拿得到鎖代表持有者已經不在，殘檔就地

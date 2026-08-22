@@ -251,19 +251,23 @@ class TrackingResultCollector:
     def save(self) -> None:
         """全部串流正常跑完後呼叫：flush 剩餘資料，再把暫存檔原子性地改名成正式檔名。"""
         self._flush()
-        if self._writer is not None:
-            self._writer.close()
-            self._require_own_tmp("改名成正式檔名")
-            self._tmp_path.replace(self._results_path)
+        if self._writer is None:
+            # 全天沒有任何追蹤結果，仍要寫出一個空的 parquet（維持欄位 schema）。
+            # 這一份同樣先寫暫存檔再 rename，不直接寫正式檔名：`write_parquet` 中途失敗
+            # （磁碟滿）會在**正式檔名**下留一個截斷的檔，而 `discard()` 只認得 `.tmp`、
+            # 收不掉它，下游要到 `pl.read_parquet` 才以「must end with PAR1」崩掉
+            self._require_own_tmp("開始寫入")
+            self._tmp_path.parent.mkdir(parents=True, exist_ok=True)
+            pl.DataFrame(self._columns, schema=_SCHEMA).write_parquet(self._tmp_path)
         else:
-            # 全天沒有任何追蹤結果，仍要寫出一個空的 parquet（維持欄位 schema）
-            self._results_path.parent.mkdir(parents=True, exist_ok=True)
-            pl.DataFrame(self._columns, schema=_SCHEMA).write_parquet(
-                self._results_path
-            )
-            # 這條分支不經過 rename，`claim_tmp_slot` 建出來的 0 byte 暫存檔要自己收掉，
-            # 否則正常跑完的一天也會在輸出目錄留一個看起來像半成品的檔案
-            self._remove_tmp()
+            self._writer.close()
+        self._require_own_tmp("改名成正式檔名")
+        self._tmp_path.replace(self._results_path)
+        # 暫存檔已經改名走了，這個身分不再對應任何檔案。不清掉的話，之後若還有人呼叫
+        # `discard()`（例如收尾之後才拋的例外），`_remove_tmp` 會拿它去比對一個此刻可能
+        # 屬於別人的同名檔，然後印出「不是本次執行建立的那一份」——把運維指向不存在的
+        # 並行執行
+        self._tmp_identity = None
         logger.info(
             "追蹤結果已寫入",
             path=str(self._results_path),
