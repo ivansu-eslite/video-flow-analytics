@@ -291,27 +291,34 @@ def run_track_worker(
         BaseException: 其他子系統拋出的例外，會原樣重新拋出。
     """
     _reject_inference_sized_shapes(frame_shapes)
-    # 認領要在下面的 try 之外：認領失敗代表那個 `.tmp` 屬於另一個**執行中**的進程，
-    # 此時掉進 `except` 去 `collector.discard()` 會刪掉別人正在寫的檔
-    lock_fd = claim_tmp_slot(results_path)
-    tracker = MultiStreamByteTracker(num_streams=len(stream_names))
-    # 跨格重用：它記著每條軌跡上一次成功推算的落腳點偏移量
-    foot_estimator = FootPointEstimator(settings.foot_point.method)
-    collector = TrackingResultCollector(results_path)
-    # 每路一組 (scale, pad_x, pad_y) 與一個內容區，都跟著 stream_id 走
-    unscale_params = [
-        letterbox_params(shape.height, shape.width) for shape in frame_shapes
-    ]
-    content_boxes = [content_box(shape.height, shape.width) for shape in frame_shapes]
-    fps_meter = FpsMeter()
-    logger.info("追蹤進程啟動", num_streams=len(stream_names))
-    # 計時從**第一個 payload 抵達**才起算，不含等推論進程載完 YOLO 權重的那段空窗：推論
-    # 端的 `start` 也在載完模型之後（`start_loop` 內），兩邊口徑一致，餘裕才比得出意義。
-    # 把空窗算進來會壓低 `overall_fps`，讓印出的餘裕系統性偏大——而那個數字是容量決策的
-    # 依據，偏大的方向正好是會誤事的方向
-    first_payload_at: float | None = None
+    # 註冊在認領之前：`claim_tmp_slot` 一旦把 `.tmp` 建出來，這之後的每一步（含建構
+    # tracker、落腳點推算器）被 SIGTERM 打斷都得走得到清理，否則那個窗口內收到訊號
+    # 就會留下殘檔
     previous_sigterm = signal.signal(signal.SIGTERM, _raise_on_sigterm)
+    # 兩者都在 try 內才建立，故先給 None：認領失敗代表那個 `.tmp` 屬於另一個**執行中**
+    # 的進程，此時 `collector` 還是 None，`except` 不會去 `discard()` 掉別人正在寫的檔
+    lock_fd: int | None = None
+    collector: TrackingResultCollector | None = None
     try:
+        lock_fd = claim_tmp_slot(results_path)
+        collector = TrackingResultCollector(results_path)
+        tracker = MultiStreamByteTracker(num_streams=len(stream_names))
+        # 跨格重用：它記著每條軌跡上一次成功推算的落腳點偏移量
+        foot_estimator = FootPointEstimator(settings.foot_point.method)
+        # 每路一組 (scale, pad_x, pad_y) 與一個內容區，都跟著 stream_id 走
+        unscale_params = [
+            letterbox_params(shape.height, shape.width) for shape in frame_shapes
+        ]
+        content_boxes = [
+            content_box(shape.height, shape.width) for shape in frame_shapes
+        ]
+        fps_meter = FpsMeter()
+        logger.info("追蹤進程啟動", num_streams=len(stream_names))
+        # 計時從**第一個 payload 抵達**才起算，不含等推論進程載完 YOLO 權重的那段空窗：
+        # 推論端的 `start` 也在載完模型之後（`start_loop` 內），兩邊口徑一致，餘裕才比得
+        # 出意義。把空窗算進來會壓低 `overall_fps`，讓印出的餘裕系統性偏大——而那個數字
+        # 是容量決策的依據，偏大的方向正好是會誤事的方向
+        first_payload_at: float | None = None
         while True:
             item = track_queue.get()
             if item == TRACK_DONE:  # 推論進程正常送完整天影格
@@ -353,14 +360,16 @@ def run_track_worker(
         _log_fps_summary(fps_meter, elapsed)
         collector.save()  # 僅推論進程正常送完才原子性改名成正式檔名
     except BaseException:
-        collector.discard()  # fail-loud：不留下不完整結果
+        if collector is not None:
+            collector.discard()  # fail-loud：不留下不完整結果
         raise
     finally:
         # handler 與鎖的存續期都到「暫存檔不再會被寫」為止。還原 handler 是為了在
         # 測試中 in-process 呼叫本函式時不留下副作用；關 fd 則是釋放 flock——正式執行
         # 時進程接著就結束了，kernel 也會做同一件事
         signal.signal(signal.SIGTERM, previous_sigterm)
-        os.close(lock_fd)
+        if lock_fd is not None:
+            os.close(lock_fd)
 
 
 def _log_fps_summary(fps_meter: FpsMeter, elapsed_seconds: float) -> None:

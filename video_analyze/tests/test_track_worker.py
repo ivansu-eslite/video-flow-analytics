@@ -517,3 +517,39 @@ def test_startup_clears_the_residue_of_a_killed_run(tmp_path, monkeypatch):
     assert size_at_startup == [0], "殘檔在寫入開始之前就該被清空"
     assert not residue.exists()
     assert results_path.exists()
+
+
+def test_a_failure_between_claim_and_the_loop_leaves_no_residue(tmp_path, monkeypatch):
+    """認領之後、進主迴圈之前的建構步驟若拋錯，也不能留下暫存檔。
+
+    `claim_tmp_slot` 一建立 `.tmp` 就進入「有東西要收」的狀態，因此那之後的每一步都要
+    在清理範圍內。`[foot_point].method` 填錯就是這條路徑的真實觸發方式，留下的殘檔要等
+    同一個 bucket 的同一天再跑一次才清得掉——正是這個 issue 要消除的東西。
+
+    同一個窗口的另一半：SIGTERM 的 handler 必須在**認領之前**就註冊好，否則這段期間
+    收到父進程的 terminate 走的仍是預設處置。`handler_ready` 釘住這個順序。
+    """
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    handler_ready: list[bool] = []
+
+    def _exploding_estimator(method: str):
+        handler_ready.append(signal.getsignal(signal.SIGTERM) is tw._raise_on_sigterm)
+        raise ValueError("人工注入：建構落腳點推算器失敗")
+
+    _install_recording_tracker(monkeypatch)
+    monkeypatch.setattr(tw, "FootPointEstimator", _exploding_estimator)
+    track_queue: queue.Queue = queue.Queue()
+    track_queue.put(TRACK_DONE)
+
+    with pytest.raises(ValueError, match="人工注入"):
+        run_track_worker(
+            track_queue=track_queue,
+            stream_names=["loc_cam001"],
+            frame_shapes=[_SHAPE],
+            results_path=results_path,
+        )
+
+    assert handler_ready == [True], "SIGTERM handler 比認領還晚註冊"
+    assert not tmp_file.exists()
+    assert not results_path.exists()

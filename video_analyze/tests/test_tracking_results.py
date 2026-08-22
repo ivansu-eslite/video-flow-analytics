@@ -349,3 +349,34 @@ def test_tmp_naming_has_a_single_source(tmp_path):
 
     assert collector._tmp_path == tmp_path_for(results_path)
     assert tmp_path_for(results_path).exists()
+
+
+def test_claim_does_not_truncate_a_file_that_was_renamed_away(tmp_path, monkeypatch):
+    """`os.open` 與 `flock` 之間有空窗，鎖到的可能已經不是這個檔名指向的東西。
+
+    另一個執行正好在這期間 `save()`（把同一個 inode rename 成正式檔名）的話，鎖是拿得到
+    的、`fstat` 也看得到非零大小，接著的 `ftruncate` 會把對方剛寫完的**整天結果**清成
+    0 byte，而 log 還寫著「清掉前一次執行留下的暫存檔」。
+
+    這裡用一個會在拿到鎖之後做 rename 的 `flock` 替身，把那個交錯變成確定會發生。
+    """
+    results_path = tmp_path / "tracking_results.parquet"
+    in_flight = tmp_path_for(results_path)
+    in_flight.write_bytes(b"x" * 4096)
+    real_flock = fcntl.flock
+    raced: list[int] = []
+
+    def racing_flock(fd: int, operation: int) -> None:
+        real_flock(fd, operation)
+        if not raced:  # 只在第一輪：模擬「等鎖的期間對方 save() 把它 rename 走了」
+            raced.append(fd)
+            in_flight.replace(results_path)
+
+    monkeypatch.setattr(tr.fcntl, "flock", racing_flock)
+
+    fd = claim_tmp_slot(results_path)
+    os.close(fd)
+
+    assert raced, "替身沒被呼叫到，這支測試沒驗到東西"
+    assert results_path.stat().st_size == 4096, "把對方剛完成的結果清空了"
+    assert tmp_path_for(results_path).stat().st_size == 0  # 自己認到的是新建的空檔

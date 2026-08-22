@@ -18,6 +18,11 @@ _SCHEMA = TRACKING_RESULTS_SCHEMA
 # 用列數而非逐段門檻，因多路串流交錯寫入、片段長度不一
 _FLUSH_EVERY_ROWS = 200_000
 
+# 認領暫存檔時，「拿到鎖卻發現檔名已經指向別的 inode」最多重來這麼多次。正常情況一次就
+# 過；會重來代表剛好撞上另一個執行的 rename 或 unlink，那是瞬間的動作，不會連續發生。
+# 給上限而不是無限重試：真的連續撞上代表有東西在同一條路徑上反覆建檔，該讓它 fail loud
+_CLAIM_ATTEMPTS = 5
+
 
 def tmp_path_for(results_path: Path) -> Path:
     """回傳 `results_path` 對應的暫存檔路徑。
@@ -27,6 +32,20 @@ def tmp_path_for(results_path: Path) -> Path:
     鎖照樣拿得到、殘檔照樣沒清掉，而且不會有任何錯誤訊息。
     """
     return results_path.with_name(results_path.name + ".tmp")
+
+
+def _is_file_at(fd: int, path: Path) -> bool:
+    """`fd` 開著的是不是此刻 `path` 這個名字指向的那個檔案。
+
+    比對 `(st_dev, st_ino)` 而不是路徑字串：rename 與 unlink 都只改名字，fd 仍然黏在
+    原本的 inode 上，光看路徑分不出來。
+    """
+    try:
+        by_name = os.stat(path)
+    except FileNotFoundError:
+        return False
+    by_fd = os.fstat(fd)
+    return (by_fd.st_dev, by_fd.st_ino) == (by_name.st_dev, by_name.st_ino)
 
 
 def claim_tmp_slot(results_path: Path) -> int:
@@ -49,9 +68,16 @@ def claim_tmp_slot(results_path: Path) -> int:
     回傳的 fd **必須持有到暫存檔不再被寫為止**（`run_track_worker` 持有到進程結束）：
     fd 一關鎖就沒了。
 
-    `flock` 是 POSIX advisory lock，只在都走這個機制的進程之間有效（`pq.ParquetWriter`
-    照常開檔、照常寫，不受影響）。本 repo 只跑 Linux；輸出目錄若日後掛到 NFS，flock 的
-    語義要重新確認。
+    **拿到鎖之後要再確認手上的 inode 還是那個檔名指向的東西**：`os.open` 與 `flock` 之間
+    有空窗，另一個執行可能正好在這期間 `save()`（把同一個 inode rename 成正式檔名）或
+    `discard()`（unlink）。那時鎖是拿得到的、`fstat` 也看得到非零大小，接著的 `ftruncate`
+    會把對方剛寫完的整天結果清成 0 byte，而 log 還寫著「清掉前一次執行留下的暫存檔」。
+    對不上就關掉重開——新的一輪要嘛開到對方留下的新檔，要嘛自己建一個空的。
+
+    `flock` 是 BSD 介面（不在 POSIX 內；POSIX 的 advisory lock 是 `fcntl(F_SETLK)`），
+    只在都走這個機制的進程之間有效（`pq.ParquetWriter` 照常開檔、照常寫，不受影響）。
+    本 repo 只跑 Linux；輸出目錄若日後掛到 NFS，語義要重新確認——Linux 的 NFS 從 2.6.37
+    起才用 POSIX lock 去模擬 flock，跨用戶端的行為與本機不同。
 
     Args:
         results_path: 追蹤結果 parquet 的正式輸出路徑。
@@ -60,21 +86,31 @@ def claim_tmp_slot(results_path: Path) -> int:
         持有 `flock` 的 file descriptor。
 
     Raises:
-        RuntimeError: 這條路徑的暫存檔正被另一個執行中的進程持有。
+        RuntimeError: 這條路徑的暫存檔正被另一個執行中的進程持有，或連續數輪都在拿到鎖
+            的當下發現檔名已經指向別的 inode。
     """
     tmp_path = tmp_path_for(results_path)
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(tmp_path, os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        os.close(fd)
+    for _ in range(_CLAIM_ATTEMPTS):
+        fd = os.open(tmp_path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(fd)
+            raise RuntimeError(
+                f"暫存檔 {tmp_path} 正被另一個執行中的進程持有，本次執行中止。"
+                "同一條輸出路徑（同一個 bucket 的同一天）不能有兩個執行同時寫——"
+                "兩邊會交錯寫進同一個暫存檔，再各自 rename 成正式檔名。"
+                "要並行請分開 bucket 或分開日期。"
+            ) from exc
+        if _is_file_at(fd, tmp_path):
+            break
+        os.close(fd)  # 等鎖的期間這個 inode 已經不叫 `.tmp` 了，鎖到的是別人的東西
+    else:
         raise RuntimeError(
-            f"暫存檔 {tmp_path} 正被另一個執行中的進程持有，本次執行中止。"
-            "同一條輸出路徑（同一個 bucket 的同一天）不能有兩個執行同時寫——"
-            "兩邊會交錯寫進同一個暫存檔，再各自 rename 成正式檔名。"
-            "要並行請分開 bucket 或分開日期。"
-        ) from exc
+            f"連續 {_CLAIM_ATTEMPTS} 次認領 {tmp_path} 都在拿到鎖的當下發現它已經換了"
+            "inode，本次執行中止。同一條輸出路徑上有其他執行正在頻繁地建立與收尾。"
+        )
     residue_bytes = os.fstat(fd).st_size
     if residue_bytes:
         # 走到這裡代表上一個持有者已經不在了（否則拿不到鎖），這個檔沒有人會回來收
