@@ -31,6 +31,7 @@ import torch
 from ultralytics.engine.results import Boxes, Results
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
+from video_analyze.models.config import settings
 from video_analyze.services.frame_ring import RING_SLOTS
 from video_analyze.services.inference import InferencePipeline
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
@@ -83,6 +84,10 @@ class _ScriptedDetector:
     任何早於推論完成的歸還都會讓 reader 覆寫正在推論的畫面（見 ADR-010），而那件事
     只在「呼叫的當下」看得出來，事後從輸出完全看不出來。
     """
+
+    # 引擎綁的最大批次。正式的 `YOLODetector` 從引擎 metadata 讀，這裡照正式設定
+    # 算出來的實際批次給，讓 `start_loop` 開頭的上限檢查在真實條件下跑過
+    max_batch = settings.model.batch * 2
 
     def __init__(self, per_frame: list[Boxes], free_queue: queue.Queue):
         self._remaining = iter(per_frame)
@@ -256,3 +261,30 @@ def test_slots_are_returned_after_inference_and_before_dispatch():
     assert sorted(returned) == list(range(num_frames))
     # 歸還前先切斷對共享記憶體的參照：`orig_img` 是該 slot 的活別名（ADR-010）
     assert all(result.orig_img is None for result in detector.returned_results)
+
+
+def test_a_batch_larger_than_the_engine_ceiling_aborts_with_track_failed():
+    """實際批次超過引擎綁的最大批次要**在跑之前**擋下，並送得出 `TRACK_FAILED`。
+
+    引擎的 batch 維度上限是建置時綁死的。超過的話 ultralytics 的 TensorRT backend 會在
+    `forward` 的 assert 失敗，訊息只講「input size 不等於 model size」——看不出是
+    `[model].batch` 與引擎對不上，而這兩者是分別維護的（一個在 `config.toml`，一個在
+    建引擎時的 `--batch`）。
+
+    檢查放在 `start_loop` 的 try 內而非之前：追蹤進程此時已經等在 queue 上，
+    走 `TRACK_FAILED` 才不必等父進程 SIGTERM（見 `services/pipeline.py`）。
+    """
+    free_queue: queue.Queue = queue.Queue()
+    detector = _ScriptedDetector([_FRAME_0_DETECTIONS], free_queue)
+    detector.max_batch = settings.model.batch * 2 - 1  # 剛好差一格
+    track_queue: queue.Queue = queue.Queue()
+    pipeline = InferencePipeline(
+        stream_names=["loc_cam001"],
+        detector=detector,
+        track_queue=track_queue,
+    )
+
+    with pytest.raises(ValueError, match="最大批次"):
+        pipeline.start_loop([queue.Queue()], [free_queue], [_FrameRingStub()])
+
+    assert track_queue.get_nowait() == TRACK_FAILED

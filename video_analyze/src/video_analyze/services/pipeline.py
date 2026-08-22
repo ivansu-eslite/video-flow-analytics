@@ -15,7 +15,11 @@ from video_analyze.services.frame_ring import (
 )
 from video_analyze.services.inference import InferencePipeline
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
-from video_analyze.services.track_worker import TRACK_QUEUE_SLOTS, run_track_worker
+from video_analyze.services.track_worker import (
+    TRACK_FAILED,
+    TRACK_QUEUE_SLOTS,
+    run_track_worker,
+)
 from video_analyze.services.video_reader import (
     FrameShape,
     SegmentInfo,
@@ -61,6 +65,14 @@ def run_inference_pipeline(
     本進程只出偵測框。`frame_shapes` 也跟著搬過去——它的兩個消費端（parquet 的尺寸
     欄位、座標反算參數）都在那一側。
 
+    **啟動階段的例外也要送得出 `TRACK_FAILED`**：追蹤進程在本進程之前就 start 了，
+    此刻正阻塞在 `track_queue.get()`。issue #113 揭露了為什麼上游死掉不會讓它自己
+    醒過來——`track_queue` 的 pipe 寫入端 fd 被父進程與九個讀取進程一起繼承，寫入端
+    永遠不會全部關閉，`get()` 收不到 EOF。改吃 TensorRT 引擎之後，「載入失敗」從罕見
+    變成常見的一類（引擎檔不在、SM 對不上、TensorRT 版本與映像檔不一致），而它們全部
+    發生在 `start_loop` 之前——那裡的 `except` 涵蓋不到。沒有這一段的話，追蹤進程會一直
+    等到父進程 `_terminate_all` 的 SIGTERM。
+
     Args:
         data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
         free_queues: 各路歸還環形緩衝 slot 用的佇列，索引為 stream_id。
@@ -68,18 +80,24 @@ def run_inference_pipeline(
         stream_names: 各路攝影機的 `stream_dirname`。
         track_queue: 送往追蹤進程的佇列。
     """
-    detector = YOLODetector()
-    # 緩衝存的是讀取端已縮好的影格，故用推論尺寸而非 frame_shapes；沿用原始解析度會讓
-    # `np.frombuffer(...).reshape` 在本子進程當場拋 ValueError
-    rings = [
-        FrameRing(buffer, RING_SLOTS, INFER_HEIGHT, INFER_WIDTH)
-        for buffer in ring_buffers
-    ]
-    pipeline = InferencePipeline(
-        stream_names=stream_names,
-        detector=detector,
-        track_queue=track_queue,
-    )
+    try:
+        detector = YOLODetector()
+        # 緩衝存的是讀取端已縮好的影格，故用推論尺寸而非 frame_shapes；沿用原始解析度會讓
+        # `np.frombuffer(...).reshape` 在本子進程當場拋 ValueError
+        rings = [
+            FrameRing(buffer, RING_SLOTS, INFER_HEIGHT, INFER_WIDTH)
+            for buffer in ring_buffers
+        ]
+        pipeline = InferencePipeline(
+            stream_names=stream_names,
+            detector=detector,
+            track_queue=track_queue,
+        )
+    except BaseException:
+        # 只包組裝這一段：`start_loop` 自己的 except 已經會送一次，包進來會在同一次
+        # 失敗送出兩個訊號
+        track_queue.put(TRACK_FAILED)
+        raise
     pipeline.start_loop(data_queues, free_queues, rings)
 
 

@@ -8,8 +8,18 @@ fuse_score = true
 gmc_method = "none"
 
 [model]
-model_path = "20260714-153811_yolo26m_baseline.pt"
-batch = 8                 # 湊批目標，實際單次推理批次為此值的 2 倍
+# TensorRT FP16 引擎（正式推論路徑只吃 .engine，見 ADR-011），路徑為 cwd 相對。
+# **這裡填的是開發機那顆（sm120 = RTX 5090）**：引擎綁 SM、不可跨架構重用，正式環境
+# 的 T4 要用 `..._sm75.engine`。兩者由 `tools/build_engine.py` 各自在目標卡上建，
+# 檔名的 `_sm<SM>` 尾綴就是為了讓兩顆不可能被混用。
+# 容器內若沒有一併複製 config.toml，套用的是 models/config.py 的預設值（那邊填 sm75）。
+model_path = "20260714-153811_yolo26m_baseline_sm120.engine"
+# 引擎來源權重的內容 hash。載入時比對引擎自帶的 metadata，不符即中止——這是唯一擋得下
+# 「換成另一顆類別 id 剛好都存在、語義卻不同的權重」的檢查（classes 只驗 id 存在）。
+# 留空則只記 warning、不比對。
+source_weights_sha256 = "b14302f4b93af844b818082c1f67f423033cc2386a529b43841a1a254614fa87"
+batch = 8                 # 湊批目標，實際單次推理批次為此值的 2 倍，且不得超過引擎
+                          # 建置時綁的最大批次（`build_engine.py --batch`，目前 16）
 classes = [0, 2]           # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
                            # fbody 是追蹤目標；head 只用來推算落腳點，不進 tracker
 

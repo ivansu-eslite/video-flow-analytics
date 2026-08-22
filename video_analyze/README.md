@@ -21,7 +21,7 @@
 | --- | --- |
 | 執行環境 | Python `>= 3.12` |
 | 套件管理 | [uv](https://docs.astral.sh/uv/)（安裝與執行皆透過 uv，整個 workspace 共用單一 root `uv.lock`） |
-| GPU | 選用。以 `torch.cuda.is_available()` 判斷，無 GPU 時 fallback 到 CPU（明顯變慢） |
+| GPU | **必要，且必須是建置引擎時的那個 SM**。正式推論路徑是 TensorRT FP16 引擎（[ADR-011](../docs/adr/video_analyze/011-single-inference-backend.md)），引擎綁 GPU 也綁架構，沒有 CPU fallback——CPU 上不是「比較慢」而是一定失敗 |
 | 系統相依 | FFmpeg / 影像編解碼器（OpenCV 解 `mkv` 等格式）；`lap` 為 C 擴充，環境無對應 wheel 時需要編譯工具鏈 |
 
 執行期依賴（由 `uv sync` 安裝，各套件用途）：
@@ -30,7 +30,8 @@
 | --- | --- |
 | `opencv-python` | 影片片段讀取與解碼 |
 | `ultralytics` | YOLO 偵測 |
-| `torch` / `torchvision` | 推理後端（與 `ultralytics` 一併釘住版本） |
+| `torch` / `torchvision` | 前處理／後處理的張量運算，以及建置與比對工具的 Torch FP32 基準（與 `ultralytics` 一併釘住版本） |
+| `tensorrt-cu12` | 正式推論後端。版本帶 **10.8 ～ 10.16**：下緣是 sm120 的 kernel 支援，上緣是 11.0.0 起 strongly-typed 成為預設、移除 `BuilderFlag.FP16`。帶內取已實測的 `10.13.3.9` |
 | `lap` | ByteTrack 的線性指派求解 |
 | `numpy` | 影格與追蹤結果的陣列運算 |
 | `polars` / `pyarrow` | 追蹤明細 parquet 寫出 |
@@ -42,14 +43,14 @@
 
 依賴版本以 `==` 釘住，固定推理堆疊。
 
-**模型權重**：`config.toml` 的 `model_path`（預設
-`20260714-153811_yolo26m_baseline.pt`，CrowdHuman 微調權重）指向的權重檔不進版控
-（`.gitignore` 排除所有 `*.pt`），需自行放置於 repo 根目錄；若本機找不到該檔，
-ultralytics 會**靜默地自動下載** COCO 版權重。此時 `classes` 過濾會對到錯誤的類別定義
-（如 CrowdHuman 的 `2=fbody` 對到 COCO 的 `2=car`）——`YOLODetector` 載入後會驗證
-`classes` 是否存在於已載入模型的類別定義，不符時直接拋 `ValueError`，故不會靜默產出
-錯誤資料，但仍建議確保權重檔存在以避免此 fail-loud 中斷。此權重 best epoch 驗證指標：
-mAP50≈0.806、recall≈0.72、precision≈0.847。
+**模型**：`config.toml` 的 `model_path` 指向一顆 **TensorRT FP16 引擎**（`.engine`），
+不是 `.pt`。正式套件內已沒有 Torch 權重的推論路徑（[ADR-011](../docs/adr/video_analyze/011-single-inference-backend.md)），
+載到 `.pt` 會當場中止。引擎與權重都不進版控（`.gitignore` 排除 `*.pt`／`*.engine`），
+引擎要用 `tools/build_engine.py` 自行建（見[建置 TensorRT 引擎](#建置-tensorrt-引擎)）。
+
+來源權重為 CrowdHuman 微調的 `20260714-153811_yolo26m_baseline.pt`，best epoch 驗證指標
+mAP50≈0.806、recall≈0.72、precision≈0.847；這些欄位由建置工具抄進引擎 metadata，
+載入時印在 log 裡（引擎本身沒有 `ckpt`，取不到訓練資訊）。
 
 ## 安裝與執行
 
@@ -94,7 +95,8 @@ fuse_score = true
 gmc_method = "none"
 
 [model]
-model_path = "20260714-153811_yolo26m_baseline.pt"
+model_path = "20260714-153811_yolo26m_baseline_sm120.engine"   # 開發機那顆；T4 用 _sm75
+source_weights_sha256 = "b14302f4…"   # 釘住引擎的來源權重；留空則只記 warning
 batch = 8
 classes = [0, 2]           # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
                            # fbody 是追蹤目標；head 只用來推算落腳點，不進 tracker
@@ -113,9 +115,10 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 | 區塊 | 欄位 | 預設 | 約束 / 說明 |
 | --- | --- | --- | --- |
 | `[tracker]` | ByteTrack 各項閾值 | 見範例 | `*_thresh` 皆介於 0–1，`track_buffer >= 1` |
-| `[model]` | `model_path` | `"20260714-153811_yolo26m_baseline.pt"` | 權重檔路徑（CrowdHuman 微調權重） |
-| | `batch` | `1` | YOLO 推理湊批目標，`>= 1`（範例用 `8`）；實際單次推理批次為此值的 2 倍 |
-| | `classes` | `[0, 2]` | 要保留的偵測類別 id；權重類別為 `0=head, 1=vbody, 2=fbody`；至少 1 個元素。載入時會驗證此清單與已載入權重的 `model.names` 相符，不符（如指定的權重檔遺失、fallback 下載到別的模型）直接拋錯。**必須含 fbody**（追蹤目標）；`method = "head"` 時**還必須含 head**，否則直接拋錯——少了 head 每一列都會退回框底邊中點，改動靜默失效 |
+| `[model]` | `model_path` | `"…_sm75.engine"` | TensorRT 引擎路徑。**只吃 `.engine`**，指到 `.pt` 直接中止。檔名的 `_sm<SM>` 尾綴是刻意的：引擎綁架構，兩顆同名會在下游 promotion 撞在一起 |
+| | `source_weights_sha256` | `""` | 釘住引擎的來源 `.pt` 內容 hash，不符即中止。留空只記 warning——這是唯一擋得下「換成另一顆 id 剛好都存在、語義卻不同的權重」的檢查 |
+| | `batch` | `1` | YOLO 推理湊批目標，`>= 1`（範例用 `8`）；實際單次推理批次為此值的 2 倍，**且不得超過引擎建置時綁的最大批次**，超過即中止 |
+| | `classes` | `[0, 2]` | 要保留的偵測類別 id；權重類別為 `0=head, 1=vbody, 2=fbody`；至少 1 個元素。載入時會驗證此清單存在於**引擎 metadata 的 `names`**（不是另建 predictor 去讀 `model.names`，那會把引擎多載一次），不符直接拋錯。**必須含 fbody**（追蹤目標）；`method = "head"` 時**還必須含 head**，否則直接拋錯——少了 head 每一列都會退回框底邊中點，改動靜默失效 |
 | `[foot_point]` | `method` | `"head"` | 落腳點的推算方式：`"head"` 由頭部位置推算（修正斜向視角下框底邊中點落在人體外的偏移），`"bbox_bottom"` 為改動前的框底邊中點，保留供對照與回退。見 [ADR-009](../docs/adr/shared/009-head-based-foot-point.md) |
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（範例用 `bucket_name1`） |
 | | `date` | — | 分析日期 |
@@ -198,6 +201,47 @@ cameras:
 - `config.toml` 的 `camera_ids` 若含 registry 中查無的 ID，直接報錯。
 - `cameras[]` 不接受未列出的欄位（多打的欄位會報錯）。
 
+## 建置 TensorRT 引擎
+
+引擎不是原始碼，是**要在目標 GPU 上建置的產物**（建置時對實際裝置做 kernel
+autotuning）。TensorRT 沒有指定 target SM 的 API，`HardwareCompatibilityLevel` 只有
+`NONE`／`AMPERE_PLUS`／`SAME_COMPUTE_CAPABILITY` 而 `AMPERE_PLUS` 不含 Turing，所以
+**開發機建不出 T4 要用的引擎**：同一份權重、同一支工具、兩台機器、兩顆二進位。
+
+```bash
+# 在 repo 根目錄執行；--package 不改變 cwd（--directory 會）
+uv run --package video_analyze python video_analyze/tools/build_engine.py \
+    --weights 20260714-153811_yolo26m_baseline.pt \
+    --output-dir . \
+    --batch 16 \
+    --bucket bucket_20260801_small
+```
+
+`--batch` 是引擎綁的**最大**批次，要等於 `config.toml` 的 `[model] batch` 的 2 倍
+（ultralytics 對 in-memory list source 一次 forward 整個 list）。產物名為
+`<權重 stem>_sm<SM>.engine`。
+
+工具做四件事，**任何一關沒過就不留下產物**（先落在 `.unverified` 尾綴上，全過才改名）：
+
+1. 以 `half=True, dynamic=True, imgsz=(384, 640)` 匯出，並用 `on_export_start` callback
+   把來源權重身分、SM、TensorRT／CUDA／驅動版本與訓練追溯資訊注入 metadata。
+2. 驗引擎本身：metadata 對得上當下環境、`args.half` 為真、`args.dynamic` 為真、最大批次
+   等於 `--batch`，並真的用滿批跑一格確認實際形狀是 384×640。
+3. 對 Torch FP32 逐框比對（`tools/compare_backend.py`），比的是**框底邊中點的座標偏差**
+   ——下游的落腳點、跨線進出、區域佔用都從這個點算。
+4. 套四道門檻（`compare_backend.check_report`）：落腳點偏差 **p99** ≤ 1.20 px、偏差
+   > 5 px 的配對比例 ≤ 0.5%、配對率 ≥ 98%、偵測框數差 ≤ ±2%。任一沒過就刪掉產物並以
+   非零 exit code 結束。**判準看 p99 不看 max**：既有的 1.20 px 是 277 個框的 max、
+   1.16 px 是 277 個框的 p99，而本工具預設取樣 2000 個框以上——max 是樣本數的函數，
+   尾巴改由「超過 5 px 的比例」這道門檻管（見 ADR-011）。
+
+比對**強制關閉 TF32**：PyTorch 預設讓卷積在 Ampere＋用 TF32（尾數 10 bit），開發機的
+5090 吃得到而 T4 是 Turing、跑的是真 FP32。在開發機用預設值量等於拿「TF32 對 FP16」當
+「FP32 對 FP16」，會**低估**偏差——而低估的方向剛好是「看起來沒問題」。
+
+`tools/` 在 `src/` 之外，不隨 wheel 出貨；那兩支工具會載 `.pt`，但不經過
+`YOLODetector`。這條分界就是 ADR-011 說的「正式產品只有一套 inference implementation」。
+
 ## 函式介面
 
 ```python
@@ -258,7 +302,8 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理／追蹤子進程生命週期） |
 | `services/inference.py` | 推理迴圈（湊批、偵測、把偵測框送往追蹤進程） |
 | `services/track_worker.py` | 追蹤進程：偵測框拆分、追蹤、落腳點推算、座標反算、落盤；`TRACK_DONE`／`TRACK_FAILED` 訊號 |
-| `services/detector.py` | YOLO 偵測 |
+| `services/detector.py` | TensorRT 引擎載入與偵測；載入前的四道檢查與執行期的形狀核對 |
+| `services/engine_metadata.py` | 引擎自帶 metadata 的注入格式、讀取與環境比對（建置端與載入端共用同一份） |
 | `services/foot_point.py` | `FootPointEstimator`：head 框配對與落腳點推算；自行維護跨幀狀態（每條軌跡上次成功推算的偏移量，共用 head 的那些不存） |
 | `services/tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |
 | `services/tracking_results.py` | 追蹤明細累積與 parquet 寫出 |
@@ -321,6 +366,22 @@ zone 與 line 幾何都不會被驗證。
   的日期目錄，寧可中止也不靜默寫錯天。此檢查在 `discover_segments` 掃描時、於主進程
   執行，**任一路踩到就整天中止**（不是只跳過該攝影機或該片段）。
 - 其餘片段的開檔 / 讀 FPS 失敗 → 讀取子進程拋錯、以非零 exitcode 結束。
+- **引擎載入前的四道檢查，任一不過即中止**（`services/detector.py`）：`model_path` 不是
+  `.engine`、引擎檔不存在（**這道 `is_file()` 前置檢查不可移除**——ultralytics 的
+  `check_file` 在檔案不存在時會遞迴 glob 整個套件目錄找同名檔、把 `gs://` 改寫成公開
+  HTTPS 下載、把沒有副檔名的值補成官方權重下載）、引擎 metadata 與當下環境不符
+  （compute capability／TensorRT 版本／TensorRT wheel 變體／來源權重 hash，四項各自拋錯、
+  訊息指出是哪一項；驅動版本與 torch 的 CUDA 建置版本只記 warning——它們不在 TensorRT 對
+  引擎的約束裡）、引擎不是 FP16 建的。沒有 CUDA 也是中止而非 fallback CPU。
+- **引擎不是 dynamic 建的 → 拋 `ValueError`**。靜態引擎會通過其餘全部載入檢查，然後在
+  第一個沒湊滿的批次上被 ultralytics 的 assert 擋下（訊息看不出原因）——而湊不滿批是
+  常態：T4 上實測一次跑完出現 16 種不同的批次大小。
+- **實際進入推論的張量形狀不是 640×384 → 拋 `ValueError`**。讀的是 TensorRT backend 自己
+  的 binding。這一項取代了 `_validate_imgsz`：dynamic 引擎不套用 metadata 的 `imgsz`
+  （`predictor.py` 只在 backend 不是 dynamic 時才套用），照抄那個檢查會得到一個看起來
+  有在驗、其實驗不到的檢查（見 ADR-011）。
+- **單次批次超過引擎綁的最大批次 → 拋 `ValueError`**（`services/inference.py`，在主迴圈的
+  try 內，送得出 `TRACK_FAILED`）。
 - **`frame_shapes` 傳成推論尺寸 → `run_track_worker` 拋 `ValueError`**。那代表
   拿到的是縮放後的尺寸而非原始解析度，反算會退化成恆等、parquet 的 `frame_width` 也一起
   寫成 640，而下游 zone／line 只檢查欄位存在（ADR-004／ADR-006）。影格尺寸與緩衝配置
@@ -333,9 +394,11 @@ zone 與 line 幾何都不會被驗證。
   容量上限**（`track_worker.TRACK_QUEUE_SLOTS`）：訊號是排在同一條佇列尾端的 in-band
   訊號，backlog 無上限的話它會晚於父進程的 terminate 抵達而靜默失效。這是「backlog
   有界」的推論而非時序保證——上限隨 `MODEL__BATCH` 線性成長，父進程的偵測延遲不隨它
-  成長，故調大 batch 時要重新評估。另外，**推論主迴圈啟動之前**就失敗的路徑（例如
-  建 `YOLODetector` 時拋錯）送不到訊號，追蹤進程要等父進程 SIGTERM；那時還沒有任何
-  `.tmp`，損失的只是關機延遲。**推論進程被
+  成長，故調大 batch 時要重新評估。**推論主迴圈啟動之前**就失敗的路徑（建 `YOLODetector`、建環形緩衝）
+  由 `run_inference_pipeline` 自己的 `except` 送出同一個訊號——改吃引擎之後「載入失敗」
+  從罕見變成常見的一類（引擎檔不在、SM 對不上、TensorRT 版本與映像檔不一致），而
+  `track_queue` 的 pipe 寫入端 fd 被父進程與九個讀取進程一起繼承，上游死掉不會讓
+  `get()` 收到 EOF（issue #113）。**推論進程被
   SIGKILL 或整機掛掉不在覆蓋範圍**：追蹤進程會卡在 `track_queue.get()` 等不到訊號、
   由父進程 terminate，而 terminate 不走 Python 的 `except`／`finally`，`.tmp` 會留下。
 

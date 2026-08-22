@@ -12,6 +12,13 @@ wheels/
 # Model Weights
 *.pt
 
+# TensorRT 引擎與匯出中繼檔。引擎比 .pt 更不該進版控：每張卡一顆、每次升 TensorRT
+# 全部作廢、幾十 MB 的二進位，走 artifact 而非 git（見 ADR-011）。
+# `.unverified` 是 tools/build_engine.py 比對通過前的暫存名稱。
+*.engine
+*.engine.unverified
+*.onnx
+
 # 雲端 GCS bucket 的本機鏡像（含影片與 camera_registry.yaml，皆由雲端輸出，不進版控）
 # pattern 涵蓋所有 bucket_ 開頭的目錄：實際用到的 bucket 除了 bucket_name1，還有
 # bucket_<日期>_<變體>（例如 bucket_20260801_small）這種依資料集命名的。

@@ -136,8 +136,8 @@ class InferencePipeline:
         落盤不在這裡：正常跑完送 `TRACK_DONE`，追蹤進程收到才 `save()`；中途例外送
         `TRACK_FAILED` 讓它清掉不完整的暫存檔，再把例外重新拋出（fail-loud）。
         **本函式內的例外都送得到訊號**；在此之前就失敗的路徑（例如
-        `run_inference_pipeline` 建 `YOLODetector` 時拋錯）送不到，追蹤進程要等父進程
-        SIGTERM——那時還沒有任何 `.tmp`，損失的只是關機延遲。
+        `run_inference_pipeline` 建 `YOLODetector` 時拋錯）不由本函式覆蓋，改由該函式
+        自己的 `except` 送出（見 `services/pipeline.py`）。
 
         Args:
             data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
@@ -145,13 +145,34 @@ class InferencePipeline:
             rings: 各路的共享記憶體環形緩衝，索引為 stream_id。
 
         Raises:
-            ValueError: 任一路的環形緩衝格數不足單次批次的 2 倍。
+            ValueError: 單次批次超過引擎綁的最大批次，或任一路的環形緩衝格數不足
+                單次批次的 2 倍。
             RuntimeError: 任一路讀取進程回報 `READER_FAILED`。
             BaseException: 其他子系統拋出的例外，會原樣重新拋出。
         """
         logger.info("模組化推理流程啟動...")
         start = time.perf_counter()
         try:
+            # 引擎的 batch 維度上限是建置時綁死的（dynamic 引擎的 optimization
+            # profile 取 max batch = 匯出時的 `batch`）。超過的話 ultralytics 的
+            # TensorRT backend 會在 `forward` 的 assert 失敗——那條訊息只講「input
+            # size 不等於 model size」，看不出是批次設定與引擎對不上。在這裡先擋，
+            # 訊息才指得出要改哪一邊。與下面的環形緩衝檢查同樣放在 try 內：追蹤進程
+            # 已經等在 queue 上，要送得出 TRACK_FAILED。
+            #
+            # 這裡是 `settings.model.batch * 2` 這個推導**唯一**與引擎交會的地方，
+            # 所以檢查放在推理端而不是 detector 內——那個 ×2 屬於本模組
+            if (
+                self.detector.max_batch is not None
+                and self._target_batch > self.detector.max_batch
+            ):
+                raise ValueError(
+                    f"單次推理批次 {self._target_batch}（[model].batch = "
+                    f"{settings.model.batch} 的 2 倍）超過引擎綁的最大批次 "
+                    f"{self.detector.max_batch}。請把 [model].batch 調到 "
+                    f"{self.detector.max_batch // 2} 以下，或用 "
+                    "`tools/build_engine.py --batch` 重建一顆容得下的引擎。"
+                )
             # 這道檢查放在 try 內而非之前：追蹤進程此時已經起來、等在 queue 上，不送
             # TRACK_FAILED 的話它要等到被父進程 SIGTERM 才結束（此時還沒有 `.tmp`，
             # 損失的只是關機延遲，但沒理由讓一條已經有訊號的路徑走不到）。
