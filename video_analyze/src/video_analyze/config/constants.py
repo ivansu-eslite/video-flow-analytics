@@ -1,7 +1,7 @@
 """非 Pydantic 的靜態常數：輸出根、追蹤結果檔名與 parquet schema。
 
 與各套件慣例一致，把輸出契約（路徑、檔名、欄位 schema）從邏輯模組抽出集中於此；
-模組私有的調校常數（湊批等待、環形緩衝 slot 數、flush 門檻等）仍留在各自模組。
+模組私有的調校常數（湊批等待、flush 門檻等）仍留在各自模組。
 """
 
 from pathlib import Path

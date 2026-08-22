@@ -26,7 +26,6 @@ class TrackerConfig(BaseModel):
         track_buffer: 軌跡遺失後可保留等待重新關聯的幀數。
         match_thresh: 偵測框與既有軌跡配對的 IoU 門檻。
         fuse_score: 是否將信心度分數融入 IoU 距離計算。
-        gmc_method: 全域運動補償方法。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -37,7 +36,6 @@ class TrackerConfig(BaseModel):
     track_buffer: int = Field(default=30, ge=1)
     match_thresh: float = Field(default=0.8, ge=0.0, le=1.0)
     fuse_score: bool = True
-    gmc_method: str = "none"
 
 
 class ModelConfig(BaseModel):
@@ -51,11 +49,11 @@ class ModelConfig(BaseModel):
             引擎自帶的 metadata，不符即中止；留空代表不釘（只記 warning）。這是
             唯一擋得下「換成另一顆 id 剛好都存在、語義卻不同的權重」的檢查——
             `classes` 只驗 id 存在。
-        batch: 湊批目標。**實際單次推理批次是此值的 2 倍**（ultralytics 對
-            in-memory list source 一次 forward 整個 list），而那個實際值不得超過
-            引擎建置時綁的最大批次（見 `services/inference.py` 的檢查）。此值同時
-            推導出環形緩衝格數與 track queue 容量（`services/frame_ring.py`、
-            `services/track_worker.py`），調整前先讀那兩處的說明。
+        batch: 單次推理批次，即一次 `predict` 送進去的影格數（沒有隱含倍數：
+            ultralytics 對 in-memory list source 一次 forward 整個 list）。不得
+            超過引擎建置時綁的最大批次，該上限由 `tools/build_engine.py --batch`
+            決定、兩者同尺度，超過會被 `services/inference.py` 擋下。此值同時推導
+            出環形緩衝格數與 track queue 容量，調整前先讀 `services/batching.py`。
         classes: 要保留的偵測類別 id 清單，對應權重的類別定義。預設同時保留
             head 與 fbody：fbody 是追蹤目標，head 只供落腳點推算用（不進
             tracker，見 `services/track_worker.py`）。

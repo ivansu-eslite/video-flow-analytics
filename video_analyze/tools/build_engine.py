@@ -24,8 +24,8 @@
   **實際進入推論的 (H, W)**（見 `detector.py` 的 `_check_infer_shape`）。
 - **`batch=<最大批次>`**。dynamic 引擎的 batch 維度上限就是這個值（optimization
   profile 的 max shape 取 `shape[0]`），所以它與 `config.toml` 的 `[model] batch`
-  要一起定：實際單次推理批次是設定值的 2 倍（ultralytics 對 in-memory list source
-  一次 forward 整個 list），超過引擎上限會在 `forward` 的 assert 當場失敗。
+  要一起定：兩者同尺度（設定值就是實際的單次推理批次），這裡要容得下設定值，
+  超過引擎上限會在 `forward` 的 assert 當場失敗。
 
 用法（**在 repo 根目錄執行**，用 `--package` 不用 `--directory`：`--directory` 會把
 cwd 切進套件資料夾，而 `[model].model_path` 與 `bucket_dir` 都是 cwd 相對路徑）：
@@ -231,8 +231,8 @@ def main() -> None:
         "--batch",
         type=int,
         required=True,
-        help="引擎的最大批次。是 config.toml [model].batch 的 2 倍（ultralytics 對 "
-        "in-memory list source 一次 forward 整個 list）",
+        help="引擎的最大批次。要容得下 config.toml 的 [model].batch（兩者同尺度，"
+        "設定值就是實際的單次推理批次）",
     )
     ap.add_argument(
         "--bucket", type=Path, default=None, help="比對取樣用的 bucket；省略即 --skip-compare"

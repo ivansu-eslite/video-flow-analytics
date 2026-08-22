@@ -5,7 +5,6 @@ new_track_thresh = 0.6
 track_buffer = 30
 match_thresh = 0.8
 fuse_score = true
-gmc_method = "none"
 
 [model]
 # TensorRT FP16 引擎（正式推論路徑只吃 .engine，見 ADR-011），路徑為 cwd 相對。
@@ -18,8 +17,8 @@ model_path = "20260714-153811_yolo26m_baseline_sm120.engine"
 # 「換成另一顆類別 id 剛好都存在、語義卻不同的權重」的檢查（classes 只驗 id 存在）。
 # 留空則只記 warning、不比對。
 source_weights_sha256 = "b14302f4b93af844b818082c1f67f423033cc2386a529b43841a1a254614fa87"
-batch = 8                 # 湊批目標，實際單次推理批次為此值的 2 倍，且不得超過引擎
-                          # 建置時綁的最大批次（`build_engine.py --batch`，目前 16）
+batch = 16                # 單次推理批次，不得超過引擎建置時綁的最大批次
+                          # （`build_engine.py --batch`，目前 16）
 classes = [0, 2]           # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
                            # fbody 是追蹤目標；head 只用來推算落腳點，不進 tracker
 

@@ -4,7 +4,7 @@ from queue import Empty
 
 from vfa_observability import StructuredLogger
 
-from video_analyze.models.config import settings
+from video_analyze.services.batching import TARGET_BATCH
 from video_analyze.services.detector import YOLODetector
 from video_analyze.services.fps_meter import FpsMeter
 from video_analyze.services.frame_ring import FrameRing
@@ -55,11 +55,7 @@ class InferencePipeline:
         self.detector = detector
         self.track_queue = track_queue
         self.fps_meter = FpsMeter()
-        # ultralytics 對 in-memory list source 一次 forward 整個 list（batch=
-        # 只對檔案來源的 LoadImagesAndVideos 有效），故單次 forward 實際批次為
-        # settings.model.batch 的 2 倍；此處湊批目標維持現狀（見 detector.py
-        # 移除 no-op 的 batch= kwarg 說明），未量測前不改行為
-        self._target_batch = settings.model.batch * 2
+        self._target_batch = TARGET_BATCH
 
     def _collect_batch(
         self,
@@ -145,8 +141,7 @@ class InferencePipeline:
             rings: 各路的共享記憶體環形緩衝，索引為 stream_id。
 
         Raises:
-            ValueError: 單次批次超過引擎綁的最大批次，或任一路的環形緩衝格數不足
-                單次批次的 2 倍。
+            ValueError: 單次批次超過引擎綁的最大批次。
             RuntimeError: 任一路讀取進程回報 `READER_FAILED`。
             BaseException: 其他子系統拋出的例外，會原樣重新拋出。
         """
@@ -157,35 +152,20 @@ class InferencePipeline:
             # profile 取 max batch = 匯出時的 `batch`）。超過的話 ultralytics 的
             # TensorRT backend 會在 `forward` 的 assert 失敗——那條訊息只講「input
             # size 不等於 model size」，看不出是批次設定與引擎對不上。在這裡先擋，
-            # 訊息才指得出要改哪一邊。與下面的環形緩衝檢查同樣放在 try 內：追蹤進程
-            # 已經等在 queue 上，要送得出 TRACK_FAILED。
+            # 訊息才指得出要改哪一邊。放在 try 內而非之前：追蹤進程此時已經起來、
+            # 等在 queue 上，要送得出 TRACK_FAILED，不必等父進程 SIGTERM。
             #
-            # 這裡是 `settings.model.batch * 2` 這個推導**唯一**與引擎交會的地方，
-            # 所以檢查放在推理端而不是 detector 內——那個 ×2 屬於本模組
+            # 檢查放在推理端而不是 detector 內：湊到幾格是本模組決定的
+            # （`_collect_batch`），detector 只負責把拿到的 list 送進引擎
             if (
                 self.detector.max_batch is not None
                 and self._target_batch > self.detector.max_batch
             ):
                 raise ValueError(
-                    f"單次推理批次 {self._target_batch}（[model].batch = "
-                    f"{settings.model.batch} 的 2 倍）超過引擎綁的最大批次 "
-                    f"{self.detector.max_batch}。請把 [model].batch 調到 "
-                    f"{self.detector.max_batch // 2} 以下，或用 "
+                    f"單次推理批次 {self._target_batch}（[model].batch）超過引擎綁的"
+                    f"最大批次 {self.detector.max_batch}。請把 [model].batch 調到 "
+                    f"{self.detector.max_batch} 以下，或用 "
                     "`tools/build_engine.py --batch` 重建一顆容得下的引擎。"
-                )
-            # 這道檢查放在 try 內而非之前：追蹤進程此時已經起來、等在 queue 上，不送
-            # TRACK_FAILED 的話它要等到被父進程 SIGTERM 才結束（那條路徑也會清掉暫存檔，
-            # 損失的只是關機延遲，但沒理由讓一條已經有訊號的路徑走不到）。
-            #
-            # `frame_ring.RING_SLOTS` 的推導式已保證這條成立，所以這裡防的不是「有人調
-            # batch」，而是日後兩處推導公式漂移：一批會同時扣住同一路最多 _target_batch
-            # 個 slot 直到推論結束，總數不足其 2 倍時 reader 在整個推論期間都拿不到空位、
-            # 完全停擺，而且不會有任何錯誤訊息
-            if any(ring.num_slots < 2 * self._target_batch for ring in rings):
-                raise ValueError(
-                    f"環形緩衝格數需至少為單次批次（{self._target_batch}）的 2 倍，"
-                    f"實得 {[ring.num_slots for ring in rings]}；"
-                    "推論完才歸還 slot 的設計下，格數不足會讓讀取進程停擺。"
                 )
             while len(self.finished_streams) < self.num_streams:
                 batch_packets, batch_stream_ids, held_slots = self._collect_batch(

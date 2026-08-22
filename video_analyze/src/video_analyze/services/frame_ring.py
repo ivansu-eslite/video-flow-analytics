@@ -5,32 +5,10 @@ import os
 import numpy as np
 from vfa_observability import StructuredLogger
 
-from video_analyze.models.config import settings
-
 logger = StructuredLogger(component="frame_ring")
 
 # `mp.RawArray` 在 Linux 是這個目錄下的檔案 mmap（tmpfs，速度等同 RAM）
 _SHM_DIR = "/dev/shm"
-
-# 每路環形緩衝的 slot 數，即 reader 能領先推理進程的影格數上限（等同背壓深度）。
-# 由 `settings.model.batch` 推導而非寫死：推理進程改成整批推論完才歸還 slot（見
-# `view_slot`）之後，格數的約束來自批次大小，只調 batch 而沒同步調格數時 reader 會
-# 在整個推論期間拿不到空位而停擺，且沒有任何錯誤訊息。
-#
-# 兩個 ×2 的來源不同：
-# - 其一：ultralytics 對 in-memory list source 一次 forward 整個 list（`batch=` 只對
-#   檔案來源的 LoadImagesAndVideos 有效），故單次批次是 `settings.model.batch` 的 2 倍，
-#   即 `InferencePipeline._target_batch`。
-# - 其二：扣住一批之外要再留同量空位給 reader 備下一批。「2 × 一批」正是「單一路供批
-#   時 reader 完全不因缺 slot 而停」的最小值——issue #100 只改湊批的輪替起點，內層
-#   `while` 仍會把起點那一路取到滿批才換手，所以「整批來自同一路」是常態。
-#
-# 記憶體用量 = RING_SLOTS × 每格位元組 × 路數。影格於讀取端就縮成推論尺寸（640×384，
-# 見 `services/letterbox.py`），每格一律 0.70 MiB 而與來源解析度無關，batch = 8（32 格）
-# 時九路合計 202.5 MiB。縮放前移之前存的是原始解析度（4K 每格 23.73 MiB、1080p 每格
-# 5.93 MiB，九路合計 3.34 GiB）。`MODEL__BATCH` 的環境變數覆寫會連帶放大緩衝，記憶體隨
-# batch 線性成長。
-RING_SLOTS = settings.model.batch * 4
 
 _CHANNELS = 3  # BGR
 
@@ -42,7 +20,7 @@ def create_ring_buffer(num_slots: int, height: int, width: int):
     匿名 mmap，寫入互相可見（不經 pickle）。
 
     Args:
-        num_slots: 緩衝的 slot 數（見 `RING_SLOTS`）。
+        num_slots: 緩衝的 slot 數（見 `services/batching.py` 的 `RING_SLOTS`）。
         height: 影格高度（pixel）。
         width: 影格寬度（pixel）。
 

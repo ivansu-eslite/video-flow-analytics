@@ -31,8 +31,7 @@ import torch
 from ultralytics.engine.results import Boxes, Results
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
-from video_analyze.models.config import settings
-from video_analyze.services.frame_ring import RING_SLOTS
+from video_analyze.services.batching import RING_SLOTS, TARGET_BATCH
 from video_analyze.services.inference import InferencePipeline
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
 from video_analyze.services.track_worker import TRACK_DONE, TRACK_FAILED
@@ -85,9 +84,9 @@ class _ScriptedDetector:
     只在「呼叫的當下」看得出來，事後從輸出完全看不出來。
     """
 
-    # 引擎綁的最大批次。正式的 `YOLODetector` 從引擎 metadata 讀，這裡照正式設定
-    # 算出來的實際批次給，讓 `start_loop` 開頭的上限檢查在真實條件下跑過
-    max_batch = settings.model.batch * 2
+    # 引擎綁的最大批次。正式的 `YOLODetector` 從引擎 metadata 讀，這裡照正式設定的
+    # 單次批次給，讓 `start_loop` 開頭的上限檢查在真實條件下跑過
+    max_batch = TARGET_BATCH
 
     def __init__(self, per_frame: list[Boxes], free_queue: queue.Queue):
         self._remaining = iter(per_frame)
@@ -245,7 +244,7 @@ def test_slots_are_returned_after_inference_and_before_dispatch():
     量，讓跨批的歸還順序也被涵蓋（只驗單批的話，第二批之後歸還早一步也看不出來）。
     末尾再驗全數歸還——漏還的話 reader 會卡在 `free_queue.get()`，整條 pipeline 停住。
     """
-    num_frames = 20  # > _target_batch（batch=8 → 16），確保跑到第二批
+    num_frames = TARGET_BATCH + 4  # > 一批，確保跑到第二批
     _dispatched, free_queue, detector = _run_loop([_FRAME_0_DETECTIONS] * num_frames)
 
     assert len(detector.predict_log) >= 2, "沒跑到第二批，跨批歸還沒被涵蓋"
@@ -276,7 +275,7 @@ def test_a_batch_larger_than_the_engine_ceiling_aborts_with_track_failed():
     """
     free_queue: queue.Queue = queue.Queue()
     detector = _ScriptedDetector([_FRAME_0_DETECTIONS], free_queue)
-    detector.max_batch = settings.model.batch * 2 - 1  # 剛好差一格
+    detector.max_batch = TARGET_BATCH - 1  # 剛好差一格
     track_queue: queue.Queue = queue.Queue()
     pipeline = InferencePipeline(
         stream_names=["loc_cam001"],
