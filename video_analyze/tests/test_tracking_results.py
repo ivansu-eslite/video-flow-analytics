@@ -432,7 +432,7 @@ def test_save_refuses_to_rename_a_file_it_did_not_write(tmp_path):
     tmp_file.unlink()  # 運維人員手動清掉
     tmp_file.write_bytes(b"y" * 21)  # 另一個執行接手，正在寫的半成品
 
-    with pytest.raises(RuntimeError, match="已不是本次執行寫的那一份"):
+    with pytest.raises(RuntimeError, match="已不是本次執行認領的那一份"):
         collector.save()
 
     assert not results_path.exists()
@@ -468,3 +468,61 @@ def test_discard_removes_the_tmp_even_if_closing_the_writer_fails(tmp_path):
         collector.discard()
 
     assert not tmp_file.exists()
+
+
+def test_flush_refuses_to_write_over_a_file_it_did_not_claim(tmp_path):
+    """真正造成破壞的是**寫入**那一步：`ParquetWriter` 以路徑開檔、帶 `O_TRUNC`。
+
+    路徑此刻若已經是別人的檔（有人手動 `rm` 掉暫存檔之後另一個執行接手），第一次 flush
+    就會把對方的內容截掉並蓋寫。只在 `save()` 檢查已經來不及——那時對方的資料早就沒了，
+    而錯誤訊息還會把受害者講反。
+    """
+    results_path = tmp_path / "tracking_results.parquet"
+    tmp_file = tmp_path_for(results_path)
+    fd = claim_tmp_slot(results_path)  # 本次認領到的那一份
+    collector = TrackingResultCollector(results_path)
+    tmp_file.unlink()  # 被手動清掉
+    tmp_file.write_bytes(b"y" * 4096)  # 另一個執行接手，正在寫的內容
+
+    collector.add(
+        camera_id="loc_cam001",
+        frame_index=0,
+        timestamp=_stamp(0),
+        tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
+        foot_points=_feet((23.0, 41.0)),
+        frame_width=_WIDTH,
+        frame_height=_HEIGHT,
+    )
+    with pytest.raises(RuntimeError, match="不能開始寫入"):
+        collector._flush()
+    os.close(fd)
+
+    assert tmp_file.read_bytes() == b"y" * 4096  # 對方的內容一個字節都沒動
+
+
+def test_flush_fails_loud_when_the_claimed_tmp_was_removed(tmp_path):
+    """認領到的暫存檔被外部清掉時，要在寫入之前就中止，而不是寫完才判定遺失。
+
+    不擋的話 `ParquetWriter` 會在同一個路徑上建一個**新的** inode 並把整天的結果寫進去，
+    然後 `save()` 因為 inode 對不上而拒絕改名——一份完整的結果被判成遺失、還以 `.tmp`
+    留在輸出目錄，兩邊都錯。
+    """
+    results_path = tmp_path / "tracking_results.parquet"
+    fd = claim_tmp_slot(results_path)
+    collector = TrackingResultCollector(results_path)
+    tmp_path_for(results_path).unlink()  # 例如被清理排程掃掉
+
+    collector.add(
+        camera_id="loc_cam001",
+        frame_index=0,
+        timestamp=_stamp(0),
+        tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
+        foot_points=_feet((23.0, 41.0)),
+        frame_width=_WIDTH,
+        frame_height=_HEIGHT,
+    )
+    with pytest.raises(RuntimeError, match="不能開始寫入"):
+        collector._flush()
+    os.close(fd)
+
+    assert not results_path.exists()

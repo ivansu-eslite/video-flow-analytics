@@ -82,11 +82,12 @@ _EMPTY_DETECTION_COLUMNS = 6
 #   給上限之後 `put` 會阻塞推論迴圈 → 推論不再消費 slot → reader 跟著阻塞，整條 pipeline
 #   收斂到最慢的階段，與追蹤還在推論進程內時的行為一致。
 # - **`TRACK_FAILED` 送不到**。它是排在同一條 FIFO 尾端的 in-band 訊號，送達延遲與
-#   backlog 成正比；而推論進程一死，父進程約 0.5 秒內就 `_terminate_all`，terminate 不走
-#   Python 的 `except`／`finally`。backlog 大到消化不完那幾秒的量時，本進程會在還沒讀到
-#   訊號時被 SIGTERM 收掉，`collector.discard()` 從未執行、`.tmp` 留在輸出目錄——也就是
-#   那條失效路徑會靜默失效。有了上限，backlog 至多這麼多格——預設 batch（8，即上限 64
-#   格）下約 70 ms 的工作量，遠小於父進程的偵測延遲，訊號趕得上。
+#   backlog 成正比；而推論進程一死，父進程約 0.5 秒內就 `_terminate_all`。backlog 大到
+#   消化不完那幾秒的量時，本進程會在還沒讀到訊號時就被 SIGTERM 收掉。**暫存檔仍然清得
+#   掉**（issue #113 之後 SIGTERM 有 handler，走的是同一個 `collector.discard()`），但
+#   那條 in-band 的失效路徑等於沒作用，而且會把「上游崩潰」與「被 terminate」混成同一種
+#   結束方式。有了上限，backlog 至多這麼多格——預設 batch（8，即上限 64 格）下約 70 ms
+#   的工作量，遠小於父進程的偵測延遲，訊號趕得上。
 #   ⚠ **這是「backlog 有界」的推論，不是時序保證**：上限隨 `MODEL__BATCH` 線性成長，而
 #   父進程的偵測延遲不隨它成長，所以把 batch 調得很大時這個邊際會變薄（例如
 #   `MODEL__BATCH=64` → 上限 512 格）。調大 batch 時要一併重新評估這條路徑。
@@ -293,7 +294,9 @@ def run_track_worker(
     _reject_inference_sized_shapes(frame_shapes)
     # 註冊在認領之前：`claim_tmp_slot` 一旦把 `.tmp` 建出來，這之後的每一步（含建構
     # tracker、落腳點推算器）被 SIGTERM 打斷都得走得到清理，否則那個窗口內收到訊號
-    # 就會留下殘檔
+    # 就會留下殘檔。⚠ 有一段仍蓋不到：`claim_tmp_slot` 內部從 `os.open` 到回傳之間，
+    # `lock_fd` 與 `collector` 都還是 `None`，`except` 兩件事都不做，訊號落在那裡會留下
+    # 一個 0 byte 的 `.tmp`。窗口不到毫秒、殘檔無害，且下次認領同一條路徑時會清掉
     previous_sigterm = signal.signal(signal.SIGTERM, _raise_on_sigterm)
     # SIGINT 不改處置（Ctrl+C 照常以 KeyboardInterrupt 進到清理），只記下來，清理期間
     # 要連它一起擋掉

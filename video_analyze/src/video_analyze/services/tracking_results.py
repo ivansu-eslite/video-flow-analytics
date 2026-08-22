@@ -227,6 +227,7 @@ class TrackingResultCollector:
         table = pl.DataFrame(self._columns, schema=_SCHEMA).to_arrow()
         if self._writer is None:
             self._tmp_path.parent.mkdir(parents=True, exist_ok=True)
+            self._require_own_tmp("開始寫入")
             self._writer = pq.ParquetWriter(str(self._tmp_path), table.schema)
             if self._tmp_identity is None:
                 # 沒有經過認領（例如測試直接建 collector）：這一份是這裡建出來的。
@@ -243,7 +244,7 @@ class TrackingResultCollector:
         self._flush()
         if self._writer is not None:
             self._writer.close()
-            self._require_own_tmp()
+            self._require_own_tmp("改名成正式檔名")
             self._tmp_path.replace(self._results_path)
         else:
             # 全天沒有任何追蹤結果，仍要寫出一個空的 parquet（維持欄位 schema）
@@ -272,25 +273,33 @@ class TrackingResultCollector:
         finally:
             self._remove_tmp()
 
-    def _require_own_tmp(self) -> None:
-        """改名成正式檔名之前確認暫存檔還是自己那一份，不是的話 fail loud。
+    def _require_own_tmp(self, action: str) -> None:
+        """動這個暫存檔之前先確認它還是自己認領的那一份，不是的話 fail loud。
 
-        `replace()` 依路徑動作，而這個路徑此刻可能已經是別人的檔（有人手動 `rm` 掉暫存檔
-        之後另一個執行接手）。不檔的話會把對方**寫到一半**的內容改名成正式檔名，log 還
-        照樣印「追蹤結果已寫入 rows=N」，下游要到 `pl.read_parquet` 才以「must end with
-        PAR1」崩在離原因很遠的地方。
+        **兩個時機都要問**，而且要在**寫入之前**問第一次：`pq.ParquetWriter` 以路徑開檔、
+        帶 `O_TRUNC`，路徑此刻若已經是別人的檔（有人手動 `rm` 掉暫存檔之後另一個執行
+        接手），第一次 flush 就會把對方的內容截掉並蓋寫——真正造成破壞的是這一步，等到
+        `save()` 才檢查已經來不及，訊息還會把受害者講反。`replace()` 同樣依路徑，不檔的話
+        會把對方**寫到一半**的內容改名成正式檔名，log 照樣印「追蹤結果已寫入 rows=N」，
+        下游要到 `pl.read_parquet` 才以「must end with PAR1」崩在離原因很遠的地方。
 
-        走到這裡代表本次的結果已經跟著被刪掉的 inode 一起沒了，救不回來，只能明講。
+        `_tmp_identity` 為 `None` 代表這個 collector 沒有經過認領（例如測試直接建），
+        沒有可比對的身分，放行。
+
+        Args:
+            action: 接下來要做的事，寫進錯誤訊息（例如「開始寫入」）。
 
         Raises:
-            RuntimeError: 暫存檔已不是本次執行寫的那一份。
+            RuntimeError: 暫存檔已不是本次執行認領的那一份。
         """
+        if self._tmp_identity is None:
+            return
         if _identity_of(self._tmp_path) == self._tmp_identity:
             return
         raise RuntimeError(
-            f"暫存檔 {self._tmp_path} 已不是本次執行寫的那一份（被刪掉或換成別的檔），"
-            "不能改名成正式檔名——那會把別人寫到一半的內容當成本次結果。"
-            "本次的追蹤結果已隨著原本的檔案一起遺失，請重跑。"
+            f"暫存檔 {self._tmp_path} 已不是本次執行認領的那一份（被刪掉或換成別的檔），"
+            f"不能{action}——那會動到別人的檔案。本次執行中止，請確認沒有其他程序在清理"
+            "或寫入這個輸出目錄之後重跑。"
         )
 
     def _remove_tmp(self) -> None:
