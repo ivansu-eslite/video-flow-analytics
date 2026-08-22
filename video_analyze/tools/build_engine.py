@@ -40,6 +40,7 @@ import argparse
 import json
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import torch
@@ -119,42 +120,48 @@ def engine_filename(weights: Path, compute_capability: str) -> str:
     return f"{weights.stem}_sm{compute_capability.replace('.', '')}.engine"
 
 
-def export_engine(weights: Path, batch: int, vfa_metadata: dict) -> Path:
-    """匯出 FP16 dynamic 引擎，並把 `vfa` 欄位注入 metadata。
+def export_engine(weights: Path, batch: int, vfa_metadata: dict, dest: Path) -> None:
+    """匯出 FP16 dynamic 引擎並把 `vfa` 欄位注入 metadata，產物落在 `dest`。
 
     注入走 `on_export_start` callback：公開的 `export()` 沒有任意欄位入口，而
     `Exporter.__call__` 是先組完 `self.metadata` 才 `run_callbacks("on_export_start")`，
     所以那個時點改得動它。
 
+    **匯出在暫存目錄裡做，權重原地不動。** ultralytics 把產物寫在來源權重旁邊
+    （`self.file.with_suffix(...)`），而且引擎要先過 ONNX，所以一次匯出會在權重的目錄
+    生出 `<stem>.engine` 與 `<stem>.onnx` 兩個檔。權重放在共用的 artifacts 目錄是常態，
+    那樣做會**無聲蓋掉／刪掉同名的既有檔案**——實測在建置機上就是這樣輾掉了兩份先前
+    效能量測留下的產物。先把權重複製進暫存目錄再匯出，ultralytics 就只動得到那份副本。
+
     Args:
         weights: 來源 `.pt`。
         batch: 引擎的最大批次。
         vfa_metadata: 要注入的欄位（`build_vfa_metadata` 的輸出）。
-
-    Returns:
-        ultralytics 產出的 `.engine` 路徑（在 `weights` 旁邊）。
+        dest: 產物的落點（本函式會把匯出結果搬過去）。
     """
-    model = YOLO(str(weights))
+    with tempfile.TemporaryDirectory(prefix="vfa-engine-") as tmp:
+        staged_weights = Path(tmp) / weights.name
+        shutil.copy2(weights, staged_weights)
+        model = YOLO(str(staged_weights))
 
-    def _inject(exporter) -> None:
-        exporter.metadata[VFA_METADATA_KEY] = vfa_metadata
+        def _inject(exporter) -> None:
+            exporter.metadata[VFA_METADATA_KEY] = vfa_metadata
 
-    model.add_callback("on_export_start", _inject)
-    exported = Path(
-        model.export(
-            format="engine",
-            half=True,
-            dynamic=True,
-            batch=batch,
-            imgsz=(INFER_HEIGHT, INFER_WIDTH),
-            device=0,
-            verbose=False,
+        model.add_callback("on_export_start", _inject)
+        exported = Path(
+            model.export(
+                format="engine",
+                half=True,
+                dynamic=True,
+                batch=batch,
+                imgsz=(INFER_HEIGHT, INFER_WIDTH),
+                device=0,
+                verbose=False,
+            )
         )
-    )
-    # ultralytics 匯出引擎要先過 ONNX，中繼檔會留在權重旁邊（80 MB 起跳）。留著沒有用途
-    # ——本工具下次跑會重新匯出——但很容易被誤以為是產物之一
-    exported.with_suffix(".onnx").unlink(missing_ok=True)
-    return exported
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(exported), dest)
+        # ONNX 中繼檔跟著暫存目錄一起消失，不必也不該自己去刪權重旁邊的同名檔
 
 
 def verify_engine(engine_path: Path, batch: int, expected_sha256: str) -> dict:
@@ -270,14 +277,12 @@ def main() -> None:
     )
     del source_model  # 匯出會自己再載一次，這裡只是為了讀 ckpt
 
-    exported = export_engine(args.weights, args.batch, vfa_metadata)
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
     final_path = args.output_dir / engine_filename(
         args.weights, environment.compute_capability
     )
     staged = final_path.with_suffix(final_path.suffix + _UNVERIFIED_SUFFIX)
-    shutil.move(str(exported), staged)
+    export_engine(args.weights, args.batch, vfa_metadata, staged)
 
     try:
         verify_engine(staged, args.batch, weights_sha256)
