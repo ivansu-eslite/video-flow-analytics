@@ -174,7 +174,7 @@ class InferencePipeline:
                     "`tools/build_engine.py --batch` 重建一顆容得下的引擎。"
                 )
             # 這道檢查放在 try 內而非之前：追蹤進程此時已經起來、等在 queue 上，不送
-            # TRACK_FAILED 的話它要等到被父進程 SIGTERM 才結束（此時還沒有 `.tmp`，
+            # TRACK_FAILED 的話它要等到被父進程 SIGTERM 才結束（那條路徑也會清掉暫存檔，
             # 損失的只是關機延遲，但沒理由讓一條已經有訊號的路徑走不到）。
             #
             # `frame_ring.RING_SLOTS` 的推導式已保證這條成立，所以這裡防的不是「有人調
@@ -264,8 +264,9 @@ class InferencePipeline:
             self.track_queue.put(TRACK_DONE)
         except BaseException:
             # 本進程已經沒有 collector 可以 discard 了，改用訊號請追蹤進程代為清理：
-            # 不送的話它會卡在 queue.get() 直到被父進程 terminate，而 terminate 不走
-            # Python 的 except／finally，`.tmp` 暫存檔會留在輸出目錄
+            # 不送的話它會一直等在 queue.get() 上，直到被父進程 terminate 才收尾——那條
+            # 路徑也會清掉 `.tmp`（追蹤進程攔了 SIGTERM，見 `services/track_worker.py`），
+            # 但要多等父進程的偵測延遲，中間再被 SIGKILL 就得留到下一次執行才清
             self.track_queue.put(TRACK_FAILED)
             raise
 

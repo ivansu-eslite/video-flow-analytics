@@ -18,13 +18,23 @@
 推進），以及**`TRACK_FAILED` 要清掉暫存檔**（推論進程的 `collector.discard()` 隨
 collector 一起搬走了，那條路徑改由訊號覆蓋）。
 
+issue #113 再補兩條收尾路徑：推論進程被 SIGKILL 時 `TRACK_FAILED` 送不出來，本進程等到的
+是父進程 terminate 的 **SIGTERM**，要攔下來走既有的清理；以及**啟動時認領輸出位置**，
+別的執行正在寫同一條路徑時要當場擋下，而不是把它的暫存檔清掉。
+
 因此本檔的偵測資料一律以**推論尺度**（640×384）表示——那就是 payload 內座標的尺度。
 真正的 `MultiStreamByteTracker` 會做 Kalman 平滑而算不出可斷言的期望值，故以每個輸入
 框回一條軌跡的替身取代（那正是 ByteTrack「一個偵測目標一條軌跡」的行為）。
 """
 
 import datetime
+import fcntl
+import multiprocessing as mp
+import os
 import queue
+import signal
+import threading
+import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -376,3 +386,322 @@ def test_payload_shares_memory_with_the_source_boxes():
     )
 
     assert np.shares_memory(box_data, _FRAME_0_DETECTIONS.data.numpy())
+
+
+class _SigtermAfterGets(queue.Queue):
+    """第 N 次 `get()` 回傳之後對自己送 SIGTERM，模擬父進程的 `_terminate_all`。
+
+    正式路徑上訊號是打斷阻塞中的 `mp.Queue.get()`（handler 拋出的例外從 `get()` 內部
+    往外傳）；這裡用同步送達換取確定性，驗的是「handler 有裝上、且拋出的例外會走到
+    `collector.discard()`」這段接線。
+    """
+
+    def __init__(self, kill_after: int, on_kill):
+        super().__init__()
+        self._remaining = kill_after
+        self._on_kill = on_kill
+
+    def get(self, *args, **kwargs):
+        item = super().get(*args, **kwargs)
+        self._remaining -= 1
+        if self._remaining == 0:
+            self._on_kill()
+            os.kill(os.getpid(), signal.SIGTERM)
+        return item
+
+
+def test_sigterm_discards_the_partial_output(tmp_path, monkeypatch):
+    """收到 SIGTERM 要清掉暫存檔：那是推論進程被 SIGKILL 之後唯一還走得到的路徑。
+
+    上游被 SIGKILL 時 `TRACK_FAILED` 送不出來（`track_queue` 的 pipe 寫入端 fd 被父進程
+    與九個讀取進程一起繼承，`get()` 收不到 EOF），本進程等到的是父進程 terminate 的
+    SIGTERM。不攔的話預設處置直接結束進程，不走 `except`／`finally`，`.tmp` 就留在
+    輸出目錄了。
+
+    把 flush 門檻降到 1，讓 `.tmp` 在訊號抵達前真的被建出來——`saw_tmp` 釘住這件事，
+    否則這支測試會在什麼都沒發生的情況下通過。
+    """
+    monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
+    _install_recording_tracker(monkeypatch)
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    saw_tmp: list[bool] = []
+
+    def _fallback(signum, frame):
+        # 保險絲：handler 沒被裝上時 SIGTERM 會當場殺掉整個 pytest 進程，那看起來像
+        # crash 而不是測試失敗。run_track_worker 會換掉它，並在離開時還原
+        raise AssertionError("run_track_worker 沒有裝上 SIGTERM handler")
+
+    track_queue = _SigtermAfterGets(
+        kill_after=2, on_kill=lambda: saw_tmp.append(tmp_file.exists())
+    )
+    for frame_index in range(2):
+        track_queue.put(
+            to_payload(
+                0,
+                Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE),
+                frame_index,
+                _BASE + datetime.timedelta(seconds=frame_index),
+            )
+        )
+
+    previous = signal.signal(signal.SIGTERM, _fallback)
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            run_track_worker(
+                track_queue=track_queue,
+                stream_names=["loc_cam001"],
+                frame_shapes=[_SHAPE],
+                results_path=results_path,
+            )
+        assert excinfo.value.code == 143  # 128 + SIGTERM
+        # 離開時要還原成呼叫前的 handler：本函式在測試中是 in-process 呼叫的
+        assert signal.getsignal(signal.SIGTERM) is _fallback
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert saw_tmp == [True], "訊號抵達時還沒有暫存檔，這支測試沒驗到東西"
+    assert not tmp_file.exists()
+    assert not results_path.exists()
+
+
+def test_a_run_on_a_path_another_process_is_writing_is_refused(tmp_path, monkeypatch):
+    """同一條輸出路徑已有執行中的進程在寫 → 當場擋下，且不准動它的暫存檔。
+
+    認領失敗必須發生在主迴圈的 `try` **之外**：掉進 `except` 的話
+    `collector.discard()` 會把別人寫到一半的整天明細刪掉，而那個執行到最後才會在
+    `rename` 時發現檔案不見了。
+    """
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    in_flight = results_path.with_name(results_path.name + ".tmp")
+    in_flight.write_bytes(b"x" * 4096)
+    holder = os.open(in_flight, os.O_RDWR)
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    try:
+        with pytest.raises(RuntimeError, match="正被另一個進程持有"):
+            _run_worker(tmp_path, monkeypatch, [_FRAME_0_DETECTIONS])
+        assert in_flight.stat().st_size == 4096
+        assert not results_path.exists()
+    finally:
+        os.close(holder)
+
+
+def test_startup_clears_the_residue_of_a_killed_run(tmp_path, monkeypatch):
+    """上一次執行被 SIGKILL 留下的殘檔，在本次啟動、任何寫入之前就清掉。
+
+    整機重啟那種「兩個進程都沒機會執行清理」的情境沒有 in-process 的機制擋得住，只能
+    由下一次寫同一條路徑的執行順手收拾。
+
+    觀測點取在**建立 tracker 的當下**（認領之後、第一次 flush 之前）：只看跑完後
+    `.tmp` 在不在的話，正常收尾的 rename 本來就會把它帶走，這支測試會在認領根本沒發生
+    的情況下通過。
+    """
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    residue = results_path.with_name(results_path.name + ".tmp")
+    residue.write_bytes(b"x" * 4096)
+    size_at_startup: list[int] = []
+
+    def factory(num_streams: int) -> _RecordingTracker:
+        size_at_startup.append(residue.stat().st_size)
+        return _RecordingTracker(num_streams)
+
+    monkeypatch.setattr(tw, "MultiStreamByteTracker", factory)
+    track_queue: queue.Queue = queue.Queue()
+    track_queue.put(TRACK_DONE)
+
+    run_track_worker(
+        track_queue=track_queue,
+        stream_names=["loc_cam001"],
+        frame_shapes=[_SHAPE],
+        results_path=results_path,
+    )
+
+    assert size_at_startup == [0], "殘檔在寫入開始之前就該被清空"
+    assert not residue.exists()
+    assert results_path.exists()
+
+
+def test_a_failure_between_claim_and_the_loop_leaves_no_residue(tmp_path, monkeypatch):
+    """認領之後、進主迴圈之前的建構步驟若拋錯，也不能留下暫存檔。
+
+    `claim_tmp_slot` 一建立 `.tmp` 就進入「有東西要收」的狀態，因此那之後的每一步都要
+    在清理範圍內。`[foot_point].method` 填錯就是這條路徑的真實觸發方式，留下的殘檔要等
+    同一個 bucket 的同一天再跑一次才清得掉——正是這個 issue 要消除的東西。
+
+    同一個窗口的另一半：SIGTERM 的 handler 必須在**認領之前**就註冊好，否則這段期間
+    收到父進程的 terminate 走的仍是預設處置。`handler_ready` 釘住這個順序。
+    """
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    handler_ready: list[bool] = []
+
+    def _exploding_estimator(method: str):
+        handler_ready.append(signal.getsignal(signal.SIGTERM) is tw._raise_on_sigterm)
+        raise ValueError("人工注入：建構落腳點推算器失敗")
+
+    _install_recording_tracker(monkeypatch)
+    monkeypatch.setattr(tw, "FootPointEstimator", _exploding_estimator)
+    track_queue: queue.Queue = queue.Queue()
+    track_queue.put(TRACK_DONE)
+
+    with pytest.raises(ValueError, match="人工注入"):
+        run_track_worker(
+            track_queue=track_queue,
+            stream_names=["loc_cam001"],
+            frame_shapes=[_SHAPE],
+            results_path=results_path,
+        )
+
+    assert handler_ready == [True], "SIGTERM handler 比認領還晚註冊"
+    assert not tmp_file.exists()
+    assert not results_path.exists()
+
+
+def test_sigterm_interrupts_a_blocking_queue_get(tmp_path, monkeypatch):
+    """例外要從**阻塞中的** `mp.Queue.get()` 內部往外傳，不能只驗到接線。
+
+    整個修法的支點就是這個前提。上面那支用的是同步送達的假 queue，驗得到「handler 有裝
+    上、拋出的例外會走到 `discard()`」，但沒有任何東西擋住「日後把 `get()` 改成帶 timeout
+    的重試迴圈、或把讀取搬到背景執行緒（handler 只在主執行緒跑）」——那樣這條路徑會靜默
+    失效而那支測試照樣全綠。
+
+    這裡用真的 `mp.Queue`：主執行緒處理完唯一那一格之後就卡在 `get()` 的 pipe 讀取上，
+    由背景執行緒送 SIGTERM（訊號的 Python handler 一律在主執行緒執行）。末尾比對
+    traceback 有沒有經過 `multiprocessing/queues.py`，把「從 get() 內部傳出來」這件事釘死。
+
+    不拉子進程是刻意的：從載了 torch、又有多條執行緒的 pytest 進程 fork 出去，子進程會
+    卡在繼承來的鎖上（`os.fork()` 自己就會發 DeprecationWarning 警告這件事），驗到的會是
+    測試環境的問題而不是本模組的行為。
+    """
+    monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
+    _install_recording_tracker(monkeypatch)
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    tmp_file = results_path.with_name(results_path.name + ".tmp")
+
+    def _fallback(signum, frame):
+        raise AssertionError("run_track_worker 沒有裝上 SIGTERM handler")
+
+    def _signal_once_it_blocks() -> None:
+        # 等暫存檔出現＝那一格處理完了，主執行緒此刻正卡在 get() 上
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not tmp_file.exists():
+            time.sleep(0.02)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    track_queue: mp.Queue = mp.Queue()
+    track_queue.put(
+        to_payload(0, Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE), 0, _BASE)
+    )
+    previous = signal.signal(signal.SIGTERM, _fallback)
+    killer = threading.Thread(target=_signal_once_it_blocks, daemon=True)
+    try:
+        killer.start()
+        with pytest.raises(SystemExit) as excinfo:
+            run_track_worker(
+                track_queue=track_queue,
+                stream_names=["loc_cam001"],
+                frame_shapes=[_SHAPE],
+                results_path=results_path,
+            )
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        killer.join(timeout=5)
+        track_queue.close()
+        track_queue.join_thread()
+
+    assert excinfo.value.code == 143
+    assert any("queues.py" in str(entry.path) for entry in excinfo.traceback), (
+        "例外不是從阻塞中的 mp.Queue.get() 內部傳出來的"
+    )
+    assert not tmp_file.exists()
+    assert not results_path.exists()
+
+
+def test_sigterm_during_cleanup_does_not_interrupt_it(tmp_path, monkeypatch):
+    """清理途中再收到 SIGTERM 不能把清理打斷。
+
+    Ctrl+C 走的是 process group 的 SIGINT：本進程收到後進 `except` 開始 `discard()`，
+    父進程同時在 `_terminate_all` 送 SIGTERM。handler 若還開著，就會在 `discard()` 內部
+    再拋一次例外——落在 `_writer.close()` 之後、`unlink()` 之前的話，整天的 `.tmp` 就留
+    下了，而外層那個 `except` 已經進來過、不會再跑一次。
+    """
+    monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
+    _install_recording_tracker(monkeypatch)
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    real_discard = tr.TrackingResultCollector.discard
+
+    def _discard_interrupted_by_sigterm(self) -> None:
+        # 模擬「清理已經開始，這時父進程的 SIGTERM 到了」
+        os.kill(os.getpid(), signal.SIGTERM)
+        real_discard(self)
+
+    monkeypatch.setattr(
+        tr.TrackingResultCollector, "discard", _discard_interrupted_by_sigterm
+    )
+    track_queue: queue.Queue = queue.Queue()
+    track_queue.put(
+        to_payload(0, Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE), 0, _BASE)
+    )
+    track_queue.put(TRACK_FAILED)  # 先以另一條路徑進入清理
+
+    previous = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        with pytest.raises(RuntimeError, match="推論進程中途例外"):
+            run_track_worker(
+                track_queue=track_queue,
+                stream_names=["loc_cam001"],
+                frame_shapes=[_SHAPE],
+                results_path=results_path,
+            )
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert not tmp_file.exists(), "清理被 SIGTERM 打斷，暫存檔留下來了"
+    assert not results_path.exists()
+
+
+def test_a_second_ctrl_c_during_cleanup_does_not_interrupt_it(tmp_path, monkeypatch):
+    """連按兩次 Ctrl+C 也不能把清理打斷。
+
+    第一次 Ctrl+C 讓本進程以 `KeyboardInterrupt` 進到清理，第二次又是一個 SIGINT；只擋
+    SIGTERM 的話它會在 `discard()` 內部打斷，落在 `_writer.close()` 之後、`unlink()`
+    之前就留下整天的暫存檔。
+    """
+    monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
+    _install_recording_tracker(monkeypatch)
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    real_discard = tr.TrackingResultCollector.discard
+
+    def _discard_interrupted_by_sigint(self) -> None:
+        os.kill(os.getpid(), signal.SIGINT)  # 使用者又按了一次 Ctrl+C
+        real_discard(self)
+
+    monkeypatch.setattr(
+        tr.TrackingResultCollector, "discard", _discard_interrupted_by_sigint
+    )
+    track_queue: queue.Queue = queue.Queue()
+    track_queue.put(
+        to_payload(0, Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE), 0, _BASE)
+    )
+    track_queue.put(TRACK_FAILED)
+
+    try:
+        with pytest.raises(RuntimeError, match="推論進程中途例外"):
+            run_track_worker(
+                track_queue=track_queue,
+                stream_names=["loc_cam001"],
+                frame_shapes=[_SHAPE],
+                results_path=results_path,
+            )
+    except KeyboardInterrupt:
+        # 沒擋 SIGINT 的話它會一路逸出到測試外，而 pytest 把 KeyboardInterrupt 當成
+        # 「使用者中止」、整個 session 停掉——那看起來像中斷而不是測試失敗
+        pytest.fail("第二次 Ctrl+C 打斷了清理：KeyboardInterrupt 逸出到 run_track_worker 之外")
+
+    # 離開時 SIGINT 的處置要還原，否則之後整個進程都不再理 Ctrl+C
+    assert signal.getsignal(signal.SIGINT) is not signal.SIG_IGN
+    assert not tmp_file.exists(), "清理被第二次 Ctrl+C 打斷，暫存檔留下來了"
+    assert not results_path.exists()

@@ -11,16 +11,27 @@
 
 推論進程中途例外時送 `TRACK_FAILED`，本進程收到就清掉 `.tmp` 暫存檔再拋錯；與
 `video_reader.py` 的 `READER_DONE`／`READER_FAILED` 同一套設計——明確的訊號而非裸
-`None`，讓「正常結束」與「上游崩潰」不可能被混為一談。⚠ 這**只覆蓋「推論進程自己拋
-例外」**：它被 SIGKILL 或整機掛掉時，本進程會卡在 `track_queue.get()` 等不到任何訊號，
-由父進程 `_terminate_all` 收掉，而 terminate 不走 Python 的 `except`／`finally`，暫存檔
-會留在輸出目錄。那條路徑要靠啟動時掃殘留才擋得住，不在本模組的範圍內。
+`None`，讓「正常結束」與「上游崩潰」不可能被混為一談。
+
+推論進程被 SIGKILL 或整機掛掉時收不到那個訊號：`track_queue` 的 pipe 寫入端 fd 被父進程
+與九個讀取進程一起繼承，寫入端永遠不會全部關閉，`get()` 收不到 EOF、只會一直等
+（issue #113）。暫存檔因此靠另外兩道，都不需要動 queue 的內部狀態：
+
+- **本進程攔下 SIGTERM**。等下去的結局是父進程 `_terminate_all` 的 SIGTERM，而它是
+  攔得到的——handler 拋出的例外會從 `track_queue.get()` 內部往外傳，走既有的
+  `except BaseException: collector.discard()`。
+- **啟動時認領輸出位置**（`tracking_results.claim_tmp_slot`）。整機重啟這種「兩個進程
+  都沒機會執行清理」的情境沒有任何 in-process 的機制擋得住，只能由下一次寫同一條路徑
+  的執行順手清掉。
 """
 
 import multiprocessing as mp
+import os
+import signal
 import time
 from datetime import datetime
 from pathlib import Path
+from types import FrameType
 
 import numpy as np
 import torch
@@ -41,7 +52,10 @@ from video_analyze.services.letterbox import (
     unscale_points_inplace,
 )
 from video_analyze.services.tracker import MultiStreamByteTracker
-from video_analyze.services.tracking_results import TrackingResultCollector
+from video_analyze.services.tracking_results import (
+    TrackingResultCollector,
+    claim_tmp_slot,
+)
 from video_analyze.services.video_reader import FrameShape
 
 logger = StructuredLogger(component="track_worker")
@@ -68,11 +82,12 @@ _EMPTY_DETECTION_COLUMNS = 6
 #   給上限之後 `put` 會阻塞推論迴圈 → 推論不再消費 slot → reader 跟著阻塞，整條 pipeline
 #   收斂到最慢的階段，與追蹤還在推論進程內時的行為一致。
 # - **`TRACK_FAILED` 送不到**。它是排在同一條 FIFO 尾端的 in-band 訊號，送達延遲與
-#   backlog 成正比；而推論進程一死，父進程約 0.5 秒內就 `_terminate_all`，terminate 不走
-#   Python 的 `except`／`finally`。backlog 大到消化不完那幾秒的量時，本進程會在還沒讀到
-#   訊號時被 SIGTERM 收掉，`collector.discard()` 從未執行、`.tmp` 留在輸出目錄——也就是
-#   那條失效路徑會靜默失效。有了上限，backlog 至多這麼多格——預設 batch（8，即上限 64
-#   格）下約 70 ms 的工作量，遠小於父進程的偵測延遲，訊號趕得上。
+#   backlog 成正比；而推論進程一死，父進程約 0.5 秒內就 `_terminate_all`。backlog 大到
+#   消化不完那幾秒的量時，本進程會在還沒讀到訊號時就被 SIGTERM 收掉。**暫存檔仍然清得
+#   掉**（issue #113 之後 SIGTERM 有 handler，走的是同一個 `collector.discard()`），但
+#   那條 in-band 的失效路徑等於沒作用，而且會把「上游崩潰」與「被 terminate」混成同一種
+#   結束方式。有了上限，backlog 至多這麼多格——預設 batch（8，即上限 64 格）下約 70 ms
+#   的工作量，遠小於父進程的偵測延遲，訊號趕得上。
 #   ⚠ **這是「backlog 有界」的推論，不是時序保證**：上限隨 `MODEL__BATCH` 線性成長，而
 #   父進程的偵測延遲不隨它成長，所以把 batch 調得很大時這個邊際會變薄（例如
 #   `MODEL__BATCH=64` → 上限 512 格）。調大 batch 時要一併重新評估這條路徑。
@@ -223,6 +238,28 @@ def _track_one(
     return tracks, foot_points
 
 
+def _raise_on_sigterm(signum: int, _frame: FrameType | None) -> None:
+    """SIGTERM 的 handler：拋 `SystemExit` 讓既有的清理路徑走得到。
+
+    本進程等不到 `TRACK_FAILED` 的情況（推論進程被 SIGKILL、整機 OOM）最後都收斂成
+    同一件事：父進程的 `_terminate_all` 送 SIGTERM。預設處置是直接結束進程，不走
+    Python 的 `except`／`finally`，`.tmp` 就留在輸出目錄了。
+
+    攔下來拋例外，`run_track_worker` 既有的 `except BaseException: collector.discard()`
+    就會執行——**這裡不新增任何清理路徑，只是讓既有那條被走到**。阻塞中的
+    `track_queue.get()` 也擋不住：signal handler 在主執行緒跑，拋出的例外從 `get()`
+    內部往外傳（實測見 PR）。
+
+    用 `SystemExit` 而不是自訂例外：`multiprocessing` 會把它的 code 直接當 exitcode，
+    不印 traceback——關機路徑上那份 traceback 只是雜訊。128 + 訊號編號是 shell 對
+    「被訊號終止」的慣例（SIGTERM → 143）。
+
+    ⚠ 只涵蓋第一個 SIGTERM。清理途中再被送一次（或被 SIGKILL）仍會留下暫存檔，那條
+    由下次啟動的 `claim_tmp_slot` 收掉。
+    """
+    raise SystemExit(128 + signum)
+
+
 def run_track_worker(
     track_queue: mp.Queue,
     stream_names: list[str],
@@ -250,27 +287,45 @@ def run_track_worker(
 
     Raises:
         ValueError: 任一路的 `FrameShape` 等於推論尺寸（見 `_reject_inference_sized_shapes`）。
-        RuntimeError: 推論進程回報 `TRACK_FAILED`。
+        RuntimeError: 推論進程回報 `TRACK_FAILED`，或這條輸出路徑的暫存檔正被另一個
+            執行中的進程持有（見 `tracking_results.claim_tmp_slot`）。
         BaseException: 其他子系統拋出的例外，會原樣重新拋出。
     """
     _reject_inference_sized_shapes(frame_shapes)
-    tracker = MultiStreamByteTracker(num_streams=len(stream_names))
-    # 跨格重用：它記著每條軌跡上一次成功推算的落腳點偏移量
-    foot_estimator = FootPointEstimator(settings.foot_point.method)
-    collector = TrackingResultCollector(results_path)
-    # 每路一組 (scale, pad_x, pad_y) 與一個內容區，都跟著 stream_id 走
-    unscale_params = [
-        letterbox_params(shape.height, shape.width) for shape in frame_shapes
-    ]
-    content_boxes = [content_box(shape.height, shape.width) for shape in frame_shapes]
-    fps_meter = FpsMeter()
-    logger.info("追蹤進程啟動", num_streams=len(stream_names))
-    # 計時從**第一個 payload 抵達**才起算，不含等推論進程載完 YOLO 權重的那段空窗：推論
-    # 端的 `start` 也在載完模型之後（`start_loop` 內），兩邊口徑一致，餘裕才比得出意義。
-    # 把空窗算進來會壓低 `overall_fps`，讓印出的餘裕系統性偏大——而那個數字是容量決策的
-    # 依據，偏大的方向正好是會誤事的方向
-    first_payload_at: float | None = None
+    # 註冊在認領之前：`claim_tmp_slot` 一旦把 `.tmp` 建出來，這之後的每一步（含建構
+    # tracker、落腳點推算器）被 SIGTERM 打斷都得走得到清理，否則那個窗口內收到訊號
+    # 就會留下殘檔。⚠ 有一段仍蓋不到：從 `claim_tmp_slot` 內部的 `os.open` 起，一路到
+    # 下一行 `collector` 綁定完成為止，`lock_fd` 與 `collector` 都還是 `None`，`except`
+    # 兩件事都不做，訊號落在這段會留下一個 0 byte 的 `.tmp`。窗口不到毫秒、殘檔無害，
+    # 且下次認領同一條路徑時會清掉
+    previous_sigterm = signal.signal(signal.SIGTERM, _raise_on_sigterm)
+    # SIGINT 不改處置（Ctrl+C 照常以 KeyboardInterrupt 進到清理），只記下來，清理期間
+    # 要連它一起擋掉
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    # 兩者都在 try 內才建立，故先給 None：認領失敗代表那個 `.tmp` 屬於另一個**執行中**
+    # 的進程，此時 `collector` 還是 None，`except` 不會去 `discard()` 掉別人正在寫的檔
+    lock_fd: int | None = None
+    collector: TrackingResultCollector | None = None
     try:
+        lock_fd, tmp_identity = claim_tmp_slot(results_path)
+        collector = TrackingResultCollector(results_path, tmp_identity)
+        tracker = MultiStreamByteTracker(num_streams=len(stream_names))
+        # 跨格重用：它記著每條軌跡上一次成功推算的落腳點偏移量
+        foot_estimator = FootPointEstimator(settings.foot_point.method)
+        # 每路一組 (scale, pad_x, pad_y) 與一個內容區，都跟著 stream_id 走
+        unscale_params = [
+            letterbox_params(shape.height, shape.width) for shape in frame_shapes
+        ]
+        content_boxes = [
+            content_box(shape.height, shape.width) for shape in frame_shapes
+        ]
+        fps_meter = FpsMeter()
+        logger.info("追蹤進程啟動", num_streams=len(stream_names))
+        # 計時從**第一個 payload 抵達**才起算，不含等推論進程載完 YOLO 權重的那段空窗：
+        # 推論端的 `start` 也在載完模型之後（`start_loop` 內），兩邊口徑一致，餘裕才比得
+        # 出意義。把空窗算進來會壓低 `overall_fps`，讓印出的餘裕系統性偏大——而那個數字
+        # 是容量決策的依據，偏大的方向正好是會誤事的方向
+        first_payload_at: float | None = None
         while True:
             item = track_queue.get()
             if item == TRACK_DONE:  # 推論進程正常送完整天影格
@@ -310,10 +365,32 @@ def run_track_worker(
             0.0 if first_payload_at is None else time.perf_counter() - first_payload_at
         )
         _log_fps_summary(fps_meter, elapsed)
+        # 收尾的最後一步同樣不受理終止訊號：`save()` 關掉 writer 之後、rename 之前被打斷
+        # 的話，暫存檔此刻已經是一份**完整**的 parquet，而 `except` 的 `discard()` 會把它
+        # 刪掉——本來只要人工把 `.tmp` 改個名就救得回來的東西就沒了。`finally` 會還原
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         collector.save()  # 僅推論進程正常送完才原子性改名成正式檔名
     except BaseException:
-        collector.discard()  # fail-loud：不留下不完整結果
+        # 清理期間不再受理終止訊號。Ctrl+C 走的是 process group 的 SIGINT，本進程進到
+        # 這裡開始 discard() 的同時，父進程也在 `_terminate_all` 送 SIGTERM，而使用者
+        # 連按兩次 Ctrl+C 又會再來一個 SIGINT——任何一個在 `_writer.close()` 之後、
+        # `unlink()` 之前打進來，整天的 `.tmp` 就留下了，而外層這個 except 已經進來過、
+        # 不會再跑一次。清理很短（關 writer 再刪檔），真的卡住仍有父進程的 SIGKILL 收尾。
+        # ⚠ 這是把窗口**縮到**「例外拋出到下面兩行之間」，不是關掉——用訊號就到這裡為止
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if collector is not None:
+            collector.discard()  # fail-loud：不留下不完整結果
         raise
+    finally:
+        # handler 與鎖的存續期都到「暫存檔不再會被寫」為止。還原 handler 是為了在
+        # 測試中 in-process 呼叫本函式時不留下副作用；關 fd 則是釋放 flock——正式執行
+        # 時進程接著就結束了，kernel 也會做同一件事
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
+        if lock_fd is not None:
+            os.close(lock_fd)
 
 
 def _log_fps_summary(fps_meter: FpsMeter, elapsed_seconds: float) -> None:
