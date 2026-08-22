@@ -360,6 +360,11 @@ def run_track_worker(
         _log_fps_summary(fps_meter, elapsed)
         collector.save()  # 僅推論進程正常送完才原子性改名成正式檔名
     except BaseException:
+        # 清理期間不再受理 SIGTERM。Ctrl+C 走的是 process group 的 SIGINT，本進程進到這裡
+        # 開始 discard() 的同時，父進程也在 `_terminate_all` 送 SIGTERM——handler 會在
+        # discard() 內部再拋一次例外，落在 `_writer.close()` 之後、`unlink()` 之前的話，
+        # 整天的 `.tmp` 就留下了，而外層這個 except 已經進來過、不會再跑一次
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         if collector is not None:
             collector.discard()  # fail-loud：不留下不完整結果
         raise

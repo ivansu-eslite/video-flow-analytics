@@ -380,3 +380,31 @@ def test_claim_does_not_truncate_a_file_that_was_renamed_away(tmp_path, monkeypa
     assert raced, "替身沒被呼叫到，這支測試沒驗到東西"
     assert results_path.stat().st_size == 4096, "把對方剛完成的結果清空了"
     assert tmp_path_for(results_path).stat().st_size == 0  # 自己認到的是新建的空檔
+
+
+def test_discard_leaves_a_different_file_at_the_same_path_alone(tmp_path):
+    """同一個路徑此刻若已經是別份檔案（inode 不同），`discard()` 一個字節都不能動。
+
+    `claim_tmp_slot` 的鎖擋得住「兩個執行同時認領」，但擋不住有人手動 `rm` 掉暫存檔之後
+    另一個執行接手。依路徑刪的話會刪掉對方寫到一半的內容，而對方要到最後 `replace()`
+    才會以 `FileNotFoundError` 爆掉——錯誤發生的位置離原因很遠。
+    """
+    results_path = tmp_path / "tracking_results.parquet"
+    tmp_file = tmp_path_for(results_path)
+    collector = TrackingResultCollector(results_path)
+    collector.add(
+        camera_id="loc_cam001",
+        frame_index=0,
+        timestamp=_stamp(0),
+        tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
+        foot_points=_feet((23.0, 41.0)),
+        frame_width=_WIDTH,
+        frame_height=_HEIGHT,
+    )
+    collector._flush()
+    tmp_file.unlink()  # 運維人員手動清掉
+    tmp_file.write_bytes(b"y" * 128)  # 另一個執行接手，建了新的一份
+
+    collector.discard()
+
+    assert tmp_file.stat().st_size == 128

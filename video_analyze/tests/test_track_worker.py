@@ -616,3 +616,47 @@ def test_sigterm_interrupts_a_blocking_queue_get(tmp_path, monkeypatch):
     )
     assert not tmp_file.exists()
     assert not results_path.exists()
+
+
+def test_sigterm_during_cleanup_does_not_interrupt_it(tmp_path, monkeypatch):
+    """清理途中再收到 SIGTERM 不能把清理打斷。
+
+    Ctrl+C 走的是 process group 的 SIGINT：本進程收到後進 `except` 開始 `discard()`，
+    父進程同時在 `_terminate_all` 送 SIGTERM。handler 若還開著，就會在 `discard()` 內部
+    再拋一次例外——落在 `_writer.close()` 之後、`unlink()` 之前的話，整天的 `.tmp` 就留
+    下了，而外層那個 `except` 已經進來過、不會再跑一次。
+    """
+    monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
+    _install_recording_tracker(monkeypatch)
+    results_path = Path(tmp_path) / "tracking_results.parquet"
+    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    real_discard = tr.TrackingResultCollector.discard
+
+    def _discard_interrupted_by_sigterm(self) -> None:
+        # 模擬「清理已經開始，這時父進程的 SIGTERM 到了」
+        os.kill(os.getpid(), signal.SIGTERM)
+        real_discard(self)
+
+    monkeypatch.setattr(
+        tr.TrackingResultCollector, "discard", _discard_interrupted_by_sigterm
+    )
+    track_queue: queue.Queue = queue.Queue()
+    track_queue.put(
+        to_payload(0, Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE), 0, _BASE)
+    )
+    track_queue.put(TRACK_FAILED)  # 先以另一條路徑進入清理
+
+    previous = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        with pytest.raises(RuntimeError, match="推論進程中途例外"):
+            run_track_worker(
+                track_queue=track_queue,
+                stream_names=["loc_cam001"],
+                frame_shapes=[_SHAPE],
+                results_path=results_path,
+            )
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert not tmp_file.exists(), "清理被 SIGTERM 打斷，暫存檔留下來了"
+    assert not results_path.exists()

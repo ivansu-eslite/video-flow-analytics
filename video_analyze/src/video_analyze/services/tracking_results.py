@@ -34,18 +34,23 @@ def tmp_path_for(results_path: Path) -> Path:
     return results_path.with_name(results_path.name + ".tmp")
 
 
-def _is_file_at(fd: int, path: Path) -> bool:
-    """`fd` 開著的是不是此刻 `path` 這個名字指向的那個檔案。
+def _identity_of(path: Path) -> tuple[int, int] | None:
+    """`path` 此刻指向哪一個檔案，以 `(st_dev, st_ino)` 表示；不存在時回 `None`。
 
-    比對 `(st_dev, st_ino)` 而不是路徑字串：rename 與 unlink 都只改名字，fd 仍然黏在
-    原本的 inode 上，光看路徑分不出來。
+    用 inode 而不是路徑字串當身分：rename 與 unlink 都只改名字，同一個名字前後可以是
+    兩個完全不同的檔案，而「這是不是我那一份」正是要靠這個分辨。
     """
     try:
-        by_name = os.stat(path)
+        stat = os.stat(path)
     except FileNotFoundError:
-        return False
+        return None
+    return (stat.st_dev, stat.st_ino)
+
+
+def _is_file_at(fd: int, path: Path) -> bool:
+    """`fd` 開著的是不是此刻 `path` 這個名字指向的那個檔案。"""
     by_fd = os.fstat(fd)
-    return (by_fd.st_dev, by_fd.st_ino) == (by_name.st_dev, by_name.st_ino)
+    return (by_fd.st_dev, by_fd.st_ino) == _identity_of(path)
 
 
 def claim_tmp_slot(results_path: Path) -> int:
@@ -151,6 +156,10 @@ class TrackingResultCollector:
         """
         self._results_path = results_path
         self._tmp_path = tmp_path_for(results_path)
+        # 認領（`claim_tmp_slot`）建出來的那個 inode。收尾時要刪的是**自己這一份**，
+        # 而不是此刻恰好叫這個名字的檔案：孤兒進程持鎖、運維手動 `rm` 掉暫存檔、新的
+        # 執行接手之後，依路徑刪會刪掉新執行正在寫的檔（見 `_remove_tmp`）
+        self._tmp_identity = _identity_of(self._tmp_path)
         self._columns: dict[str, list] = {name: [] for name in _SCHEMA}
         self._pending_rows = 0
         self._total_rows = 0
@@ -219,6 +228,10 @@ class TrackingResultCollector:
         if self._writer is None:
             self._tmp_path.parent.mkdir(parents=True, exist_ok=True)
             self._writer = pq.ParquetWriter(str(self._tmp_path), table.schema)
+            if self._tmp_identity is None:
+                # 沒有經過認領（例如測試直接建 collector）：這一份是這裡建出來的。
+                # 有認領的話 `ParquetWriter` 是就地 truncate、inode 不換，身分仍然有效
+                self._tmp_identity = _identity_of(self._tmp_path)
         self._writer.write_table(table)
         self._total_rows += self._pending_rows
         for col in self._columns.values():
@@ -239,7 +252,7 @@ class TrackingResultCollector:
             )
             # 這條分支不經過 rename，`claim_tmp_slot` 建出來的 0 byte 暫存檔要自己收掉，
             # 否則正常跑完的一天也會在輸出目錄留一個看起來像半成品的檔案
-            self._tmp_path.unlink(missing_ok=True)
+            self._remove_tmp()
         logger.info(
             "追蹤結果已寫入",
             path=str(self._results_path),
@@ -250,5 +263,21 @@ class TrackingResultCollector:
         """中途例外時呼叫：關閉暫存檔的 writer 並刪除暫存檔，不留下不完整的輸出。"""
         if self._writer is not None:
             self._writer.close()
-        if self._tmp_path.exists():
-            self._tmp_path.unlink()
+        self._remove_tmp()
+
+    def _remove_tmp(self) -> None:
+        """刪掉本次執行的暫存檔；這個路徑此刻若是別份（inode 不同）就一個字節都不動。
+
+        `claim_tmp_slot` 的 flock 擋得住「兩個執行同時認領」，但擋不住有人手動把暫存檔
+        `rm` 掉之後另一個執行接手——那時同一個名字底下已經是別人的檔，依路徑刪會把對方
+        寫到一半的內容刪掉，而對方要到最後 `replace()` 才會以 `FileNotFoundError` 爆掉。
+        """
+        if self._tmp_identity is None:
+            return  # 從來沒有建立過自己的暫存檔，沒有東西該由這裡刪
+        if _identity_of(self._tmp_path) != self._tmp_identity:
+            logger.warning(
+                "暫存檔已不是本次執行建立的那一份，略過刪除",
+                path=str(self._tmp_path),
+            )
+            return
+        self._tmp_path.unlink()
