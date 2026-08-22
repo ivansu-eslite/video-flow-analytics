@@ -155,8 +155,8 @@ class InferencePipeline:
             # 訊息才指得出要改哪一邊。放在 try 內而非之前：追蹤進程此時已經起來、
             # 等在 queue 上，要送得出 TRACK_FAILED，不必等父進程 SIGTERM。
             #
-            # 檢查放在推理端而不是 detector 內：批次是本模組的湊批目標，detector 只
-            # 負責把拿到的 list 送進引擎
+            # 檢查放在推理端而不是 detector 內：湊到幾格是本模組決定的
+            # （`_collect_batch`），detector 只負責把拿到的 list 送進引擎
             if (
                 self.detector.max_batch is not None
                 and self._target_batch > self.detector.max_batch
