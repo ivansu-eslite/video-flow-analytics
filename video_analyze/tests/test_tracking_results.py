@@ -221,10 +221,10 @@ def test_save_without_any_row_takes_the_claimed_tmp_file_with_it(tmp_path):
     「輸出目錄不留無人清理的暫存檔」——留一個 0 byte 的等於讓那個判準失去意義。
     """
     results_path = tmp_path / "tracking_results.parquet"
-    fd = claim_tmp_slot(results_path)
+    fd, identity = claim_tmp_slot(results_path)
     assert tmp_path_for(results_path).exists()  # 認領當下就把檔案建出來了
 
-    TrackingResultCollector(results_path).save()
+    TrackingResultCollector(results_path, identity).save()
     os.close(fd)
 
     assert results_path.exists()
@@ -292,7 +292,7 @@ def test_claim_clears_the_residue_left_by_a_dead_run(tmp_path):
     residue = tmp_path_for(results_path)
     residue.write_bytes(b"x" * 4096)  # 上一次執行被 SIGKILL 時留下的半成品
 
-    fd = claim_tmp_slot(results_path)
+    fd, _identity = claim_tmp_slot(results_path)
     os.close(fd)
 
     assert residue.exists()
@@ -332,7 +332,7 @@ def test_claim_only_touches_its_own_output_path(tmp_path):
     other_tmp = tmp_path_for(other)
     other_tmp.write_bytes(b"x" * 4096)
 
-    fd = claim_tmp_slot(mine)
+    fd, _identity = claim_tmp_slot(mine)
     os.close(fd)
 
     assert other_tmp.stat().st_size == 4096
@@ -344,7 +344,7 @@ def test_tmp_naming_has_a_single_source(tmp_path):
     results_path = tmp_path / "tracking_results.parquet"
 
     collector = TrackingResultCollector(results_path)
-    fd = claim_tmp_slot(results_path)
+    fd, _identity = claim_tmp_slot(results_path)
     os.close(fd)
 
     assert collector._tmp_path == tmp_path_for(results_path)
@@ -374,7 +374,7 @@ def test_claim_does_not_truncate_a_file_that_was_renamed_away(tmp_path, monkeypa
 
     monkeypatch.setattr(tr.fcntl, "flock", racing_flock)
 
-    fd = claim_tmp_slot(results_path)
+    fd, _identity = claim_tmp_slot(results_path)
     os.close(fd)
 
     assert raced, "替身沒被呼叫到，這支測試沒驗到東西"
@@ -479,8 +479,8 @@ def test_flush_refuses_to_write_over_a_file_it_did_not_claim(tmp_path):
     """
     results_path = tmp_path / "tracking_results.parquet"
     tmp_file = tmp_path_for(results_path)
-    fd = claim_tmp_slot(results_path)  # 本次認領到的那一份
-    collector = TrackingResultCollector(results_path)
+    fd, identity = claim_tmp_slot(results_path)  # 本次認領到的那一份
+    collector = TrackingResultCollector(results_path, identity)
     tmp_file.unlink()  # 被手動清掉
     tmp_file.write_bytes(b"y" * 4096)  # 另一個執行接手，正在寫的內容
 
@@ -508,8 +508,8 @@ def test_flush_fails_loud_when_the_claimed_tmp_was_removed(tmp_path):
     留在輸出目錄，兩邊都錯。
     """
     results_path = tmp_path / "tracking_results.parquet"
-    fd = claim_tmp_slot(results_path)
-    collector = TrackingResultCollector(results_path)
+    fd, identity = claim_tmp_slot(results_path)
+    collector = TrackingResultCollector(results_path, identity)
     tmp_path_for(results_path).unlink()  # 例如被清理排程掃掉
 
     collector.add(
@@ -525,4 +525,35 @@ def test_flush_fails_loud_when_the_claimed_tmp_was_removed(tmp_path):
         collector._flush()
     os.close(fd)
 
+    assert not results_path.exists()
+
+
+def test_collector_identity_comes_from_the_claim_not_from_the_path(tmp_path):
+    """身分要由認領那一步帶進來，不能在 collector 裡用 `os.stat` 重新推導一次。
+
+    認領完到建 collector 之間這個名字仍可能被換掉（有人手動 `rm`、另一個執行接手）。
+    重新推導的話 collector 會把**別人的 inode** 當成自己的，之後寫入、刪除、改名三道
+    比對全部通過——正是 `_require_own_tmp` 要擋的那件事，卻擋不到。
+    """
+    results_path = tmp_path / "tracking_results.parquet"
+    tmp_file = tmp_path_for(results_path)
+    fd, identity = claim_tmp_slot(results_path)
+    tmp_file.unlink()
+    tmp_file.write_bytes(b"y" * 3400)  # 另一個執行接手，正在寫的內容
+
+    collector = TrackingResultCollector(results_path, identity)
+    collector.add(
+        camera_id="loc_cam001",
+        frame_index=0,
+        timestamp=_stamp(0),
+        tracks=_tracks((10.0, 20.0, 30.0, 40.0, 1)),
+        foot_points=_feet((23.0, 41.0)),
+        frame_width=_WIDTH,
+        frame_height=_HEIGHT,
+    )
+    with pytest.raises(RuntimeError, match="不能開始寫入"):
+        collector._flush()
+    os.close(fd)
+
+    assert tmp_file.read_bytes() == b"y" * 3400
     assert not results_path.exists()

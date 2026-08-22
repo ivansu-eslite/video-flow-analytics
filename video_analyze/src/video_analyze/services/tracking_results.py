@@ -53,7 +53,7 @@ def _is_file_at(fd: int, path: Path) -> bool:
     return (by_fd.st_dev, by_fd.st_ino) == _identity_of(path)
 
 
-def claim_tmp_slot(results_path: Path) -> int:
+def claim_tmp_slot(results_path: Path) -> tuple[int, tuple[int, int]]:
     """認領這條輸出路徑的暫存檔：擋下並行寫入、清掉前一次執行留下的殘檔。
 
     追蹤進程正常結束會 `save()`、自己拋例外會 `discard()`，兩條都不留暫存檔；但它被
@@ -88,7 +88,10 @@ def claim_tmp_slot(results_path: Path) -> int:
         results_path: 追蹤結果 parquet 的正式輸出路徑。
 
     Returns:
-        持有 `flock` 的 file descriptor。
+        `(fd, identity)`：持有 `flock` 的 file descriptor，以及它鎖住的那個 inode 的
+        `(st_dev, st_ino)`。**身分要從這裡帶走、不能之後再用路徑推導一次**——認領完到
+        建 `TrackingResultCollector` 之間這個名字仍可能被換掉，那時 `os.stat(path)` 取到
+        的是別人的 inode，之後所有的比對都會拿別人的檔當成自己的。
 
     Raises:
         RuntimeError: 這條路徑的暫存檔正被另一個進程持有，或連續數輪都在拿到鎖的當下
@@ -137,7 +140,8 @@ def claim_tmp_slot(results_path: Path) -> int:
             path=str(tmp_path),
             bytes=residue_bytes,
         )
-    return fd
+    claimed = os.fstat(fd)
+    return fd, (claimed.st_dev, claimed.st_ino)
 
 
 class TrackingResultCollector:
@@ -147,19 +151,24 @@ class TrackingResultCollector:
     中途例外改呼叫 discard() 清掉暫存檔，不留下不完整的 parquet（fail-loud）。
     """
 
-    def __init__(self, results_path: Path):
+    def __init__(
+        self, results_path: Path, tmp_identity: tuple[int, int] | None = None
+    ):
         """初始化空緩衝，尚未建立任何 parquet writer（惰性建立於首次 flush）。
 
         Args:
             results_path: 追蹤結果 parquet 的正式輸出路徑；`save()` 成功前
                 資料只會寫在同目錄的 `.tmp` 暫存檔。
+            tmp_identity: `claim_tmp_slot` 回傳的暫存檔身分 `(st_dev, st_ino)`。
+                寫入、刪除、改名前都會拿它跟路徑此刻指向的 inode 比對，確保動到的是
+                自己那一份（見 `_require_own_tmp`）。**必須由認領那一步帶進來，不可以
+                在這裡用 `os.stat` 重新推導**：認領完到這裡之間名字仍可能被換掉，那時
+                推導到的是別人的 inode，之後每一道比對都會通過而動到別人的檔。
+                `None` 代表沒有經過認領（例如測試直接建），身分改為首次 flush 建檔時記下。
         """
         self._results_path = results_path
         self._tmp_path = tmp_path_for(results_path)
-        # 認領（`claim_tmp_slot`）建出來的那個 inode。收尾時要刪的是**自己這一份**，
-        # 而不是此刻恰好叫這個名字的檔案：孤兒進程持鎖、運維手動 `rm` 掉暫存檔、新的
-        # 執行接手之後，依路徑刪會刪掉新執行正在寫的檔（見 `_remove_tmp`）
-        self._tmp_identity = _identity_of(self._tmp_path)
+        self._tmp_identity = tmp_identity
         self._columns: dict[str, list] = {name: [] for name in _SCHEMA}
         self._pending_rows = 0
         self._total_rows = 0

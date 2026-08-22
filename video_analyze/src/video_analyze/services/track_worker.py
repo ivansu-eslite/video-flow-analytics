@@ -294,9 +294,10 @@ def run_track_worker(
     _reject_inference_sized_shapes(frame_shapes)
     # 註冊在認領之前：`claim_tmp_slot` 一旦把 `.tmp` 建出來，這之後的每一步（含建構
     # tracker、落腳點推算器）被 SIGTERM 打斷都得走得到清理，否則那個窗口內收到訊號
-    # 就會留下殘檔。⚠ 有一段仍蓋不到：`claim_tmp_slot` 內部從 `os.open` 到回傳之間，
-    # `lock_fd` 與 `collector` 都還是 `None`，`except` 兩件事都不做，訊號落在那裡會留下
-    # 一個 0 byte 的 `.tmp`。窗口不到毫秒、殘檔無害，且下次認領同一條路徑時會清掉
+    # 就會留下殘檔。⚠ 有一段仍蓋不到：從 `claim_tmp_slot` 內部的 `os.open` 起，一路到
+    # 下一行 `collector` 綁定完成為止，`lock_fd` 與 `collector` 都還是 `None`，`except`
+    # 兩件事都不做，訊號落在這段會留下一個 0 byte 的 `.tmp`。窗口不到毫秒、殘檔無害，
+    # 且下次認領同一條路徑時會清掉
     previous_sigterm = signal.signal(signal.SIGTERM, _raise_on_sigterm)
     # SIGINT 不改處置（Ctrl+C 照常以 KeyboardInterrupt 進到清理），只記下來，清理期間
     # 要連它一起擋掉
@@ -306,8 +307,8 @@ def run_track_worker(
     lock_fd: int | None = None
     collector: TrackingResultCollector | None = None
     try:
-        lock_fd = claim_tmp_slot(results_path)
-        collector = TrackingResultCollector(results_path)
+        lock_fd, tmp_identity = claim_tmp_slot(results_path)
+        collector = TrackingResultCollector(results_path, tmp_identity)
         tracker = MultiStreamByteTracker(num_streams=len(stream_names))
         # 跨格重用：它記著每條軌跡上一次成功推算的落腳點偏移量
         foot_estimator = FootPointEstimator(settings.foot_point.method)
