@@ -1,0 +1,814 @@
+#!/usr/bin/env python3
+"""`video_analyze` 的端到端效能量測：跑矩陣、收中繼資料、把產物解析成可比較的表。
+
+**這支是從 `outputs/vfa_perf/code/` 的三支腳本移植進版控的**（`run_main_local.sh` 跑
+單輪、`run_all_main.sh` 跑矩陣、`summarize_main_runs.py` 解析），與 `compare_backend.py`
+是同一件事的第二次。那三支寫死了絕對路徑、日期與產物目錄名，又放在 gitignore 的
+`outputs/` 底下：下次要重跑（換卡、改批次、驗證某次重構有沒有拖慢）得從頭再寫一次。
+
+⚠ **FPS 口徑：報表的「每秒張數」一律取推論進程**——`component == "inference"` 的
+`FPS 整體` 那行。每輪 log 其實有**兩行** `overall_fps`，追蹤進程結束時也印一行
+（`追蹤進程結束`），但它的分母是該進程自己的 wall clock，與推論進程不是同一個東西，
+混用會系統性高估 1–2%。這件事寫在註解裡活不久，所以本檔改用四道互鎖：
+
+1. 解析器回傳的 `FpsReading` 是 frozen dataclass，欄位各自帶口徑
+   （`inference_fps`／`track_worker_fps`），**沒有任何欄位叫 `fps` 或 `overall_fps`**，
+   呼叫端拿不到一個泛用的 FPS 可以誤用。
+2. 分組統計的輸入只由 `_inference_fps_values()` 產生，追蹤值不傳進去；明細表兩欄分開
+   標示，而分組平均只有推論那一個。
+3. 缺推論行時**不以追蹤值遞補**，該列標為未完成並排除在統計外——遞補正好製造系統性高估。
+4. `component` 與 `message` 兩個欄位同時比對；重複的推論行直接拋錯（代表兩次執行寫進
+   同一份 log，靜默取一個是同類錯誤）。**不提供切換口徑的旗標**：給了開關等於承認兩者
+   可互換，而它們分母不同。
+
+其餘三個刻意的取捨：
+
+- **資源統計用 `os.wait4`，不是 `getrusage(RUSAGE_CHILDREN)`**。後者是本進程「所有已
+  回收子進程」的累計值：矩陣跑十輪，第二筆之後每筆的 CPU 時間是總和、`ru_maxrss` 是
+  歷來最大值，靜默偏大且無法相減還原。配套是**不可先呼叫 `Popen.wait()`**（那會先回收
+  子進程，`wait4` 隨即拋 `ChildProcessError`）。`ru_maxrss` 是進程樹中**最大的單一
+  進程**、不是總和——vfa 是多進程，這個數字不等於整體記憶體足跡。
+- **缺 `nvidia-smi` 即 fail loud**，且在矩陣開跑前就檢查。這是 GPU 端到端量測工具，
+  取樣不只是輔助：「顯卡／CPU 拆分」用的正是該次執行自己的 SM 取樣，少了它那項分析
+  做不了，而 FPS 表上完全看不出來。跑滿 45 分鐘才發現太貴。要豁免請明講 `--no-gpu-log`。
+- **產物目錄預設 `outputs/bench_e2e`，絕不可放在 `outputs/<bucket>/` 底下**：每輪開頭會
+  清空該目錄，產物會自己刪自己。兩道防護——被清路徑做逃逸檢查，產物檔已存在且未給
+  `--overwrite` 即中止（舊腳本靜默覆蓋，那正是「這輪的 meta 配上一輪的 log」的來源）。
+
+本檔**只用 stdlib**：不 import torch／cv2，測試才會是瞬間的，也避免在量測進程之外先載
+一次 torch 擾動待測環境（相依版本改用外呼 venv python 取得）。與 `tools/` 另外兩支一樣
+不定位 repo 根、不讀 `settings`，全靠 CLI 參數與「在 repo 根執行」這句約束。
+
+用法（**在 repo 根目錄執行**，用 `--package` 不用 `--directory`：`--directory` 會把 cwd
+切進套件資料夾，而 `bucket_dir` 與 `OUTPUT_ROOT` 都是 cwd 相對路徑）：
+
+    # 跑矩陣：{40 秒版, 2 分鐘版} × {batch 16, 8} × 2 次
+    uv run --package video_analyze python video_analyze/tools/bench_e2e.py run \
+        --buckets bucket_20260801_perf40,bucket_20260801_perf \
+        --date 2026-08-01 \
+        --batches 16,8 \
+        --repeat 2
+
+    # 落腳點對照組：跑第二次、寫進同一個產物目錄（report 本就按組態分組）
+    uv run --package video_analyze python video_analyze/tools/bench_e2e.py run \
+        --buckets bucket_20260801_perf40 --date 2026-08-01 --batches 16 \
+        --foot-point bbox_bottom --repeat 2 --label attrib
+
+    # 解析成明細表與分組統計
+    uv run --package video_analyze python video_analyze/tools/bench_e2e.py report
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import json
+import os
+import shutil
+import signal
+import statistics
+import subprocess
+import sys
+import time
+import tomllib
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+DEFAULT_RUNS_DIR = Path("outputs/bench_e2e")
+DEFAULT_OUTPUT_ROOT = Path("outputs")
+DEFAULT_CONFIG = Path("video_analyze/config.toml")
+DEFAULT_FOOT_POINT = "head"
+DEFAULT_REPEAT = 2
+DEFAULT_LABEL = "main"
+DEFAULT_EXCLUDE_PREFIXES = "smoke"
+# `-s um` 是舊產物用的（只有 sm／mem／fb）；`pucm` 多帶功耗、溫度與時脈，之後要看
+# 「掉頻了沒」才有資料。欄位隨 `-s` 而變，故實際用的指標集記進 meta，舊產物不要拿去
+# 跟新的比對格式。
+DEFAULT_GPU_METRICS = "pucm"
+DEFAULT_GPU_INTERVAL_SECONDS = 2
+
+# 被量測的指令。刻意寫死不開參數：換掉它就不是「量 video_analyze 的端到端」了。
+RUN_COMMAND: tuple[str, ...] = ("uv", "run", "--package", "video_analyze", "video_analyze")
+
+# 相依版本外呼 venv python 取得（見模組 docstring：本檔不 import torch）。
+_VERSION_MODULES = ("torch", "tensorrt", "ultralytics")
+_VERSION_PROBE = """
+import importlib
+for name in {modules!r}:
+    try:
+        print(f"{{name}}={{importlib.import_module(name).__version__}}")
+    except Exception as exc:
+        print(f"{{name}}=<import 失敗: {{type(exc).__name__}}>")
+""".format(modules=_VERSION_MODULES)
+
+_INFERENCE_COMPONENT = "inference"
+_INFERENCE_MESSAGE = "FPS 整體"
+_TRACK_WORKER_COMPONENT = "track_worker"
+_TRACK_WORKER_MESSAGE = "追蹤進程結束"
+
+
+# --------------------------------------------------------------------------------------
+# FPS 口徑
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FpsReading:
+    """一輪 log 裡的兩個 `overall_fps`，各自標明是哪個進程量的。
+
+    **沒有泛用的 `fps` 欄位是刻意的**：兩個值的分母不同（推論進程的 wall clock 對
+    追蹤進程的 wall clock），差 1–2%，取名 `fps` 就等於邀請呼叫端隨手取一個。
+    `inference_frames`／`inference_elapsed_seconds` 只跟著推論那行走。
+    """
+
+    inference_fps: float | None
+    inference_frames: int | None
+    inference_elapsed_seconds: float | None
+    track_worker_fps: float | None
+
+    @property
+    def completed(self) -> bool:
+        """有推論那行才算跑完。追蹤值**不能**拿來遞補（會系統性高估）。"""
+        return self.inference_fps is not None
+
+
+def parse_fps_log(text: str) -> FpsReading:
+    """從一輪的 stdout log 取兩個口徑的 `overall_fps`。
+
+    非 JSON 的行（uv 的下載進度、ultralytics 的橫幅）直接略過；同一口徑出現兩行即
+    拋錯——那代表兩次執行寫進同一份 log，靜默取其中一個會產生看似合理的數字。
+    """
+    inference: dict | None = None
+    track_worker: dict | None = None
+    for line in text.splitlines():
+        if "overall_fps" not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        component = entry.get("component")
+        message = entry.get("message")
+        if component == _INFERENCE_COMPONENT and message == _INFERENCE_MESSAGE:
+            if inference is not None:
+                raise ValueError(
+                    f"同一份 log 出現兩行推論進程的「{_INFERENCE_MESSAGE}」，"
+                    "代表兩次執行寫進同一份 log；取其中一個會產生看似合理的數字。"
+                )
+            inference = entry
+        elif component == _TRACK_WORKER_COMPONENT and message == _TRACK_WORKER_MESSAGE:
+            if track_worker is not None:
+                raise ValueError(
+                    f"同一份 log 出現兩行追蹤進程的「{_TRACK_WORKER_MESSAGE}」，"
+                    "代表兩次執行寫進同一份 log。"
+                )
+            track_worker = entry
+    return FpsReading(
+        inference_fps=None if inference is None else float(inference["overall_fps"]),
+        inference_frames=None if inference is None else int(inference["total_frames"]),
+        inference_elapsed_seconds=(
+            None if inference is None else float(inference["elapsed_seconds"])
+        ),
+        track_worker_fps=(
+            None if track_worker is None else float(track_worker["overall_fps"])
+        ),
+    )
+
+
+# --------------------------------------------------------------------------------------
+# 產物解析
+# --------------------------------------------------------------------------------------
+
+
+def parse_meta(text: str) -> dict[str, str]:
+    """`key=value` 逐行的 meta。值裡可以有 `=`（只切第一個），沒有 `=` 的行略過。"""
+    return dict(
+        line.split("=", 1) for line in text.splitlines() if "=" in line
+    )
+
+
+def format_meta(pairs: Mapping[str, object]) -> str:
+    """`parse_meta` 的反向。值一律 `str()`，讓 meta 純粹是文字檔。"""
+    return "".join(f"{key}={value}\n" for key, value in pairs.items())
+
+
+@dataclass(frozen=True)
+class GpuUsage:
+    """`nvidia-smi dmon` 取樣的摘要。一列資料都沒有時三個統計值皆為 None。
+
+    `samples` 為 0 要讓它在產物裡看得見，不要變成安靜的 0%——取樣沒跑起來與 GPU 真的
+    閒置，在表上長得一模一樣。
+    """
+
+    samples: int
+    mean_sm_percent: float | None
+    max_sm_percent: float | None
+    max_fb_mb: float | None
+
+
+def parse_gpu_log(text: str) -> GpuUsage:
+    """依**表頭找欄位**而非固定索引：`dmon -s` 給不同指標集，欄位數與順序都會變。
+
+    第一行 `#` 開頭的是欄名（`#Time gpu pwr ... sm mem ... fb ...`），第二行是單位，
+    略過。取不到的值（`mtemp` 在部分卡是 `-`）逐格跳過，不讓整列作廢。
+    """
+    header: list[str] | None = None
+    sm_values: list[float] = []
+    fb_values: list[float] = []
+    samples = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            if header is None:
+                header = stripped.lstrip("#").split()
+            continue
+        if header is None:
+            continue
+        fields = stripped.split()
+        if len(fields) != len(header):
+            continue
+        samples += 1
+        row = dict(zip(header, fields, strict=True))
+        for column, sink in (("sm", sm_values), ("fb", fb_values)):
+            raw = row.get(column)
+            if raw is None:
+                continue
+            try:
+                sink.append(float(raw))
+            except ValueError:
+                continue
+    return GpuUsage(
+        samples=samples,
+        mean_sm_percent=statistics.mean(sm_values) if sm_values else None,
+        max_sm_percent=max(sm_values) if sm_values else None,
+        max_fb_mb=max(fb_values) if fb_values else None,
+    )
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """一輪量測的產物：meta ＋ 兩個口徑的 FPS ＋ GPU 取樣摘要。"""
+
+    name: str
+    meta: Mapping[str, str]
+    fps_reading: FpsReading
+    gpu: GpuUsage | None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.meta.get("exit_status") == "0"
+
+
+def load_run_records(runs_dir: Path) -> list[RunRecord]:
+    """讀 `runs_dir` 底下每個 `<name>.meta` 及其同名 `.log`／`.gpu.log`。"""
+    records: list[RunRecord] = []
+    for meta_path in sorted(runs_dir.glob("*.meta")):
+        log_path = meta_path.with_suffix(".log")
+        if not log_path.exists():
+            continue
+        gpu_path = meta_path.with_suffix(".gpu.log")
+        records.append(
+            RunRecord(
+                name=meta_path.stem,
+                meta=parse_meta(meta_path.read_text()),
+                fps_reading=parse_fps_log(log_path.read_text()),
+                gpu=parse_gpu_log(gpu_path.read_text()) if gpu_path.exists() else None,
+            )
+        )
+    return records
+
+
+@dataclass(frozen=True)
+class GroupStat:
+    """同組態多次量測的平均與離散度。**只有推論口徑**，見模組 docstring 第 2 道互鎖。"""
+
+    bucket: str
+    batch: str
+    foot_point_method: str
+    runs: int
+    mean_inference_fps: float
+    spread_percent: float
+    values: tuple[float, ...]
+
+
+def _inference_fps_values(records: Iterable[RunRecord]) -> list[float]:
+    """分組統計唯一的取值入口——追蹤進程的值進不到這裡。"""
+    return [r.fps_reading.inference_fps for r in records if r.fps_reading.inference_fps]
+
+
+def group_runs(
+    records: Iterable[RunRecord], exclude_prefixes: Sequence[str] = ()
+) -> list[GroupStat]:
+    """按 (bucket, batch, 落腳點方法) 分組。未完成、非零 exit、排除前綴的 run 不進統計。"""
+    groups: dict[tuple[str, str, str], list[RunRecord]] = {}
+    for record in records:
+        if not record.fps_reading.completed or not record.succeeded:
+            continue
+        if any(record.name.startswith(prefix) for prefix in exclude_prefixes):
+            continue
+        key = (
+            record.meta.get("bucket", "?"),
+            record.meta.get("model_batch", "?"),
+            record.meta.get("foot_point_method", "?"),
+        )
+        groups.setdefault(key, []).append(record)
+
+    stats: list[GroupStat] = []
+    for (bucket, batch, foot), members in sorted(groups.items()):
+        values = _inference_fps_values(members)
+        mean = statistics.mean(values)
+        spread = (max(values) - min(values)) / mean * 100 if len(values) > 1 else 0.0
+        stats.append(
+            GroupStat(
+                bucket=bucket,
+                batch=batch,
+                foot_point_method=foot,
+                runs=len(values),
+                mean_inference_fps=mean,
+                spread_percent=spread,
+                values=tuple(values),
+            )
+        )
+    return stats
+
+
+# --------------------------------------------------------------------------------------
+# 矩陣展開與執行環境
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BenchCase:
+    """矩陣裡的一格。`name` 同時是該輪四個產物檔的 stem。"""
+
+    name: str
+    bucket: str
+    batch: int
+    foot_point_method: str
+    repeat_index: int
+
+
+def expand_matrix(
+    buckets: Sequence[str],
+    batches: Sequence[int],
+    foot_point_method: str,
+    repeat: int,
+    label: str = DEFAULT_LABEL,
+) -> list[BenchCase]:
+    """展開矩陣，**重複次數在最外層**。
+
+    這不是寫法偏好而是量測性質：同組態連跑會把熱漂移集中在單一格，離散度那欄就失真了
+    ——第一次跑的都是冷的、第二次跑的都是熱的，反而讓機器狀態被平均掉。
+    """
+    cases: list[BenchCase] = []
+    for repeat_index in range(1, repeat + 1):
+        for bucket in buckets:
+            for batch in batches:
+                tag = bucket.removeprefix("bucket_")
+                cases.append(
+                    BenchCase(
+                        name=f"{label}_{tag}_b{batch}_{foot_point_method}_r{repeat_index}",
+                        bucket=bucket,
+                        batch=batch,
+                        foot_point_method=foot_point_method,
+                        repeat_index=repeat_index,
+                    )
+                )
+    return cases
+
+
+def build_run_env(base: Mapping[str, str], case: BenchCase, date: str) -> dict[str, str]:
+    """疊上 pydantic-settings 的四個命名空間。值一律字串（`os.environ` 只收字串）。"""
+    env = dict(base)
+    env["INPUT__BUCKET_DIR"] = case.bucket
+    env["INPUT__DATE"] = date
+    env["MODEL__BATCH"] = str(case.batch)
+    env["FOOT_POINT__METHOD"] = case.foot_point_method
+    return env
+
+
+def bucket_output_dir(bucket: str, output_root: Path = DEFAULT_OUTPUT_ROOT) -> Path:
+    """算出每輪開頭要清空的目錄，並擋下逃逸。
+
+    這個路徑會被 `shutil.rmtree`，而 bucket 來自 CLI 字串：含 `/` 或 `..`、或解析後
+    不在 `output_root` 底下（例如 `outputs/<bucket>` 本身是指向別處的 symlink），一律中止。
+    """
+    if not bucket or bucket != bucket.strip():
+        raise SystemExit("bucket 名稱不可為空或帶前後空白")
+    if "/" in bucket or "\\" in bucket or ".." in bucket:
+        raise SystemExit(f"bucket 名稱 {bucket!r} 含路徑分隔或 `..`；只接受單一目錄名")
+    candidate = (output_root / bucket).resolve()
+    root = output_root.resolve()
+    if candidate == root or root not in candidate.parents:
+        raise SystemExit(f"{candidate} 不在 {root} 底下，拒絕清空")
+    return candidate
+
+
+def check_runs_dir_disjoint(runs_dir: Path, cleared_dirs: Iterable[Path]) -> None:
+    """產物目錄不可落在每輪會被清空的目錄底下，否則產物會自己刪自己。"""
+    runs = runs_dir.resolve()
+    for cleared in cleared_dirs:
+        if runs == cleared or cleared in runs.parents:
+            raise SystemExit(
+                f"產物目錄 {runs_dir} 位於每輪開頭會被清空的 {cleared} 底下；"
+                "請改用 --runs-dir 指到別處（預設 outputs/bench_e2e 就是分開的）。"
+            )
+
+
+def shell_exit_code(wait_status: int) -> int:
+    """把 `os.wait4` 的原始 status word 轉成 shell 慣例，讓舊產物的 `exit_status` 對得上。
+
+    訊號終止記 `128+N`（`SIGKILL` → 137），與 bash 的 `$?` 一致；舊腳本用的是
+    `/usr/bin/time` ＋ `$?`，兩邊的數字要能直接比較。
+    """
+    if os.WIFSIGNALED(wait_status):
+        return 128 + os.WTERMSIG(wait_status)
+    if os.WIFEXITED(wait_status):
+        return os.WEXITSTATUS(wait_status)
+    return -1
+
+
+# --------------------------------------------------------------------------------------
+# 執行
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ResourceUsage:
+    """一輪的資源用量。欄位名帶單位，因為 `ru_*` 的單位是平台相關的陷阱。
+
+    `max_rss_kb` 是 `ru_maxrss`：進程樹中**最大的單一進程**，不是總和。vfa 是多進程
+    （推論、追蹤、各路解碼），這個數字不等於整體記憶體足跡。
+    """
+
+    exit_status: int
+    wall_seconds: float
+    max_rss_kb: int
+    user_seconds: float
+    system_seconds: float
+    cpu_percent: int
+    major_page_faults: int
+    minor_page_faults: int
+    voluntary_context_switches: int
+    involuntary_context_switches: int
+    fs_inputs: int
+    fs_outputs: int
+
+
+def run_measured(command: Sequence[str], env: Mapping[str, str], log_path: Path) -> ResourceUsage:
+    """跑一輪並收資源用量。
+
+    用 `os.wait4` 而非 `Popen.wait()` ＋ `getrusage(RUSAGE_CHILDREN)`（見模組 docstring）。
+    **不可在此之前呼叫 `wait()`／`communicate()`**：那會先回收子進程，`wait4` 隨即拋
+    `ChildProcessError`。`returncode` 因此要手動指派，否則 `Popen.__del__` 會抱怨。
+    """
+    started = time.monotonic()
+    with log_path.open("w") as log_file:
+        process = subprocess.Popen(
+            list(command), stdout=log_file, stderr=subprocess.STDOUT, env=dict(env)
+        )
+        _, wait_status, usage = os.wait4(process.pid, 0)
+    wall_seconds = time.monotonic() - started
+    process.returncode = shell_exit_code(wait_status)
+    cpu_seconds = usage.ru_utime + usage.ru_stime
+    return ResourceUsage(
+        exit_status=process.returncode,
+        wall_seconds=wall_seconds,
+        max_rss_kb=int(usage.ru_maxrss),
+        user_seconds=usage.ru_utime,
+        system_seconds=usage.ru_stime,
+        cpu_percent=round(cpu_seconds / wall_seconds * 100) if wall_seconds > 0 else 0,
+        major_page_faults=int(usage.ru_majflt),
+        minor_page_faults=int(usage.ru_minflt),
+        voluntary_context_switches=int(usage.ru_nvcsw),
+        involuntary_context_switches=int(usage.ru_nivcsw),
+        fs_inputs=int(usage.ru_inblock),
+        fs_outputs=int(usage.ru_oublock),
+    )
+
+
+@contextlib.contextmanager
+def gpu_sampler(
+    log_path: Path, metrics: str, interval_seconds: int, enabled: bool
+) -> Iterator[None]:
+    """背景跑 `nvidia-smi dmon`，`finally` 收尾。
+
+    `finally` 而非結尾直接 kill：例外、`SystemExit`、`KeyboardInterrupt` 都要收得掉，
+    等價於原本 shell 的 `trap ... EXIT`。留著不收會在矩陣跑到一半中斷時堆出一串孤兒。
+    """
+    if not enabled:
+        yield
+        return
+    with log_path.open("w") as log_file:
+        process = subprocess.Popen(
+            ["nvidia-smi", "dmon", "-s", metrics, "-d", str(interval_seconds), "-o", "T"],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            yield
+        finally:
+            process.send_signal(signal.SIGTERM)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
+def _probe_versions(python: Path | str) -> dict[str, str]:
+    completed = subprocess.run(
+        [str(python), "-c", _VERSION_PROBE], capture_output=True, text=True, check=False
+    )
+    return parse_meta(completed.stdout)
+
+
+def _git_output(*args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args], capture_output=True, text=True, check=False
+    )
+    return completed.stdout.strip()
+
+
+def _engine_path(config_path: Path) -> str:
+    if not config_path.is_file():
+        raise SystemExit(f"找不到設定檔 {config_path}（本工具要在 repo 根目錄執行）")
+    with config_path.open("rb") as handle:
+        config = tomllib.load(handle)
+    model_path = config.get("model", {}).get("model_path")
+    if not model_path:
+        raise SystemExit(f"{config_path} 的 [model].model_path 是空的，量測記不下引擎身分")
+    return str(model_path)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _count_segments(bucket: str) -> int:
+    total = 0
+    for _, _, files in os.walk(bucket, followlinks=True):
+        total += sum(1 for name in files if name.endswith(".mkv"))
+    return total
+
+
+def _artifact_paths(runs_dir: Path, name: str) -> dict[str, Path]:
+    return {
+        "meta": runs_dir / f"{name}.meta",
+        "log": runs_dir / f"{name}.log",
+        "gpu": runs_dir / f"{name}.gpu.log",
+        "parquet": runs_dir / f"{name}.parquet",
+    }
+
+
+def _now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+# --------------------------------------------------------------------------------------
+# 子命令
+# --------------------------------------------------------------------------------------
+
+
+def command_run(args: argparse.Namespace) -> int:
+    buckets = [item.strip() for item in args.buckets.split(",") if item.strip()]
+    batches = [int(item) for item in args.batches.split(",") if item.strip()]
+    if not buckets or not batches:
+        raise SystemExit("--buckets 與 --batches 都不可為空")
+    if args.repeat < 1:
+        raise SystemExit("--repeat 至少為 1")
+    if args.gpu_log and shutil.which("nvidia-smi") is None:
+        raise SystemExit(
+            "找不到 nvidia-smi。這是 GPU 端到端量測工具，少了 SM 取樣就做不了"
+            "「顯卡／CPU 拆分」那項分析，而 FPS 表上完全看不出來；"
+            "確定要在沒有取樣的情況下量，請明講 --no-gpu-log。"
+        )
+
+    cleared_dirs = [bucket_output_dir(bucket, args.output_root) for bucket in buckets]
+    check_runs_dir_disjoint(args.runs_dir, cleared_dirs)
+    cleared_by_bucket = dict(zip(buckets, cleared_dirs, strict=True))
+
+    cases = expand_matrix(buckets, batches, args.foot_point, args.repeat, args.label)
+    args.runs_dir.mkdir(parents=True, exist_ok=True)
+    if not args.overwrite:
+        existing = [
+            path
+            for case in cases
+            for path in _artifact_paths(args.runs_dir, case.name).values()
+            if path.exists()
+        ]
+        if existing:
+            raise SystemExit(
+                f"產物已存在（{len(existing)} 個檔，例如 {existing[0]}）。"
+                "覆蓋請明講 --overwrite——靜默覆蓋正是「這輪的 meta 配上一輪的 log」的來源。"
+            )
+
+    engine = _engine_path(args.config)
+    engine_sha256 = _sha256(Path(engine)) if Path(engine).is_file() else "<找不到引擎檔>"
+    versions = _probe_versions(sys.executable)
+    commit = _git_output("rev-parse", "HEAD")
+    git_dirty = len(_git_output("status", "--porcelain").splitlines())
+    segments = {bucket: _count_segments(bucket) for bucket in buckets}
+
+    print(
+        f"矩陣共 {len(cases)} 輪："
+        f"{len(buckets)} bucket × {len(batches)} batch × {args.repeat} 次"
+    )
+    worst_status = 0
+    for index, case in enumerate(cases, start=1):
+        paths = _artifact_paths(args.runs_dir, case.name)
+        print(f"=== [{index}/{len(cases)}] {case.name} ===", flush=True)
+
+        # 每輪都從乾淨的輸出開始：舊 parquet 留著會讓「這輪到底寫了幾列」失去意義
+        cleared = cleared_by_bucket[case.bucket]
+        if cleared.exists():
+            shutil.rmtree(cleared)
+
+        meta: dict[str, object] = {
+            "name": case.name,
+            "label": args.label,
+            "machine": args.machine,
+            "codebase": "vfa-main",
+            "commit": commit,
+            "git_dirty": git_dirty,
+            "bucket": case.bucket,
+            "date": args.date,
+            "model_batch": case.batch,
+            "foot_point_method": case.foot_point_method,
+            "repeat_index": case.repeat_index,
+            "engine": engine,
+            "engine_sha256": engine_sha256,
+            **versions,
+            "segments": segments[case.bucket],
+            "gpu_metrics": args.gpu_metrics if args.gpu_log else "<未取樣>",
+            "gpu_sample_seconds": args.gpu_interval if args.gpu_log else "<未取樣>",
+            "command": " ".join(RUN_COMMAND),
+            "started": _now(),
+        }
+        paths["meta"].write_text(format_meta(meta))
+
+        env = build_run_env(os.environ, case, args.date)
+        with gpu_sampler(paths["gpu"], args.gpu_metrics, args.gpu_interval, args.gpu_log):
+            usage = run_measured(RUN_COMMAND, env, paths["log"])
+
+        gpu = parse_gpu_log(paths["gpu"].read_text()) if args.gpu_log else None
+        tail: dict[str, object] = {
+            "finished": _now(),
+            "exit_status": usage.exit_status,
+            "wall_seconds": round(usage.wall_seconds, 2),
+            "max_rss_kb": usage.max_rss_kb,
+            "user_seconds": round(usage.user_seconds, 2),
+            "system_seconds": round(usage.system_seconds, 2),
+            "cpu_percent": usage.cpu_percent,
+            "major_page_faults": usage.major_page_faults,
+            "minor_page_faults": usage.minor_page_faults,
+            "voluntary_context_switches": usage.voluntary_context_switches,
+            "involuntary_context_switches": usage.involuntary_context_switches,
+            "fs_inputs": usage.fs_inputs,
+            "fs_outputs": usage.fs_outputs,
+        }
+        if gpu is not None:
+            # 取樣一列都沒有時 samples=0 要留在產物裡，別讓它變成安靜的 0%
+            tail["gpu_samples"] = gpu.samples
+        with paths["meta"].open("a") as handle:
+            handle.write(format_meta(tail))
+
+        parquet = cleared / args.date / "tracking_results.parquet"
+        if parquet.is_file():
+            shutil.copy2(parquet, paths["parquet"])
+            with paths["meta"].open("a") as handle:
+                handle.write(format_meta({"parquet_bytes": parquet.stat().st_size}))
+
+        reading = parse_fps_log(paths["log"].read_text())
+        if reading.completed:
+            print(
+                f"推論 {reading.inference_fps:.2f} 張/秒"
+                f"（{reading.inference_frames} 格 / {reading.inference_elapsed_seconds:.1f} 秒）"
+                f"、wall {usage.wall_seconds:.1f} 秒、max RSS "
+                f"{usage.max_rss_kb / 1024:.0f} MB、exit {usage.exit_status}"
+            )
+        else:
+            print(f"未完成：log 裡沒有推論進程的「{_INFERENCE_MESSAGE}」，exit {usage.exit_status}")
+        worst_status = max(worst_status, usage.exit_status)
+
+    print(f"矩陣完成，產物在 {args.runs_dir}")
+    return worst_status
+
+
+def command_report(args: argparse.Namespace) -> int:
+    if not args.runs_dir.is_dir():
+        raise SystemExit(f"找不到產物目錄 {args.runs_dir}")
+    records = load_run_records(args.runs_dir)
+    if not records:
+        raise SystemExit(f"{args.runs_dir} 底下沒有成對的 .meta／.log")
+    exclude = [item.strip() for item in args.exclude_prefixes.split(",") if item.strip()]
+
+    print(
+        f"{'run':<40} {'bucket':<18} {'b':<3} {'foot':<12} "
+        f"{'infer_fps':>9} {'track_fps':>9} {'sec':>6} {'frames':>8} "
+        f"{'rss_MB':>7} {'sm%':>5} {'exit':>4}"
+    )
+    for record in records:
+        meta = record.meta
+        reading = record.fps_reading
+        if not reading.completed:
+            print(f"{record.name:<40} 未完成或失敗（exit {meta.get('exit_status', '?')}）")
+            continue
+        rss_kb = meta.get("max_rss_kb")
+        rss = f"{int(rss_kb) / 1024:.0f}" if rss_kb else "-"
+        sm = (
+            f"{record.gpu.mean_sm_percent:.0f}"
+            if record.gpu is not None and record.gpu.mean_sm_percent is not None
+            else "-"
+        )
+        track = (
+            f"{reading.track_worker_fps:.2f}" if reading.track_worker_fps is not None else "-"
+        )
+        print(
+            f"{record.name:<40} {meta.get('bucket', '?').removeprefix('bucket_'):<18} "
+            f"{meta.get('model_batch', '?'):<3} {meta.get('foot_point_method', '?'):<12} "
+            f"{reading.inference_fps:>9.2f} {track:>9} "
+            f"{reading.inference_elapsed_seconds:>6.1f} {reading.inference_frames:>8} "
+            f"{rss:>7} {sm:>5} {meta.get('exit_status', '?'):>4}"
+        )
+
+    print(f"\n=== 分組平均（同組態多次；每秒張數＝推論進程口徑；排除前綴 {exclude}） ===")
+    for stat in group_runs(records, exclude):
+        print(
+            f"{stat.bucket.removeprefix('bucket_'):<18} batch={stat.batch:<3} "
+            f"{stat.foot_point_method:<12} n={stat.runs} "
+            f"平均={stat.mean_inference_fps:>7.2f} 離散={stat.spread_percent:>4.1f}% "
+            f"{[round(value, 2) for value in stat.values]}"
+        )
+    return 0
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    run = sub.add_parser("run", help="跑矩陣量測（單輪＝各軸長度為 1 的退化情形）")
+    run.add_argument("--buckets", required=True, help="測試片目錄，逗號分隔（cwd 相對）")
+    run.add_argument("--date", required=True, help="INPUT__DATE，例如 2026-08-01")
+    run.add_argument("--batches", required=True, help="MODEL__BATCH，逗號分隔")
+    run.add_argument(
+        "--foot-point",
+        default=DEFAULT_FOOT_POINT,
+        help=f"FOOT_POINT__METHOD，預設 {DEFAULT_FOOT_POINT}。**不是矩陣的第四條軸**："
+        "對照組只掛在單一格上，當成軸會讓每輪從 5 個 run 變 8 個；"
+        "要跑對照組請再跑一次本工具、寫進同一個產物目錄（report 本就按組態分組）",
+    )
+    run.add_argument("--repeat", type=int, default=DEFAULT_REPEAT, help=f"預設 {DEFAULT_REPEAT}")
+    run.add_argument("--label", default=DEFAULT_LABEL, help=f"run 名稱前綴，預設 {DEFAULT_LABEL}")
+    run.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    run.add_argument(
+        "--output-root",
+        type=Path,
+        default=DEFAULT_OUTPUT_ROOT,
+        help=f"每輪開頭清空的 <root>/<bucket>，預設 {DEFAULT_OUTPUT_ROOT}",
+    )
+    run.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="引擎身分的來源")
+    run.add_argument("--machine", default="local", help="記進 meta 的機器代號")
+    run.add_argument(
+        "--gpu-metrics", default=DEFAULT_GPU_METRICS, help=f"dmon -s，預設 {DEFAULT_GPU_METRICS}"
+    )
+    run.add_argument(
+        "--gpu-interval", type=int, default=DEFAULT_GPU_INTERVAL_SECONDS, help="dmon -d（秒）"
+    )
+    run.add_argument(
+        "--no-gpu-log",
+        dest="gpu_log",
+        action="store_false",
+        help="明確豁免 GPU 取樣（少了它「顯卡／CPU 拆分」那項分析就做不了）",
+    )
+    run.add_argument("--overwrite", action="store_true", help="允許覆蓋同名產物")
+    run.set_defaults(func=command_run)
+
+    report = sub.add_parser("report", help="把產物解析成明細表與分組統計")
+    report.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    report.add_argument(
+        "--exclude-prefixes",
+        default=DEFAULT_EXCLUDE_PREFIXES,
+        help=f"不進分組統計的 run 名稱前綴，逗號分隔，預設 {DEFAULT_EXCLUDE_PREFIXES}",
+    )
+    report.set_defaults(func=command_report)
+
+    args = ap.parse_args()
+    raise SystemExit(args.func(args))
+
+
+if __name__ == "__main__":
+    main()

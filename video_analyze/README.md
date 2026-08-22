@@ -241,6 +241,49 @@ forward 批次）。產物名為 `<權重 stem>_sm<SM>.engine`。
 `tools/` 在 `src/` 之外，不隨 wheel 出貨；那兩支工具會載 `.pt`，但不經過
 `YOLODetector`。這條分界就是 ADR-011 說的「正式產品只有一套 inference implementation」。
 
+## 端到端效能量測
+
+`tools/bench_e2e.py` 跑一整組矩陣（測試片 × 批次 × 重複）並把產物解析成表。它取代的是
+以前每次量測都重寫一遍的臨時腳本；執行組態全部走 CLI，沒有寫死的路徑或日期。
+
+```bash
+# 在 repo 根目錄執行（bucket_dir 與 outputs/ 都是 cwd 相對路徑）
+uv run --package video_analyze python video_analyze/tools/bench_e2e.py run \
+    --buckets bucket_20260801_perf40,bucket_20260801_perf \
+    --date 2026-08-01 \
+    --batches 16,8 \
+    --repeat 2
+
+uv run --package video_analyze python video_analyze/tools/bench_e2e.py report
+```
+
+一輪做的事：清空 `outputs/<bucket>/` → 寫 meta（組態、commit、引擎檔與其 sha256、
+torch／TensorRT／ultralytics 版本、片段數）→ 背景起 `nvidia-smi dmon` 取樣 → 用
+`INPUT__`／`MODEL__`／`FOOT_POINT__` 環境變數跑一次 `video_analyze` → 補寫資源用量與
+`exit_status` → 複製該輪的 `tracking_results.parquet`。產物落在 `--runs-dir`
+（預設 `outputs/bench_e2e`，已 gitignore），每輪四個檔：
+
+| 檔案 | 內容 |
+| --- | --- |
+| `<run>.meta` | `key=value` 的組態、環境身分、資源用量（`wall_seconds`／`max_rss_kb`／CPU％／page fault／context switch／fs I/O） |
+| `<run>.log` | 該輪的 stdout（結構化 JSON log） |
+| `<run>.gpu.log` | `dmon` 取樣（預設 `-s pucm`；欄位隨指標集而變，解析依表頭找欄位） |
+| `<run>.parquet` | 該輪寫出的 `tracking_results.parquet` |
+
+**報表的「每秒張數」一律是推論進程的口徑**（`component == "inference"` 的 `FPS 整體`
+那行）。每輪 log 其實有兩行 `overall_fps`——追蹤進程結束時也印一行，但它的分母是該進程
+自己的 wall clock，不是同一個東西，混用會系統性高估 1–2%。工具用四道互鎖擋掉取錯
+（欄位各自帶口徑、統計只吃推論值、缺推論行不以追蹤值遞補、重複的推論行直接拋錯），
+且**不提供切換口徑的旗標**：給了開關等於承認兩者可互換。細節見該檔的模組 docstring。
+
+落腳點方法**不是矩陣的第四條軸**：對照組只掛在單一格上，當成軸會讓每輪從 5 個 run 變
+8 個。要跑對照組就再跑一次工具、寫進同一個產物目錄（`report` 本就按組態分組）。
+重複次數在展開時放**最外層**，同組態不連跑——否則熱漂移會集中在單一格，離散度那欄
+就不再是量測雜訊。
+
+本工具只用 stdlib、不 import torch，也不經過 `YOLODetector`；與另外兩支一樣在 `src/`
+之外、不隨 wheel 出貨（ADR-011 的分界）。
+
 ## 函式介面
 
 ```python
