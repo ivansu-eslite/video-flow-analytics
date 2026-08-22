@@ -7,19 +7,16 @@ from vfa_observability import StructuredLogger
 from vfa_registry import load_registry
 
 from video_analyze.config.constants import OUTPUT_ROOT, TRACKING_RESULTS_FILENAME
-from video_analyze.services.detector import YOLODetector
-from video_analyze.services.frame_ring import (
+from video_analyze.services.batching import (
     RING_SLOTS,
-    FrameRing,
-    create_ring_buffer,
+    TARGET_BATCH,
+    TRACK_QUEUE_SLOTS,
 )
+from video_analyze.services.detector import YOLODetector
+from video_analyze.services.frame_ring import FrameRing, create_ring_buffer
 from video_analyze.services.inference import InferencePipeline
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
-from video_analyze.services.track_worker import (
-    TRACK_FAILED,
-    TRACK_QUEUE_SLOTS,
-    run_track_worker,
-)
+from video_analyze.services.track_worker import TRACK_FAILED, run_track_worker
 from video_analyze.services.video_reader import (
     FrameShape,
     SegmentInfo,
@@ -169,6 +166,15 @@ def analyze_daily(
     results_path = output_root / date.isoformat() / TRACKING_RESULTS_FILENAME
 
     num_streams = len(stream_names)
+    # 三個常數都由 `[model].batch` 推導（見 `services/batching.py`），而「批次調小了」
+    # 唯一的症狀是跑得慢——不會有例外、輸出也完全正常。啟動時記一筆，讓事後查得到當次
+    # 實際用的是多少。
+    logger.info(
+        "批次相關常數",
+        target_batch=TARGET_BATCH,
+        ring_slots=RING_SLOTS,
+        track_queue_slots=TRACK_QUEUE_SLOTS,
+    )
     # 影格走共享記憶體環形緩衝，queue 只傳輕量索引，避免每格 6MB 走 pickle + pipe
     data_queues = [mp.Queue() for _ in range(num_streams)]
     free_queues = [mp.Queue() for _ in range(num_streams)]
@@ -190,7 +196,7 @@ def analyze_daily(
     # 而非影格——影格在推論完成後就沒有用途（slot 當下就歸還了，見 ADR-010）。
     # **上限不可省**：影格側的背壓只覆蓋到推論為止，沒有這個上限，追蹤一落後 payload 就
     # 無上限堆在推論進程，而 TRACK_FAILED 也會晚到父進程 terminate 之後（見
-    # `track_worker.TRACK_QUEUE_SLOTS`）
+    # `services/batching.py` 的 `TRACK_QUEUE_SLOTS`）
     track_queue: mp.Queue = mp.Queue(maxsize=TRACK_QUEUE_SLOTS)
 
     try:

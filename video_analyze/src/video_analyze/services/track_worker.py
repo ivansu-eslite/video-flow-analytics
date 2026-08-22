@@ -72,36 +72,6 @@ TRACK_FAILED = "__TRACK_FAILED__"
 # 偵測陣列——欄數與 ultralytics 的 `Boxes.data` 一致（xyxy + conf + cls）。
 _EMPTY_DETECTION_COLUMNS = 6
 
-# `track_queue` 的容量上限（payload 個數）。**這個上限是背壓，不是調校參數**——它擋的
-# 兩件事都沒有其他機制在擋：
-#
-# - **backlog 無上限成長**。影格側的背壓是「reader 拿不到空 slot 就阻塞」，而 slot 在
-#   predict 完成當下就歸還（ADR-010），所以那條保護只覆蓋到推論為止。追蹤搬出去之後，
-#   追蹤只要比推論慢，payload 就會以 Python 物件的形式堆在推論進程裡（OS pipe 只緩衝
-#   約 64 KB，其餘都在 feeder thread 的緩衝），整天數百萬格可以堆到 GB 級而全程沒有訊號。
-#   給上限之後 `put` 會阻塞推論迴圈 → 推論不再消費 slot → reader 跟著阻塞，整條 pipeline
-#   收斂到最慢的階段，與追蹤還在推論進程內時的行為一致。
-# - **`TRACK_FAILED` 送不到**。它是排在同一條 FIFO 尾端的 in-band 訊號，送達延遲與
-#   backlog 成正比；而推論進程一死，父進程約 0.5 秒內就 `_terminate_all`。backlog 大到
-#   消化不完那幾秒的量時，本進程會在還沒讀到訊號時就被 SIGTERM 收掉。**暫存檔仍然清得
-#   掉**（issue #113 之後 SIGTERM 有 handler，走的是同一個 `collector.discard()`），但
-#   那條 in-band 的失效路徑等於沒作用，而且會把「上游崩潰」與「被 terminate」混成同一種
-#   結束方式。有了上限，backlog 至多這麼多格——預設 batch（8，即上限 64 格）下約 70 ms
-#   的工作量，遠小於父進程的偵測延遲，訊號趕得上。
-#   ⚠ **這是「backlog 有界」的推論，不是時序保證**：上限隨 `MODEL__BATCH` 線性成長，而
-#   父進程的偵測延遲不隨它成長，所以把 batch 調得很大時這個邊際會變薄（例如
-#   `MODEL__BATCH=64` → 上限 512 格）。調大 batch 時要一併重新評估這條路徑。
-#
-# 取「單次推論批次的 4 倍」：一批推論完會連續 put 一整批，留幾批的鬆弛才不會讓正常抖動
-# 變成兩個進程互等。`settings.model.batch` 的 ×2 與 `frame_ring.RING_SLOTS` 的第一個 ×2
-# 同源——ultralytics 對 in-memory list source 一次 forward 整個 list，故單次批次是該值的
-# 2 倍，即 `InferencePipeline._target_batch`；只調 batch 而沒同步調這裡，鬆弛會不足一批。
-#
-# 代價：追蹤進程先死時，推論進程的 `put` 會阻塞而不再是立即返回。這與 reader 卡在
-# `free_queue.get()` 是同一種收斂方式——父進程的 `_raise_if_abnormal` 偵測到非零 exitcode
-# 後 `_terminate_all` 收掉，不會 hang；而那種情況下暫存檔已由本進程自己的 `discard()` 清掉。
-TRACK_QUEUE_SLOTS = settings.model.batch * 2 * 4
-
 
 def split_detections(boxes: Boxes) -> tuple[Boxes, np.ndarray]:
     """把一格的偵測結果拆成「要餵給 tracker 的 fbody 子集」與「head 框座標」。

@@ -78,28 +78,38 @@ PR #103 移除；日後若要加回來，是要重新引入取副本的介面，
 歸還的職責因此整個歸呼叫端：`_collect_batch` 只把取用的 `(stream_id, slot)` 回報上去，
 **連 `free_queues` 都不再收**——拿不到就不可能提早歸還，比留著參數再用測試盯強。
 
-### 3. `RING_SLOTS` 由 `settings.model.batch` 推導，不寫死
+### 3. `RING_SLOTS` 由 `[model].batch` 推導，不寫死
 
 ```python
-RING_SLOTS = settings.model.batch * 4
+RING_SLOTS = TARGET_BATCH * 2          # TARGET_BATCH = settings.model.batch
 ```
 
 延後歸還之後，格數的約束來源是批次大小，而批次大小在另一個檔案（`models/config.py` 的
 `settings`）。維持寫死常數的話，只調 `model.batch` 而沒同步調格數時 reader 會在整個推論
 期間拿不到空位、整條變慢，**且沒有任何錯誤訊息**。推導即消除雙來源。
 
-兩個 `× 2` 的來源不同，不可合併成一個「經驗係數」：
+係數 2 的理由：扣住一批之外要再留同量空位給 reader 備下一批。「2 × 一批」正是「單一路
+供批時 reader 完全不因缺 slot 而停」的最小值——issue #100 只改湊批的輪替起點，內層
+`while` 仍會把起點那一路取到滿批才換手，「整批來自同一路」是常態而非例外。
 
-- ultralytics 對 in-memory list source 一次 forward 整個 list（`batch=` 只對檔案來源的
-  `LoadImagesAndVideos` 有效），故單次批次是 `settings.model.batch` 的 2 倍，即
-  `InferencePipeline._target_batch`。
-- 扣住一批之外要再留同量空位給 reader 備下一批。「2 × 一批」正是「單一路供批時 reader
-  完全不因缺 slot 而停」的最小值——issue #100 只改湊批的輪替起點，內層 `while` 仍會把起點
-  那一路取到滿批才換手，「整批來自同一路」是常態而非例外。
+> **（issue #116 後更新）本節原本寫成 `settings.model.batch * 4`**，因為當時 config 的
+> `batch` 是**湊批目標**而非單次批次：ultralytics 對 in-memory list source 一次 forward
+> 整個 list（`batch=` kwarg 只對檔案來源的 `LoadImagesAndVideos` 有效，對 list 是 no-op），
+> 所以單次批次是設定值的 2 倍，`4 = 2 × 2` 是兩個來源不同的係數摺在一起。issue #116 把
+> `[model].batch` 的語義改成直接等於單次批次（設定值同步由 8 改 16），那個換算用的 `×2`
+> 消失，只剩上面這一個。**最終值未變**（16 → 32 格），改的是推導式的表示法。
 
-不搬進 `config/constants.py`：該檔開頭明文寫「模組私有的調校常數（湊批等待、環形緩衝
-slot 數、flush 門檻等）仍留在各自模組」，且 `models/config.py` 會 import 它，搬過去會造成
-循環 import。
+推導式現在收在 `services/batching.py`，`RING_SLOTS`／`TRACK_QUEUE_SLOTS` 都從那裡匯出。
+**這與本節原本否決的「搬進 `config/constants.py`」不是同一件事**，當時的兩條理由在新位置
+都不成立：
+
+- **循環 import**：`config/constants.py` 被 `models/config.py` import，把讀 `settings` 的
+  常數搬進去會成環；`services/batching.py` 不在那條鏈上（它 import `models/config.py`，
+  反向沒有）。
+- **「模組私有的調校常數留在各自模組」**：這個前提本來就不成立——`RING_SLOTS` 定義在
+  `frame_ring.py` 而該檔自己不用它，`TRACK_QUEUE_SLOTS` 定義在 `track_worker.py` 也一樣，
+  兩者唯一的生產消費端都是 `pipeline.py`。留在原處不是「私有」，只是分散。真正私有的
+  `_FILL_MAX_WAIT`／`_FILL_POLL` 仍留在 `inference.py`。
 
 ### 4. 兩道 fail-loud
 
@@ -127,6 +137,11 @@ tracking 迴圈與下一輪 `_collect_batch`。刻意不去清它們——動第
 **其二：`start_loop` 開頭的格數不變量檢查**（任一路 `ring.num_slots < 2 × _target_batch`
 即拋 `ValueError`）。Decision 3 的推導式已保證它成立，所以它防的不是「有人調 batch」，而是
 **日後兩處推導公式漂移**。正常情況永遠不觸發，成本一行。
+
+> **（issue #116 後更新）這道檢查已移除。** 它防的「兩處公式漂移」在三個常數收斂到
+> `services/batching.py` 之後不再有第二處可漂移，同一條關係改由 `tests/test_batching.py`
+> 釘住。代價是若日後有人在 `pipeline.py` 直接傳自訂 `num_slots` 給 `FrameRing`（不走
+> `RING_SLOTS`），就沒有執行期的守門了——那條路徑目前不存在，接受此代價。
 
 ### 5. 例外路徑刻意不加 `try/finally`
 
@@ -182,8 +197,18 @@ Negative
   `/dev/shm`，推論會失準）。**主動擋下**是 issue #106，本次只留訊號、不擋。
 - **`MODEL__BATCH` 的環境變數覆寫會連帶放大緩衝**，記憶體隨 batch 線性成長（batch = 16 →
   64 格 → 6.7 GiB）。這是推導的預期行為，但部署端要知道這兩個旋鈕已經綁在一起。
+- **（issue #108／#116 後更新）上面兩條的容量數字已不成立**：影格縮放移到讀取端之後，
+  緩衝依推論尺寸 640×384 配置，每格一律 0.70 MiB 而與來源解析度無關——出貨設定
+  `batch = 16`（32 格）九路合計 202.5 MiB，`MODEL__BATCH=32`（64 格）九路合計 405 MiB。
+  （這兩個數字對應的格數與更新前相同；`batch` 的語義在 issue #116 改成直接等於單次批次，
+  同一個格數現在對應的設定值是原本的 2 倍。）`df -h /dev/shm` 的部署門檻隨之從 4 GiB 降
+  一個量級到 256 MiB，但容器預設值（Docker 不給 `--shm-size` 時是 64 MB）**仍然不夠**。
+  逐塊判斷造成的部分落磁碟也沒有消失，反而因為每塊縮到 22.5 MiB 而更容易發生——64 MB 夠塞
+  前兩三路、其餘掉出去，正是最難歸因的情況。
 - **`frame_ring.py` 從零依賴模組變成 import `settings`**。目前無循環（`models/config.py`
   只 import `config/constants.py`，反向沒有），但這條依賴日後要維持單向。
+  **（issue #116 後更新）`frame_ring.py` 已改回零依賴**：`RING_SLOTS` 搬到
+  `services/batching.py`，那條 `settings` 依賴跟著搬過去，維持單向的要求不變。
 - **argus 的兩份拷貝不隨本次同步**：`pipelines/vertex_ai/` 那份仍有 `save_video`，**必須
   保留 `read_slot` 與其條件判斷**，不可照搬本次的簡化版（標註影片的編碼是背景執行緒非同步
   進行，slot 早被覆寫了）；onprem 拷貝的同步另議。

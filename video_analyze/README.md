@@ -97,7 +97,7 @@ gmc_method = "none"
 [model]
 model_path = "20260714-153811_yolo26m_baseline_sm120.engine"   # 開發機那顆；T4 用 _sm75
 source_weights_sha256 = "b14302f4…"   # 釘住引擎的來源權重；留空則只記 warning
-batch = 8
+batch = 16
 classes = [0, 2]           # CrowdHuman 類別過濾：0=head, 1=vbody, 2=fbody
                            # fbody 是追蹤目標；head 只用來推算落腳點，不進 tracker
 
@@ -117,7 +117,7 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 | `[tracker]` | ByteTrack 各項閾值 | 見範例 | `*_thresh` 皆介於 0–1，`track_buffer >= 1` |
 | `[model]` | `model_path` | `"…_sm75.engine"` | TensorRT 引擎路徑。**只吃 `.engine`**，指到 `.pt` 直接中止。檔名的 `_sm<SM>` 尾綴是刻意的：引擎綁架構，兩顆同名會在下游 promotion 撞在一起 |
 | | `source_weights_sha256` | `""` | 釘住引擎的來源 `.pt` 內容 hash，不符即中止。留空只記 warning——這是唯一擋得下「換成另一顆 id 剛好都存在、語義卻不同的權重」的檢查 |
-| | `batch` | `1` | YOLO 推理湊批目標，`>= 1`（範例用 `8`）；實際單次推理批次為此值的 2 倍，**且不得超過引擎建置時綁的最大批次**，超過即中止 |
+| | `batch` | `1` | 單次推理批次，`>= 1`（範例用 `16`）；**不得超過引擎建置時綁的最大批次**（`build_engine.py --batch`，同一尺度），超過即中止 |
 | | `classes` | `[0, 2]` | 要保留的偵測類別 id；權重類別為 `0=head, 1=vbody, 2=fbody`；至少 1 個元素。載入時會驗證此清單存在於**引擎 metadata 的 `names`**（不是另建 predictor 去讀 `model.names`，那會把引擎多載一次），不符直接拋錯。**必須含 fbody**（追蹤目標）；`method = "head"` 時**還必須含 head**，否則直接拋錯——少了 head 每一列都會退回框底邊中點，改動靜默失效 |
 | `[foot_point]` | `method` | `"head"` | 落腳點的推算方式：`"head"` 由頭部位置推算（修正斜向視角下框底邊中點落在人體外的偏移），`"bbox_bottom"` 為改動前的框底邊中點，保留供對照與回退。見 [ADR-009](../docs/adr/shared/009-head-based-foot-point.md) |
 | `[input]` | `bucket_dir` | `"bucket_name"` | 本機模擬 GCS bucket 的根目錄（範例用 `bucket_name1`） |
@@ -217,9 +217,9 @@ uv run --package video_analyze python video_analyze/tools/build_engine.py \
     --bucket bucket_20260801_small
 ```
 
-`--batch` 是引擎綁的**最大**批次，要等於 `config.toml` 的 `[model] batch` 的 2 倍
-（ultralytics 對 in-memory list source 一次 forward 整個 list）。產物名為
-`<權重 stem>_sm<SM>.engine`。
+`--batch` 是引擎綁的**最大**批次，要容得下 `config.toml` 的 `[model] batch`（兩者同
+尺度：ultralytics 對 in-memory list source 一次 forward 整個 list，設定值就是實際的
+forward 批次）。產物名為 `<權重 stem>_sm<SM>.engine`。
 
 工具做四件事，**任何一關沒過就不留下產物**（先落在 `.unverified` 尾綴上，全過才改名）：
 
@@ -299,6 +299,7 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | `main.py` | 薄 CLI 外殼：進入點 `main`，讀 `settings` 組參數後呼叫 `analyze_daily` |
 | `models/config.py` | Pydantic-settings 設定模型（`config.toml`＋環境變數）與全域 `settings` 單例 |
 | `config/constants.py` | 非 Pydantic 靜態常數（`OUTPUT_ROOT`、輸出檔名與 parquet schema、CrowdHuman 類別 id `HEAD_CLASS_ID`／`FBODY_CLASS_ID`） |
+| `services/batching.py` | 單次推理批次 `TARGET_BATCH`，與由它推導的 `RING_SLOTS`／`TRACK_QUEUE_SLOTS` |
 | `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理／追蹤子進程生命週期） |
 | `services/inference.py` | 推理迴圈（湊批、偵測、把偵測框送往追蹤進程） |
 | `services/track_worker.py` | 追蹤進程：偵測框拆分、追蹤、落腳點推算、座標反算、落盤；`TRACK_DONE`／`TRACK_FAILED` 訊號 |
@@ -391,7 +392,7 @@ zone 與 line 幾何都不會被驗證。
 - 追蹤明細 parquet 先寫 `.tmp`、收到 `TRACK_DONE` 才 `rename` 成正式檔名（`rename` 具
   原子性）。推論進程中途例外時送 `TRACK_FAILED`，追蹤進程收到就刪除 `.tmp` 並以非零
   exitcode 結束，正式檔名下不會出現不完整的 parquet。這條路徑**依賴 `track_queue` 的
-  容量上限**（`track_worker.TRACK_QUEUE_SLOTS`）：訊號是排在同一條佇列尾端的 in-band
+  容量上限**（`services/batching.py` 的 `TRACK_QUEUE_SLOTS`）：訊號是排在同一條佇列尾端的 in-band
   訊號，backlog 無上限的話它會晚於父進程的 terminate 抵達而靜默失效。這是「backlog
   有界」的推論而非時序保證——上限隨 `MODEL__BATCH` 線性成長，父進程的偵測延遲不隨它
   成長，故調大 batch 時要重新評估。**推論主迴圈啟動之前**就失敗的路徑（建 `YOLODetector`、建環形緩衝）
