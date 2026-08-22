@@ -21,8 +21,13 @@
    同一份 log，靜默取一個是同類錯誤）。**不提供切換口徑的旗標**：給了開關等於承認兩者
    可互換，而它們分母不同。
 
-其餘三個刻意的取捨：
+其餘四個刻意的取捨：
 
+- **子進程繼承的 settings 環境變數進分組 key**。工具只設四個變數，但整份環境都會被
+  繼承：環境裡先有一個 `INPUT__CAMERA_IDS`，那輪量的就是別的工作量，而 FPS 表上看不
+  出來。所以 `extra_settings_env()` 把「會生效、工具沒設」的那些收進 meta，並讓它成為
+  `group_runs` 分組 key 的一部分——只記進 meta 是不夠的，`report` 照樣會把兩種工作量
+  平均成一個看起來合理的數字。
 - **資源統計用 `os.wait4`，不是 `getrusage(RUSAGE_CHILDREN)`**。後者是本進程「所有已
   回收子進程」的累計值：矩陣跑十輪，第二筆之後每筆的 CPU 時間是總和、`ru_maxrss` 是
   歷來最大值，靜默偏大且無法相減還原。配套是**不可先呼叫 `Popen.wait()`**（那會先回收
@@ -74,7 +79,7 @@ import time
 import tomllib
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 DEFAULT_RUNS_DIR = Path("outputs/bench_e2e")
@@ -103,6 +108,14 @@ for name in {modules!r}:
     except Exception as exc:
         print(f"{{name}}=<import 失敗: {{type(exc).__name__}}>")
 """.format(modules=_VERSION_MODULES)
+
+# `AppConfig` 的四個頂層區塊名，即 pydantic-settings 的四段環境變數命名空間
+# （`env_nested_delimiter="__"`）。本工具只設其中四個變數，但**整份環境都會被子進程
+# 繼承**——環境裡先有一個 `INPUT__CAMERA_IDS`，量到的就是別的工作量。
+SETTINGS_ENV_PREFIXES = ("INPUT__", "MODEL__", "FOOT_POINT__", "TRACKER__")
+# 本工具自己會設的那四個。單一定義：`build_run_env` 設它們，`extra_settings_env` 扣掉
+# 它們，兩邊漂移的話「繼承到什麼」就會漏報。
+MANAGED_SETTINGS_ENV = ("INPUT__BUCKET_DIR", "INPUT__DATE", "MODEL__BATCH", "FOOT_POINT__METHOD")
 
 _INFERENCE_COMPONENT = "inference"
 _INFERENCE_MESSAGE = "FPS 整體"
@@ -277,9 +290,13 @@ def load_run_records(runs_dir: Path) -> list[RunRecord]:
         records.append(
             RunRecord(
                 name=meta_path.stem,
-                meta=parse_meta(meta_path.read_text()),
-                fps_reading=parse_fps_log(log_path.read_text()),
-                gpu=parse_gpu_log(gpu_path.read_text()) if gpu_path.exists() else None,
+                meta=parse_meta(meta_path.read_text(encoding="utf-8")),
+                fps_reading=parse_fps_log(log_path.read_text(encoding="utf-8")),
+                gpu=(
+                    parse_gpu_log(gpu_path.read_text(encoding="utf-8"))
+                    if gpu_path.exists()
+                    else None
+                ),
             )
         )
     return records
@@ -292,6 +309,7 @@ class GroupStat:
     bucket: str
     batch: str
     foot_point_method: str
+    extra_settings_env: str
     runs: int
     mean_inference_fps: float
     spread_percent: float
@@ -299,8 +317,17 @@ class GroupStat:
 
 
 def _inference_fps_values(records: Iterable[RunRecord]) -> list[float]:
-    """分組統計唯一的取值入口——追蹤進程的值進不到這裡。"""
-    return [r.fps_reading.inference_fps for r in records if r.fps_reading.inference_fps]
+    """分組統計唯一的取值入口——追蹤進程的值進不到這裡。
+
+    過濾條件與 `group_runs` 收成員用的 `FpsReading.completed` 必須是同一個
+    （`is not None`）：用真值判斷的話 `inference_fps == 0.0` 會被這裡濾掉、卻被
+    `completed` 收進來，該組只有那一筆時 `statistics.mean([])` 直接拋 `StatisticsError`。
+    """
+    return [
+        r.fps_reading.inference_fps
+        for r in records
+        if r.fps_reading.inference_fps is not None
+    ]
 
 
 def group_runs(
@@ -317,11 +344,14 @@ def group_runs(
             record.meta.get("bucket", "?"),
             record.meta.get("model_batch", "?"),
             record.meta.get("foot_point_method", "?"),
+            # 繼承到的 settings 環境變數也是組態的一部分（見 `extra_settings_env`）。
+            # 舊產物沒這個鍵，預設 "{}" 讓它們照舊分在一起。
+            record.meta.get("extra_settings_env", "{}"),
         )
         groups.setdefault(key, []).append(record)
 
     stats: list[GroupStat] = []
-    for (bucket, batch, foot), members in sorted(groups.items()):
+    for (bucket, batch, foot, extra_env), members in sorted(groups.items()):
         values = _inference_fps_values(members)
         mean = statistics.mean(values)
         spread = (max(values) - min(values)) / mean * 100 if len(values) > 1 else 0.0
@@ -330,6 +360,7 @@ def group_runs(
                 bucket=bucket,
                 batch=batch,
                 foot_point_method=foot,
+                extra_settings_env=extra_env,
                 runs=len(values),
                 mean_inference_fps=mean,
                 spread_percent=spread,
@@ -381,17 +412,43 @@ def expand_matrix(
                         repeat_index=repeat_index,
                     )
                 )
+    names = [case.name for case in cases]
+    if len(set(names)) != len(names):
+        # 撞名的兩格會在矩陣**執行中途**互相覆蓋產物，而開跑前的既存檔檢查抓不到
+        # （第一格是它自己寫出來的）。`--buckets a,a` 與 `--buckets bucket_x,x`
+        # （去前綴後同 tag）都會走到這裡。
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        raise SystemExit(f"矩陣有撞名的格子：{duplicates}；請檢查 --buckets 是否重複或去前綴後同名")
     return cases
 
 
 def build_run_env(base: Mapping[str, str], case: BenchCase, date: str) -> dict[str, str]:
     """疊上 pydantic-settings 的四個命名空間。值一律字串（`os.environ` 只收字串）。"""
-    env = dict(base)
-    env["INPUT__BUCKET_DIR"] = case.bucket
-    env["INPUT__DATE"] = date
-    env["MODEL__BATCH"] = str(case.batch)
-    env["FOOT_POINT__METHOD"] = case.foot_point_method
-    return env
+    managed = {
+        "INPUT__BUCKET_DIR": case.bucket,
+        "INPUT__DATE": date,
+        "MODEL__BATCH": str(case.batch),
+        "FOOT_POINT__METHOD": case.foot_point_method,
+    }
+    return {**base, **managed}
+
+
+def extra_settings_env(env: Mapping[str, str], managed: Iterable[str]) -> str:
+    """把「本工具沒設、卻會被子進程吃到」的 settings 環境變數收成一行 JSON。
+
+    這條與 FPS 口徑同級：環境裡有一個 `INPUT__CAMERA_IDS`，那輪量的就是別的工作量，
+    而 FPS 表上完全看不出來。所以不只記進 meta，還**進 `group_runs` 的分組 key**——
+    在不同環境下跑的兩輪，結構上就不可能被平均在一起。
+
+    回傳 JSON 而非 `K=V;K=V`：meta 是逐行 `key=value`，值裡有換行會把整份格式撐破。
+    """
+    managed_keys = set(managed)
+    extras = {
+        key: value
+        for key, value in env.items()
+        if key.startswith(SETTINGS_ENV_PREFIXES) and key not in managed_keys
+    }
+    return json.dumps(extras, ensure_ascii=False, sort_keys=True)
 
 
 def bucket_output_dir(bucket: str, output_root: Path = DEFAULT_OUTPUT_ROOT) -> Path:
@@ -399,6 +456,12 @@ def bucket_output_dir(bucket: str, output_root: Path = DEFAULT_OUTPUT_ROOT) -> P
 
     這個路徑會被 `shutil.rmtree`，而 bucket 來自 CLI 字串：含 `/` 或 `..`、或解析後
     不在 `output_root` 底下（例如 `outputs/<bucket>` 本身是指向別處的 symlink），一律中止。
+
+    **`output_root` 刻意沒有對應的 CLI 旗標**（只留參數給測試注入）：被量測的進程寫到
+    哪裡是由 `config/constants.py` 的 `OUTPUT_ROOT = Path("outputs")` 決定，那是常數、
+    沒有環境變數可以覆寫。開一個旗標只會讓工具清 `<root>/<bucket>`、子進程仍寫
+    `outputs/<bucket>`，每輪清空與 parquet 複製同時靜默失效。要讓它真的可調得先改
+    `src/` 的常數，那是另一件事。
     """
     if not bucket or bucket != bucket.strip():
         raise SystemExit("bucket 名稱不可為空或帶前後空白")
@@ -470,7 +533,7 @@ def run_measured(command: Sequence[str], env: Mapping[str, str], log_path: Path)
     `ChildProcessError`。`returncode` 因此要手動指派，否則 `Popen.__del__` 會抱怨。
     """
     started = time.monotonic()
-    with log_path.open("w") as log_file:
+    with log_path.open("w", encoding="utf-8") as log_file:
         process = subprocess.Popen(
             list(command), stdout=log_file, stderr=subprocess.STDOUT, env=dict(env)
         )
@@ -506,7 +569,7 @@ def gpu_sampler(
     if not enabled:
         yield
         return
-    with log_path.open("w") as log_file:
+    with log_path.open("w", encoding="utf-8") as log_file:
         process = subprocess.Popen(
             ["nvidia-smi", "dmon", "-s", metrics, "-d", str(interval_seconds), "-o", "T"],
             stdout=log_file,
@@ -556,20 +619,39 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _count_segments(bucket: str) -> int:
-    total = 0
-    for _, _, files in os.walk(bucket, followlinks=True):
-        total += sum(1 for name in files if name.endswith(".mkv"))
-    return total
+def _count_segments(bucket: str, day: date) -> int:
+    """數 `<bucket>/<攝影機目錄>/<YYYY>/<MM>/<DD>/` 底下的檔案數。
+
+    兩件事刻意不做：不限定副檔名（registry 的 `storage.file_ext` 可以是 mkv 以外的
+    值，寫死 `.mkv` 會讓別的 bucket 靜默記成 0），也不遞迴整個 bucket（多日 bucket
+    會高估數倍——被量測的只有 `--date` 那一天）。
+
+    這是給人看的追溯欄位，不是契約：它數的是 bucket 裡**所有**攝影機目錄，而該輪實際
+    讀了哪幾路由 registry 與 `INPUT__CAMERA_IDS` 決定（後者記在 `extra_settings_env`）。
+    """
+    day_glob = f"*/{day:%Y}/{day:%m}/{day:%d}/*"
+    return sum(1 for path in Path(bucket).glob(day_glob) if path.is_file())
 
 
-def _artifact_paths(runs_dir: Path, name: str) -> dict[str, Path]:
+def artifact_paths(runs_dir: Path, name: str) -> dict[str, Path]:
+    """一輪產出的四個檔。單一定義：碰撞檢查、清除、寫入三處都從這裡拿。"""
     return {
         "meta": runs_dir / f"{name}.meta",
         "log": runs_dir / f"{name}.log",
         "gpu": runs_dir / f"{name}.gpu.log",
         "parquet": runs_dir / f"{name}.parquet",
     }
+
+
+def clear_artifacts(runs_dir: Path, name: str) -> None:
+    """覆蓋前把**整組**產物刪掉。
+
+    只靠寫入時截斷是不夠的：`.log`／`.meta` 每輪都會重寫，但 `.gpu.log` 在
+    `--no-gpu-log` 時根本不開檔、`.parquet` 在該輪沒寫出 parquet 時也不會被碰。
+    留著就是上一輪的產物配這一輪的 meta——正是這支工具宣稱要防的錯配。
+    """
+    for path in artifact_paths(runs_dir, name).values():
+        path.unlink(missing_ok=True)
 
 
 def _now() -> str:
@@ -588,6 +670,14 @@ def command_run(args: argparse.Namespace) -> int:
         raise SystemExit("--buckets 與 --batches 都不可為空")
     if args.repeat < 1:
         raise SystemExit("--repeat 至少為 1")
+    try:
+        # 這個字串同時是 `INPUT__DATE` 與輸出目錄名（`outputs/<bucket>/<date>/`），
+        # 格式鬆掉的話 parquet 會複製不到而工具不會有任何訊號。
+        day = date.fromisoformat(args.date)
+    except ValueError as exc:
+        raise SystemExit(f"--date 要是 YYYY-MM-DD：{exc}") from exc
+    if f"{day:%Y-%m-%d}" != args.date:
+        raise SystemExit(f"--date 要正規化成 YYYY-MM-DD（收到 {args.date!r}）")
     if args.gpu_log and shutil.which("nvidia-smi") is None:
         raise SystemExit(
             "找不到 nvidia-smi。這是 GPU 端到端量測工具，少了 SM 取樣就做不了"
@@ -595,7 +685,7 @@ def command_run(args: argparse.Namespace) -> int:
             "確定要在沒有取樣的情況下量，請明講 --no-gpu-log。"
         )
 
-    cleared_dirs = [bucket_output_dir(bucket, args.output_root) for bucket in buckets]
+    cleared_dirs = [bucket_output_dir(bucket) for bucket in buckets]
     check_runs_dir_disjoint(args.runs_dir, cleared_dirs)
     cleared_by_bucket = dict(zip(buckets, cleared_dirs, strict=True))
 
@@ -605,7 +695,7 @@ def command_run(args: argparse.Namespace) -> int:
         existing = [
             path
             for case in cases
-            for path in _artifact_paths(args.runs_dir, case.name).values()
+            for path in artifact_paths(args.runs_dir, case.name).values()
             if path.exists()
         ]
         if existing:
@@ -619,7 +709,11 @@ def command_run(args: argparse.Namespace) -> int:
     versions = _probe_versions(sys.executable)
     commit = _git_output("rev-parse", "HEAD")
     git_dirty = len(_git_output("status", "--porcelain").splitlines())
-    segments = {bucket: _count_segments(bucket) for bucket in buckets}
+    segments = {bucket: _count_segments(bucket, day) for bucket in buckets}
+    inherited_env = extra_settings_env(os.environ, MANAGED_SETTINGS_ENV)
+    if inherited_env != "{}":
+        # 不擋下來——量子集有時就是本意；但它進 meta 也進分組 key，不會被靜默平均掉
+        print(f"⚠ 環境裡另有會生效的 settings 變數，已記進 meta 與分組 key：{inherited_env}")
 
     print(
         f"矩陣共 {len(cases)} 輪："
@@ -627,8 +721,10 @@ def command_run(args: argparse.Namespace) -> int:
     )
     worst_status = 0
     for index, case in enumerate(cases, start=1):
-        paths = _artifact_paths(args.runs_dir, case.name)
+        paths = artifact_paths(args.runs_dir, case.name)
         print(f"=== [{index}/{len(cases)}] {case.name} ===", flush=True)
+
+        clear_artifacts(args.runs_dir, case.name)
 
         # 每輪都從乾淨的輸出開始：舊 parquet 留著會讓「這輪到底寫了幾列」失去意義
         cleared = cleared_by_bucket[case.bucket]
@@ -647,6 +743,7 @@ def command_run(args: argparse.Namespace) -> int:
             "model_batch": case.batch,
             "foot_point_method": case.foot_point_method,
             "repeat_index": case.repeat_index,
+            "extra_settings_env": inherited_env,
             "engine": engine,
             "engine_sha256": engine_sha256,
             **versions,
@@ -656,13 +753,15 @@ def command_run(args: argparse.Namespace) -> int:
             "command": " ".join(RUN_COMMAND),
             "started": _now(),
         }
-        paths["meta"].write_text(format_meta(meta))
+        paths["meta"].write_text(format_meta(meta), encoding="utf-8")
 
         env = build_run_env(os.environ, case, args.date)
         with gpu_sampler(paths["gpu"], args.gpu_metrics, args.gpu_interval, args.gpu_log):
             usage = run_measured(RUN_COMMAND, env, paths["log"])
 
-        gpu = parse_gpu_log(paths["gpu"].read_text()) if args.gpu_log else None
+        gpu = (
+            parse_gpu_log(paths["gpu"].read_text(encoding="utf-8")) if args.gpu_log else None
+        )
         tail: dict[str, object] = {
             "finished": _now(),
             "exit_status": usage.exit_status,
@@ -681,16 +780,16 @@ def command_run(args: argparse.Namespace) -> int:
         if gpu is not None:
             # 取樣一列都沒有時 samples=0 要留在產物裡，別讓它變成安靜的 0%
             tail["gpu_samples"] = gpu.samples
-        with paths["meta"].open("a") as handle:
+        with paths["meta"].open("a", encoding="utf-8") as handle:
             handle.write(format_meta(tail))
 
         parquet = cleared / args.date / "tracking_results.parquet"
         if parquet.is_file():
             shutil.copy2(parquet, paths["parquet"])
-            with paths["meta"].open("a") as handle:
+            with paths["meta"].open("a", encoding="utf-8") as handle:
                 handle.write(format_meta({"parquet_bytes": parquet.stat().st_size}))
 
-        reading = parse_fps_log(paths["log"].read_text())
+        reading = parse_fps_log(paths["log"].read_text(encoding="utf-8"))
         if reading.completed:
             print(
                 f"推論 {reading.inference_fps:.2f} 張/秒"
@@ -745,16 +844,25 @@ def command_report(args: argparse.Namespace) -> int:
 
     print(f"\n=== 分組平均（同組態多次；每秒張數＝推論進程口徑；排除前綴 {exclude}） ===")
     for stat in group_runs(records, exclude):
+        # 繼承到的 settings 環境變數會把同 bucket/batch/foot 的 run 拆成不同組
+        # （見 `extra_settings_env`）；不印出來的話兩列會長得一模一樣。
+        extra = "" if stat.extra_settings_env == "{}" else f" env={stat.extra_settings_env}"
         print(
             f"{stat.bucket.removeprefix('bucket_'):<18} batch={stat.batch:<3} "
             f"{stat.foot_point_method:<12} n={stat.runs} "
             f"平均={stat.mean_inference_fps:>7.2f} 離散={stat.spread_percent:>4.1f}% "
-            f"{[round(value, 2) for value in stat.values]}"
+            f"{[round(value, 2) for value in stat.values]}{extra}"
         )
     return 0
 
 
 def main() -> None:
+    # 本檔所有輸出都是中文，而 `LC_ALL=POSIX` 之類的環境會讓 stdout 退回 ascii：
+    # `report` 印不出表、`run` 則是印進度時才炸。檔案 I/O 已逐處指定 utf-8
+    # （與同目錄另兩支工具一致），這裡把 stdout／stderr 一併釘住。
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")
+
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -774,12 +882,6 @@ def main() -> None:
     run.add_argument("--repeat", type=int, default=DEFAULT_REPEAT, help=f"預設 {DEFAULT_REPEAT}")
     run.add_argument("--label", default=DEFAULT_LABEL, help=f"run 名稱前綴，預設 {DEFAULT_LABEL}")
     run.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
-    run.add_argument(
-        "--output-root",
-        type=Path,
-        default=DEFAULT_OUTPUT_ROOT,
-        help=f"每輪開頭清空的 <root>/<bucket>，預設 {DEFAULT_OUTPUT_ROOT}",
-    )
     run.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="引擎身分的來源")
     run.add_argument("--machine", default="local", help="記進 meta 的機器代號")
     run.add_argument(

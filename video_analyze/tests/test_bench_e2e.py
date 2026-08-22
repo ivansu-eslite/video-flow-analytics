@@ -6,18 +6,24 @@
 能 import `bench_e2e` 是靠 `conftest.py` 把 `tools/` 插進 `sys.path`（見該檔）。
 """
 
+import datetime
 import json
 
 import pytest
 from bench_e2e import (
+    MANAGED_SETTINGS_ENV,
     BenchCase,
     FpsReading,
     GpuUsage,
     RunRecord,
+    _count_segments,
+    artifact_paths,
     bucket_output_dir,
     build_run_env,
     check_runs_dir_disjoint,
+    clear_artifacts,
     expand_matrix,
+    extra_settings_env,
     format_meta,
     group_runs,
     parse_fps_log,
@@ -329,3 +335,127 @@ def test_shell_exit_code_follows_shell_convention(wait_status, expected):
     而報表判「這輪成功了嗎」是比對 `exit_status == "0"`，舊產物的數字也就對不上了。
     """
     assert shell_exit_code(wait_status) == expected
+
+
+def test_group_runs_keeps_a_zero_fps_run_instead_of_crashing():
+    """`inference_fps == 0.0` 是合法的量測值（跑起來但一格都沒處理完）。
+
+    取值與收成員兩處若用不同的判準（真值 vs `is not None`），這一筆會被收進成員卻
+    濾出取值清單，該組只有它時 `statistics.mean([])` 直接拋 `StatisticsError`
+    ——整份 report 因為一筆退化資料而印不出來。
+    """
+    stats = group_runs([_record("main_zero", 0.0)])
+
+    assert stats[0].values == (0.0,)
+    assert stats[0].mean_inference_fps == 0.0
+
+
+def test_extra_settings_env_reports_only_the_keys_the_tool_did_not_set():
+    """本工具只設四個變數，子進程卻繼承整份環境。
+
+    環境裡先有一個 `INPUT__CAMERA_IDS`，那輪量的就是別的工作量，而 FPS 表上完全
+    看不出來。這裡收的正是「會生效、但工具沒設」的那些。
+    """
+    env = {
+        "PATH": "/usr/bin",
+        "INPUT__BUCKET_DIR": "bucket_x",
+        "INPUT__CAMERA_IDS": "cam1",
+        "TRACKER__TRACK_BUFFER": "60",
+        "UNRELATED__FOO": "1",
+    }
+
+    assert extra_settings_env(env, MANAGED_SETTINGS_ENV) == (
+        '{"INPUT__CAMERA_IDS": "cam1", "TRACKER__TRACK_BUFFER": "60"}'
+    )
+
+
+def test_extra_settings_env_is_empty_json_when_environment_is_clean():
+    """乾淨環境回 `"{}"`——舊產物沒有這個鍵時的預設值，分組行為要與它一致。"""
+    assert extra_settings_env({"PATH": "/usr/bin"}, MANAGED_SETTINGS_ENV) == "{}"
+
+
+def test_group_runs_does_not_average_across_different_inherited_env():
+    """繼承到的 settings 環境不同的兩輪，結構上不可能被平均在一起。
+
+    只把它記進 meta 是不夠的：`report` 照樣會把兩種工作量的 FPS 平均成一個看起來
+    合理的數字。所以它進分組 key。
+    """
+    stats = group_runs(
+        [
+            _record("main_full", 500.0),
+            _record("main_subset", 900.0, extra_settings_env='{"INPUT__CAMERA_IDS": "cam1"}'),
+        ]
+    )
+
+    assert {stat.extra_settings_env: stat.values for stat in stats} == {
+        "{}": (500.0,),
+        '{"INPUT__CAMERA_IDS": "cam1"}': (900.0,),
+    }
+
+
+def test_build_run_env_covers_exactly_the_managed_keys():
+    """`build_run_env` 設的與 `MANAGED_SETTINGS_ENV` 宣告的必須是同一組。
+
+    兩邊漂移的話 `extra_settings_env` 會把工具自己設的變數當成「繼承到的」回報
+    （每輪都跳警告、分組 key 也被撐開），或反過來漏掉一個真正的外來變數。
+    """
+    case = BenchCase(
+        name="main_x", bucket="bucket_x", batch=16, foot_point_method="head", repeat_index=1,
+    )
+
+    env = build_run_env({"PATH": "/usr/bin"}, case, "2026-08-01")
+
+    assert set(env) - {"PATH"} == set(MANAGED_SETTINGS_ENV)
+
+
+def test_expand_matrix_rejects_colliding_run_names():
+    """去前綴後同 tag 的兩個 bucket 會展開出同名的格子。
+
+    開跑前的既存檔檢查抓不到（第一格的產物是它自己寫的），第二格會在矩陣**執行中途**
+    覆蓋第一格，且沒有任何訊號。
+    """
+    with pytest.raises(SystemExit, match="撞名"):
+        expand_matrix(["bucket_x", "x"], [16], "head", repeat=1)
+
+    with pytest.raises(SystemExit, match="撞名"):
+        expand_matrix(["bucket_x", "bucket_x"], [16], "head", repeat=1)
+
+
+def test_clear_artifacts_removes_the_whole_set(tmp_path):
+    """覆蓋前要整組刪，不能只靠寫入時截斷。
+
+    `--no-gpu-log` 時 `.gpu.log` 根本不開檔、該輪沒寫出 parquet 時 `.parquet` 也不會
+    被碰：留著就是上一輪的產物配這一輪的 meta，report 會印出屬於別輪的 sm%。
+    """
+    paths = artifact_paths(tmp_path, "main_x")
+    assert set(paths) == {"meta", "log", "gpu", "parquet"}
+    for path in paths.values():
+        path.write_text("stale", encoding="utf-8")
+
+    clear_artifacts(tmp_path, "main_x")
+
+    assert not any(path.exists() for path in paths.values())
+    clear_artifacts(tmp_path, "main_x")  # 再刪一次不應拋錯
+
+
+def test_count_segments_only_counts_the_measured_date(tmp_path):
+    """多日 bucket 只該數 `--date` 那一天——遞迴整個 bucket 會高估數倍。"""
+    for day in ("01", "02"):
+        segment_dir = tmp_path / "loc_cam001" / "2026" / "08" / day
+        segment_dir.mkdir(parents=True)
+        (segment_dir / "030000.000Z.mkv").touch()
+
+    assert _count_segments(str(tmp_path), datetime.date(2026, 8, 1)) == 1
+
+
+def test_count_segments_is_not_limited_to_mkv(tmp_path):
+    """副檔名由 registry 的 `storage.file_ext` 決定；寫死 `.mkv` 會讓別的 bucket 記成 0。
+
+    記成 0 不會報錯，只會讓事後追溯少掉「這輪到底有多少工作量」這個對照。
+    """
+    segment_dir = tmp_path / "loc_cam001" / "2026" / "08" / "01"
+    segment_dir.mkdir(parents=True)
+    (segment_dir / "030000.000Z.mp4").touch()
+    (segment_dir / "031000.000Z.mp4").touch()
+
+    assert _count_segments(str(tmp_path), datetime.date(2026, 8, 1)) == 2
