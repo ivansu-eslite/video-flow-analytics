@@ -113,6 +113,11 @@ for name in {modules!r}:
 # （`env_nested_delimiter="__"`）。本工具只設其中四個變數，但**整份環境都會被子進程
 # 繼承**——環境裡先有一個 `INPUT__CAMERA_IDS`，量到的就是別的工作量。
 SETTINGS_ENV_PREFIXES = ("INPUT__", "MODEL__", "FOOT_POINT__", "TRACKER__")
+# 非 settings、但會改變量測結果的環境變數。**這份清單是列舉式的、不可能完備**——
+# 影響效能的環境變數是開放集合（`OMP_NUM_THREADS`、`LD_LIBRARY_PATH`、
+# `CUDA_LAUNCH_BLOCKING`…）。收在這裡的是已知會讓「同一個組態」量出不同數字、
+# 而報表上完全看不出來的那幾個；不在清單上的仍會靜默影響結果。
+RUNTIME_ENV_KEYS = ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "OMP_NUM_THREADS")
 # 本工具自己會設的那四個。單一定義：`build_run_env` 設它們，`extra_settings_env` 扣掉
 # 它們，兩邊漂移的話「繼承到什麼」就會漏報。
 MANAGED_SETTINGS_ENV = ("INPUT__BUCKET_DIR", "INPUT__DATE", "MODEL__BATCH", "FOOT_POINT__METHOD")
@@ -279,27 +284,38 @@ class RunRecord:
         return self.meta.get("exit_status") == "0"
 
 
-def load_run_records(runs_dir: Path) -> list[RunRecord]:
-    """讀 `runs_dir` 底下每個 `<name>.meta` 及其同名 `.log`／`.gpu.log`。"""
+def load_run_records(runs_dir: Path) -> tuple[list[RunRecord], list[str]]:
+    """讀 `runs_dir` 底下每個 `<name>.meta` 及其同名 `.log`／`.gpu.log`。
+
+    回傳 (讀得起來的 records, 每份壞產物一行的說明)。**一份壞掉的產物不該讓整份報表
+    印不出來**——`parse_fps_log` 對重複的推論行刻意拋 `ValueError`，而那個訊息裡沒有
+    檔名；子進程被 SIGKILL 截斷多位元組字元則會 `UnicodeDecodeError`。兩者原本都會
+    讓 `report` 整個掛掉，而使用者無從得知是哪一輪的產物有問題（CLAUDE.md 記過同一型
+    的坑：沒有檔名線索的例外）。所以逐檔隔離，壞的跳過但**大聲說出來**，不靜默丟棄。
+    """
     records: list[RunRecord] = []
+    broken: list[str] = []
     for meta_path in sorted(runs_dir.glob("*.meta")):
         log_path = meta_path.with_suffix(".log")
         if not log_path.exists():
             continue
         gpu_path = meta_path.with_suffix(".gpu.log")
-        records.append(
-            RunRecord(
-                name=meta_path.stem,
-                meta=parse_meta(meta_path.read_text(encoding="utf-8")),
-                fps_reading=parse_fps_log(log_path.read_text(encoding="utf-8")),
-                gpu=(
-                    parse_gpu_log(gpu_path.read_text(encoding="utf-8"))
-                    if gpu_path.exists()
-                    else None
-                ),
+        try:
+            records.append(
+                RunRecord(
+                    name=meta_path.stem,
+                    meta=parse_meta(meta_path.read_text(encoding="utf-8")),
+                    fps_reading=parse_fps_log(log_path.read_text(encoding="utf-8")),
+                    gpu=(
+                        parse_gpu_log(gpu_path.read_text(encoding="utf-8"))
+                        if gpu_path.exists()
+                        else None
+                    ),
+                )
             )
-        )
-    return records
+        except (ValueError, UnicodeDecodeError) as error:
+            broken.append(f"{meta_path.stem}：{type(error).__name__}: {error}")
+    return records, broken
 
 
 @dataclass(frozen=True)
@@ -470,21 +486,51 @@ def build_run_env(base: Mapping[str, str], case: BenchCase, date: str) -> dict[s
 
 
 def extra_settings_env(env: Mapping[str, str], managed: Iterable[str]) -> str:
-    """把「本工具沒設、卻會被子進程吃到」的 settings 環境變數收成一行 JSON。
+    """把「本工具沒設、卻會改變這輪量到什麼」的環境變數收成一行 JSON。
 
     這條與 FPS 口徑同級：環境裡有一個 `INPUT__CAMERA_IDS`，那輪量的就是別的工作量，
     而 FPS 表上完全看不出來。所以不只記進 meta，還**進 `group_runs` 的分組 key**——
     在不同環境下跑的兩輪，結構上就不可能被平均在一起。
 
+    收兩類：`SETTINGS_ENV_PREFIXES` 開頭的 pydantic-settings 變數，以及
+    `RUNTIME_ENV_KEYS` 列的執行環境變數（`CUDA_VISIBLE_DEVICES` 決定跑哪張卡——
+    連 GPU 取樣取的是不是同一張都取決於它）。
+
+    **比對不分大小寫**：pydantic-settings 預設 case-insensitive，`input__camera_ids`
+    小寫一樣會生效；只比對大寫等於留一個繞過整套防護的後門。
+
+    ⚠ **這不是完備的**：影響量測的環境變數是開放集合，`RUNTIME_ENV_KEYS` 只收已知
+    重要的那幾個。不在其中的變數仍會靜默改變數字。
+
     回傳 JSON 而非 `K=V;K=V`：meta 是逐行 `key=value`，值裡有換行會把整份格式撐破。
     """
-    managed_keys = set(managed)
+    managed_keys = {key.upper() for key in managed}
     extras = {
         key: value
         for key, value in env.items()
-        if key.startswith(SETTINGS_ENV_PREFIXES) and key not in managed_keys
+        if key.upper() not in managed_keys
+        and (key.upper().startswith(SETTINGS_ENV_PREFIXES) or key.upper() in RUNTIME_ENV_KEYS)
     }
     return json.dumps(extras, ensure_ascii=False, sort_keys=True)
+
+
+def check_name_component(value: str, flag: str) -> str:
+    """驗證會進檔名或 meta 的 CLI 字串。
+
+    `--label` 直接是產物檔 stem 的一部分：`--label '../<bucket>/x'` 會把產物寫進每輪
+    開頭 `rmtree` 的目錄底下，`bucket_output_dir` 的逃逸檢查與 `check_runs_dir_disjoint`
+    兩道都攔不到（它們看的是 bucket 與 runs-dir，不是 label），矩陣跑完只剩最後一輪。
+    `bucket` 有整套檢查而 label 沒有，是不一致——這裡補齊。
+
+    換行另外擋：meta 是逐行 `key=value`，值裡有換行會把整份格式撐破。
+    """
+    if not value or value != value.strip():
+        raise SystemExit(f"{flag} 不可為空或前後帶空白：{value!r}")
+    if "/" in value or "\\" in value or ".." in value:
+        raise SystemExit(f"{flag} 不可含路徑分隔或 `..`（它會進產物檔名）：{value!r}")
+    if any(char in value for char in "\r\n"):
+        raise SystemExit(f"{flag} 不可含換行（meta 是逐行 key=value）：{value!r}")
+    return value
 
 
 def bucket_output_dir(bucket: str, output_root: Path = DEFAULT_OUTPUT_ROOT) -> Path:
@@ -734,6 +780,9 @@ def command_run(args: argparse.Namespace) -> int:
             "確定要在沒有取樣的情況下量，請明講 --no-gpu-log。"
         )
 
+    check_name_component(args.label, "--label")
+    check_name_component(args.machine, "--machine")
+
     cleared_dirs = [bucket_output_dir(bucket) for bucket in buckets]
     check_runs_dir_disjoint(args.runs_dir, cleared_dirs)
     cleared_by_bucket = dict(zip(buckets, cleared_dirs, strict=True))
@@ -861,7 +910,12 @@ def command_run(args: argparse.Namespace) -> int:
 def command_report(args: argparse.Namespace) -> int:
     if not args.runs_dir.is_dir():
         raise SystemExit(f"找不到產物目錄 {args.runs_dir}")
-    records = load_run_records(args.runs_dir)
+    records, broken = load_run_records(args.runs_dir)
+    if broken:
+        # 印在表格之前而不是之後：讀者要先知道這份報表少了哪幾輪
+        print(f"⚠ 有 {len(broken)} 份產物讀不起來，未列入下表：")
+        for line in broken:
+            print(f"  {line}")
     if not records:
         raise SystemExit(f"{args.runs_dir} 底下沒有成對的 .meta／.log")
     exclude = [item.strip() for item in args.exclude_prefixes.split(",") if item.strip()]

@@ -21,12 +21,14 @@ from bench_e2e import (
     artifact_paths,
     bucket_output_dir,
     build_run_env,
+    check_name_component,
     check_runs_dir_disjoint,
     clear_artifacts,
     expand_matrix,
     extra_settings_env,
     format_meta,
     group_runs,
+    load_run_records,
     parse_fps_log,
     parse_gpu_log,
     parse_meta,
@@ -303,6 +305,67 @@ def test_build_run_env_sets_four_namespaces_as_strings():
     assert env["FOOT_POINT__METHOD"] == "head"
     assert all(isinstance(value, str) for value in env.values())
     assert env["PATH"] == "/usr/bin"
+
+
+def test_extra_settings_env_is_case_insensitive():
+    """pydantic-settings 預設不分大小寫，只比對大寫等於留一個繞過整套防護的後門。
+
+    實測 `input__camera_ids` 小寫一樣會讓子進程只跑一路；漏掉它的話，那輪的子集
+    工作量既不進 meta 也不進分組 key，會和全量那輪平均成一個看起來合理的數字。
+    """
+    extras = json.loads(
+        extra_settings_env(
+            {"input__camera_ids": '["camX"]', "Model__Batch": "4"}, MANAGED_SETTINGS_ENV
+        )
+    )
+
+    assert extras == {"input__camera_ids": '["camX"]'}
+
+
+def test_extra_settings_env_captures_runtime_env():
+    """`CUDA_VISIBLE_DEVICES` 決定跑哪張卡，兩輪跑在不同卡上不可以被平均。
+
+    它不是 settings 變數，但改變量測結果的程度不下於它們——連 GPU 取樣取的是不是
+    同一張卡都取決於它。
+    """
+    extras = json.loads(
+        extra_settings_env({"CUDA_VISIBLE_DEVICES": "1", "TERM": "xterm"}, MANAGED_SETTINGS_ENV)
+    )
+
+    assert extras == {"CUDA_VISIBLE_DEVICES": "1"}
+
+
+def test_load_run_records_isolates_a_broken_artifact(tmp_path):
+    """一份壞產物不可以讓整份報表印不出來，而且要說得出是哪一輪壞了。
+
+    `parse_fps_log` 對重複的推論行刻意拋 `ValueError`，但訊息裡沒有檔名；不隔離的話
+    使用者只看到一個沒有線索的例外，其他跑得好好的輪次也一起消失。
+    """
+    (tmp_path / "good.meta").write_text("name=good\n", encoding="utf-8")
+    (tmp_path / "good.log").write_text(f"{_INFERENCE_LINE}\n", encoding="utf-8")
+    (tmp_path / "bad.meta").write_text("name=bad\n", encoding="utf-8")
+    (tmp_path / "bad.log").write_text(
+        f"{_INFERENCE_LINE}\n{_INFERENCE_LINE}\n", encoding="utf-8"
+    )
+
+    records, broken = load_run_records(tmp_path)
+
+    assert [record.name for record in records] == ["good"]
+    assert len(broken) == 1
+    assert broken[0].startswith("bad：")
+
+
+@pytest.mark.parametrize(
+    "label", ["../bucket_x/y", "a/b", "", " main", "main\nname=fake", "a..b"]
+)
+def test_check_name_component_rejects_unsafe_labels(label):
+    """`--label` 直接是產物檔 stem 的一部分，而 bucket 的那兩道檢查看不到它。
+
+    `--label '../<bucket>/x'` 會把產物寫進每輪開頭 `rmtree` 的目錄，矩陣跑完只剩最後
+    一輪；帶換行則會把 meta 的逐行 `key=value` 格式撐破。
+    """
+    with pytest.raises(SystemExit):
+        check_name_component(label, "--label")
 
 
 @pytest.mark.parametrize("bucket", ["../etc", "a/b", "", " bucket_x", "bucket/../.."])
