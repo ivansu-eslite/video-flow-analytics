@@ -310,6 +310,10 @@ class GroupStat:
     batch: str
     foot_point_method: str
     extra_settings_env: str
+    commit: str
+    date: str
+    label: str
+    machine: str
     runs: int
     mean_inference_fps: float
     spread_percent: float
@@ -333,8 +337,18 @@ def _inference_fps_values(records: Iterable[RunRecord]) -> list[float]:
 def group_runs(
     records: Iterable[RunRecord], exclude_prefixes: Sequence[str] = ()
 ) -> list[GroupStat]:
-    """按 (bucket, batch, 落腳點方法) 分組。未完成、非零 exit、排除前綴的 run 不進統計。"""
-    groups: dict[tuple[str, str, str], list[RunRecord]] = {}
+    """按「組態」分組。未完成、非零 exit、排除前綴的 run 不進統計。
+
+    **「組態」不只是 bucket／batch／落腳點**：`commit`／`date`／`label`／`machine` 一併
+    進 key。少了它們，這支工具最主要的用途就會靜默失效——用 `--label before` 跑一個
+    commit、`--label after` 跑另一個、寫進同一個 `--runs-dir`，四輪會被平均成一組
+    `n=4`，**要找的回歸剛好被抹平**。同理跨測試片日期與跨機器的數字也不該混在一起。
+
+    `git_dirty` 刻意**不**進 key：它不區分「未追蹤檔」與「已修改的程式碼」，把工作目錄
+    的雜訊變成分組維度只會讓同一份程式碼的多輪散成好幾組，卻不帶任何資訊。
+    舊產物沒有 `date`／`label` 鍵，`.get` 的預設值讓它們照舊分在一起。
+    """
+    groups: dict[tuple[str, ...], list[RunRecord]] = {}
     for record in records:
         if not record.fps_reading.completed or not record.succeeded:
             continue
@@ -347,20 +361,34 @@ def group_runs(
             # 繼承到的 settings 環境變數也是組態的一部分（見 `extra_settings_env`）。
             # 舊產物沒這個鍵，預設 "{}" 讓它們照舊分在一起。
             record.meta.get("extra_settings_env", "{}"),
+            record.meta.get("commit", "?"),
+            record.meta.get("date", "?"),
+            record.meta.get("label", "?"),
+            record.meta.get("machine", "?"),
         )
         groups.setdefault(key, []).append(record)
 
     stats: list[GroupStat] = []
-    for (bucket, batch, foot, extra_env), members in sorted(groups.items()):
+    for (bucket, batch, foot, extra_env, commit, day, label, machine), members in sorted(
+        groups.items()
+    ):
         values = _inference_fps_values(members)
         mean = statistics.mean(values)
-        spread = (max(values) - min(values)) / mean * 100 if len(values) > 1 else 0.0
+        # `mean` 為 0 不是異常輸入：`FpsMeter._safe_div` 在 total_frames == 0 時就回 0.0，
+        # 同組兩輪都是 0.0 時這裡除下去會讓整份 report 拋 ZeroDivisionError
+        spread = (
+            (max(values) - min(values)) / mean * 100 if len(values) > 1 and mean else 0.0
+        )
         stats.append(
             GroupStat(
                 bucket=bucket,
                 batch=batch,
                 foot_point_method=foot,
                 extra_settings_env=extra_env,
+                commit=commit,
+                date=day,
+                label=label,
+                machine=machine,
                 runs=len(values),
                 mean_inference_fps=mean,
                 spread_percent=spread,
@@ -391,12 +419,17 @@ def expand_matrix(
     batches: Sequence[int],
     foot_point_method: str,
     repeat: int,
+    date: str,
     label: str = DEFAULT_LABEL,
 ) -> list[BenchCase]:
     """展開矩陣，**重複次數在最外層**。
 
     這不是寫法偏好而是量測性質：同組態連跑會把熱漂移集中在單一格，離散度那欄就失真了
     ——第一次跑的都是冷的、第二次跑的都是熱的，反而讓機器狀態被平均掉。
+
+    **`name` 含分析日期**（`bucket` 名稱裡的日期是資料集命名，兩者不是同一件事）：多日
+    bucket 換 `--date` 重跑時，少了它兩輪的名稱完全相同——不是誤報「產物已存在」擋下你，
+    就是配上 `--overwrite` 直接毀掉前一天的產物。
     """
     cases: list[BenchCase] = []
     for repeat_index in range(1, repeat + 1):
@@ -405,7 +438,10 @@ def expand_matrix(
                 tag = bucket.removeprefix("bucket_")
                 cases.append(
                     BenchCase(
-                        name=f"{label}_{tag}_b{batch}_{foot_point_method}_r{repeat_index}",
+                        name=(
+                            f"{label}_{tag}_d{date.replace('-', '')}"
+                            f"_b{batch}_{foot_point_method}_r{repeat_index}"
+                        ),
                         bucket=bucket,
                         batch=batch,
                         foot_point_method=foot_point_method,
@@ -571,7 +607,11 @@ def gpu_sampler(
         return
     with log_path.open("w", encoding="utf-8") as log_file:
         process = subprocess.Popen(
-            ["nvidia-smi", "dmon", "-s", metrics, "-d", str(interval_seconds), "-o", "T"],
+            # `-i 0`：多 GPU 主機上 dmon 每個取樣間隔會每張卡各吐一列，`parse_gpu_log`
+            # 不看 gpu 欄，於是 samples 膨脹 ×N、閒置卡被平均進 SM 使用率（90% + 0% → 45）。
+            # ⚠ 本機只有單卡，這條是依 dmon 語義做的防禦，沒有在多卡機器上實測過。
+            ["nvidia-smi", "dmon", "-i", "0", "-s", metrics,
+             "-d", str(interval_seconds), "-o", "T"],
             stdout=log_file,
             stderr=subprocess.STDOUT,
         )
@@ -600,7 +640,16 @@ def _git_output(*args: str) -> str:
     return completed.stdout.strip()
 
 
-def _engine_path(config_path: Path) -> str:
+def _engine_path(config_path: Path, env: Mapping[str, str]) -> tuple[str, str]:
+    """回傳 (引擎路徑, 這個值是從哪來的)。
+
+    **以子進程實際會載入的那顆為準，不是設定檔寫什麼就記什麼**：環境裡的
+    `MODEL__MODEL_PATH` 會覆寫 `config.toml`，只讀設定檔的話 meta 會記下一顆從未被
+    量測過的引擎的 sha256——而引擎身分正是這份 meta 最需要可信的欄位之一。
+    """
+    override = env.get("MODEL__MODEL_PATH")
+    if override:
+        return override, "env:MODEL__MODEL_PATH"
     if not config_path.is_file():
         raise SystemExit(f"找不到設定檔 {config_path}（本工具要在 repo 根目錄執行）")
     with config_path.open("rb") as handle:
@@ -608,7 +657,7 @@ def _engine_path(config_path: Path) -> str:
     model_path = config.get("model", {}).get("model_path")
     if not model_path:
         raise SystemExit(f"{config_path} 的 [model].model_path 是空的，量測記不下引擎身分")
-    return str(model_path)
+    return str(model_path), f"config:{config_path}"
 
 
 def _sha256(path: Path) -> str:
@@ -689,7 +738,9 @@ def command_run(args: argparse.Namespace) -> int:
     check_runs_dir_disjoint(args.runs_dir, cleared_dirs)
     cleared_by_bucket = dict(zip(buckets, cleared_dirs, strict=True))
 
-    cases = expand_matrix(buckets, batches, args.foot_point, args.repeat, args.label)
+    cases = expand_matrix(
+        buckets, batches, args.foot_point, args.repeat, args.date, args.label
+    )
     args.runs_dir.mkdir(parents=True, exist_ok=True)
     if not args.overwrite:
         existing = [
@@ -704,7 +755,7 @@ def command_run(args: argparse.Namespace) -> int:
                 "覆蓋請明講 --overwrite——靜默覆蓋正是「這輪的 meta 配上一輪的 log」的來源。"
             )
 
-    engine = _engine_path(args.config)
+    engine, engine_source = _engine_path(args.config, os.environ)
     engine_sha256 = _sha256(Path(engine)) if Path(engine).is_file() else "<找不到引擎檔>"
     versions = _probe_versions(sys.executable)
     commit = _git_output("rev-parse", "HEAD")
@@ -746,6 +797,8 @@ def command_run(args: argparse.Namespace) -> int:
             "extra_settings_env": inherited_env,
             "engine": engine,
             "engine_sha256": engine_sha256,
+            # 引擎身分是從設定檔還是環境變數來的：兩者不一致時，記下哪一個真的生效了
+            "engine_source": engine_source,
             **versions,
             "segments": segments[case.bucket],
             "gpu_metrics": args.gpu_metrics if args.gpu_log else "<未取樣>",
@@ -813,8 +866,11 @@ def command_report(args: argparse.Namespace) -> int:
         raise SystemExit(f"{args.runs_dir} 底下沒有成對的 .meta／.log")
     exclude = [item.strip() for item in args.exclude_prefixes.split(",") if item.strip()]
 
+    # 欄寬依實際名稱長度，不寫死：run 名稱含 label／日期／bucket tag，寫死的話
+    # 稍長一點的組合就會把整張表撐歪
+    width = max([len(record.name) for record in records] + [len("run")])
     print(
-        f"{'run':<40} {'bucket':<18} {'b':<3} {'foot':<12} "
+        f"{'run':<{width}} {'bucket':<18} {'b':<3} {'foot':<12} "
         f"{'infer_fps':>9} {'track_fps':>9} {'sec':>6} {'frames':>8} "
         f"{'rss_MB':>7} {'sm%':>5} {'exit':>4}"
     )
@@ -822,7 +878,7 @@ def command_report(args: argparse.Namespace) -> int:
         meta = record.meta
         reading = record.fps_reading
         if not reading.completed:
-            print(f"{record.name:<40} 未完成或失敗（exit {meta.get('exit_status', '?')}）")
+            print(f"{record.name:<{width}} 未完成或失敗（exit {meta.get('exit_status', '?')}）")
             continue
         rss_kb = meta.get("max_rss_kb")
         rss = f"{int(rss_kb) / 1024:.0f}" if rss_kb else "-"
@@ -835,7 +891,7 @@ def command_report(args: argparse.Namespace) -> int:
             f"{reading.track_worker_fps:.2f}" if reading.track_worker_fps is not None else "-"
         )
         print(
-            f"{record.name:<40} {meta.get('bucket', '?').removeprefix('bucket_'):<18} "
+            f"{record.name:<{width}} {meta.get('bucket', '?').removeprefix('bucket_'):<18} "
             f"{meta.get('model_batch', '?'):<3} {meta.get('foot_point_method', '?'):<12} "
             f"{reading.inference_fps:>9.2f} {track:>9} "
             f"{reading.inference_elapsed_seconds:>6.1f} {reading.inference_frames:>8} "
@@ -843,10 +899,22 @@ def command_report(args: argparse.Namespace) -> int:
         )
 
     print(f"\n=== 分組平均（同組態多次；每秒張數＝推論進程口徑；排除前綴 {exclude}） ===")
-    for stat in group_runs(records, exclude):
+    stats = group_runs(records, exclude)
+    # `commit`／`date`／`label`／`machine` 都是分組維度，但多數時候整份產物只有一個值，
+    # 印出來只是噪音。只在某個維度真的出現多值時才印它——那正是「兩組不該被比較的數字
+    # 並排在一起」的時候，讀者必須看得到是哪個維度把它們分開的。
+    varying = [
+        field
+        for field in ("label", "commit", "date", "machine")
+        if len({getattr(stat, field) for stat in stats}) > 1
+    ]
+    for stat in stats:
         # 繼承到的 settings 環境變數會把同 bucket/batch/foot 的 run 拆成不同組
         # （見 `extra_settings_env`）；不印出來的話兩列會長得一模一樣。
         extra = "" if stat.extra_settings_env == "{}" else f" env={stat.extra_settings_env}"
+        for field in varying:
+            value = getattr(stat, field)
+            extra += f" {field}={value[:12] if field == 'commit' else value}"
         print(
             f"{stat.bucket.removeprefix('bucket_'):<18} batch={stat.batch:<3} "
             f"{stat.foot_point_method:<12} n={stat.runs} "

@@ -17,6 +17,7 @@ from bench_e2e import (
     GpuUsage,
     RunRecord,
     _count_segments,
+    _engine_path,
     artifact_paths,
     bucket_output_dir,
     build_run_env,
@@ -169,6 +170,58 @@ def test_group_runs_excludes_failed_incomplete_and_prefixed_runs():
     assert stats[0].values == (506.46,)
 
 
+def test_group_runs_does_not_average_across_labels():
+    """`--label` 是分組維度：before／after 不可以被平均成一組。
+
+    這條壞掉的後果正好是這支工具最主要用途的反面——拿它比較兩個 commit 有沒有拖慢，
+    四輪合成一組 `n=4`，要找的回歸剛好被平均掉，而報表上完全看不出來。
+    `commit`／`date`／`machine` 同理，共用同一個 key。
+    """
+    records = [
+        _record("before_r1", 500.0, label="before", commit="aaaaaaa"),
+        _record("before_r2", 502.0, label="before", commit="aaaaaaa"),
+        _record("after_r1", 400.0, label="after", commit="bbbbbbb"),
+        _record("after_r2", 402.0, label="after", commit="bbbbbbb"),
+    ]
+
+    stats = group_runs(records)
+
+    assert len(stats) == 2
+    assert {stat.label for stat in stats} == {"before", "after"}
+    assert {round(stat.mean_inference_fps) for stat in stats} == {501, 401}
+
+
+def test_group_runs_survives_an_all_zero_group():
+    """整組都是 0.0 張/秒時，離散度不能把整份 report 炸掉。
+
+    0.0 是合法值不是異常輸入：`FpsMeter._safe_div` 在 `total_frames == 0`（那輪一格都
+    沒處理完）時就回 0.0，而 `--repeat 2` 是預設值。離散度除以平均會 `ZeroDivisionError`，
+    連帶其他組態的結果也一起印不出來。
+    """
+    stats = group_runs([_record("main_a", 0.0), _record("main_b", 0.0)])
+
+    assert len(stats) == 1
+    assert stats[0].runs == 2
+    assert stats[0].mean_inference_fps == 0.0
+    assert stats[0].spread_percent == 0.0
+
+
+def test_engine_path_prefers_the_environment_override(tmp_path):
+    """引擎身分要記**實際會載入的**那顆。
+
+    `MODEL__MODEL_PATH` 會覆寫 `config.toml`；只讀設定檔的話 meta 記下的是一顆從未被
+    量測過的引擎的 sha256——而事後判斷「這批數字是哪顆引擎跑的」全靠這個欄位。
+    """
+    config = tmp_path / "config.toml"
+    config.write_text('[model]\nmodel_path = "from_config.engine"\n', encoding="utf-8")
+
+    from_config, source_config = _engine_path(config, {})
+    from_env, source_env = _engine_path(config, {"MODEL__MODEL_PATH": "from_env.engine"})
+
+    assert (from_config, source_config) == ("from_config.engine", f"config:{config}")
+    assert (from_env, source_env) == ("from_env.engine", "env:MODEL__MODEL_PATH")
+
+
 # --------------------------------------------------------------------------------------
 # 矩陣展開
 # --------------------------------------------------------------------------------------
@@ -180,7 +233,7 @@ def test_expand_matrix_puts_repeat_at_the_outermost_level():
     連跑會把熱漂移集中在單一格——那一格的離散度變成「機器暖機曲線」而不是「量測雜訊」，
     而離散度正是判斷 FPS 差異有沒有意義的依據。
     """
-    cases = expand_matrix(["bucket_a", "bucket_b"], [16, 8], "head", repeat=2)
+    cases = expand_matrix(["bucket_a", "bucket_b"], [16, 8], "head", repeat=2, date="2026-08-01")
 
     assert [case.repeat_index for case in cases] == [1, 1, 1, 1, 2, 2, 2, 2]
     assert [(case.bucket, case.batch) for case in cases[:4]] == [
@@ -193,7 +246,7 @@ def test_expand_matrix_puts_repeat_at_the_outermost_level():
 
 def test_expand_matrix_names_are_unique_per_cell():
     """每格一個唯一名稱——名稱同時是四個產物檔的 stem，撞名等於覆蓋上一格的產物。"""
-    cases = expand_matrix(["bucket_a", "bucket_b"], [16, 8], "head", repeat=3)
+    cases = expand_matrix(["bucket_a", "bucket_b"], [16, 8], "head", repeat=3, date="2026-08-01")
 
     names = [case.name for case in cases]
     assert len(set(names)) == len(names) == 12
@@ -204,9 +257,26 @@ def test_expand_matrix_name_contains_foot_point_method():
 
     少了它，`--foot-point bbox_bottom` 那次會逐檔覆蓋掉 head 那次的產物。
     """
-    (case,) = expand_matrix(["bucket_20260801_perf40"], [16], "bbox_bottom", repeat=1)
+    (case,) = expand_matrix(
+        ["bucket_20260801_perf40"], [16], "bbox_bottom", repeat=1, date="2026-08-01"
+    )
 
-    assert case.name == "main_20260801_perf40_b16_bbox_bottom_r1"
+    assert case.name == "main_20260801_perf40_d20260801_b16_bbox_bottom_r1"
+
+
+def test_expand_matrix_name_contains_the_analysis_date():
+    """分析日期要進名稱，且與 bucket 名稱裡的日期是兩件事。
+
+    `bucket` 名稱裡的 `20260801` 是資料集命名，`--date` 才是這輪分析的是哪一天。多日
+    bucket 換 `--date` 重跑時，少了它兩輪名稱完全相同——不是被「產物已存在」擋下，
+    就是配上 `--overwrite` 把前一天的產物毀掉。
+    """
+    (first,) = expand_matrix(["bucket_multi"], [16], "head", repeat=1, date="2026-08-01")
+    (second,) = expand_matrix(["bucket_multi"], [16], "head", repeat=1, date="2026-08-02")
+
+    assert first.name != second.name
+    assert "d20260801" in first.name
+    assert "d20260802" in second.name
 
 
 # --------------------------------------------------------------------------------------
@@ -415,10 +485,10 @@ def test_expand_matrix_rejects_colliding_run_names():
     覆蓋第一格，且沒有任何訊號。
     """
     with pytest.raises(SystemExit, match="撞名"):
-        expand_matrix(["bucket_x", "x"], [16], "head", repeat=1)
+        expand_matrix(["bucket_x", "x"], [16], "head", repeat=1, date="2026-08-01")
 
     with pytest.raises(SystemExit, match="撞名"):
-        expand_matrix(["bucket_x", "bucket_x"], [16], "head", repeat=1)
+        expand_matrix(["bucket_x", "bucket_x"], [16], "head", repeat=1, date="2026-08-01")
 
 
 def test_clear_artifacts_removes_the_whole_set(tmp_path):
