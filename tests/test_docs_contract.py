@@ -1,10 +1,14 @@
 """文件契約測試：把 CLAUDE.md／README 裡可驗證的斷言釘成測試。
 
 散文寫下的數量與路徑會隨程式碼漂移，而漂移本身沒有訊號——要有人剛好讀到那句話、
-又剛好記得實際值，才會發現不一致。這支測試把「可以用 ls 算出來的事實」交給 CI，
+又剛好記得實際值，才會發現不一致。這支測試把「可以用 ls 算出來的事實」交給測試，
 漂了就紅燈，不依賴誰記得同步。
 
 新增這類斷言的判準：該事實能由 repo 現況機械算出（檔數、路徑、編號），而非設計理由。
+
+涵蓋範圍本身也由 repo 推導而非硬編碼——套件清單來自 CLAUDE.md 那行 `<pkg> = ...`、
+lib 清單來自 libs/ 目錄、兩者合起來要等於 workspace members，新增成員沒被納入檢查
+時會紅燈。硬編碼的話，新增一個 lib 只會讓它靜默落在護欄外。
 
 執行方式見 CLAUDE.md 常用指令段——本測試只用標準庫與 pytest，刻意不經 workspace
 解析執行，避免為了跑文件檢查而裝上 video_analyze 的 torch 依賴子樹。
@@ -13,6 +17,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -22,19 +27,54 @@ ADR_DIR = REPO_ROOT / "docs" / "adr"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 ROOT_README = REPO_ROOT / "README.md"
 
-# CLAUDE.md 常用指令段列出的順序，測試檔數斷言依此對位
-PACKAGES = ["video_analyze", "zone_mapping", "line_counting", "flow_report"]
-LIBS = ["vfa_registry", "vfa_observability", "vfa_config"]
+LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+ADR_FILENAME_RE = re.compile(r"^(\d{3})-[a-z0-9-]+\.md$")
+ADR_INDEX_ROW_RE = re.compile(r"\[(\d+)\]\((docs/adr/[^)]+/(\d{3})-[^)]+\.md)\)")
 
+
+def _packages_from_claude_md() -> list[str]:
+    """CLAUDE.md lint 那行的 `<pkg> = a / b / c`。
+
+    順序有意義：測試檔數斷言寫成 `四包各 15／3／3／3`，兩處要對得上。從文件解析
+    而非硬編碼，順序本身才有護欄——硬編碼的話，日後有人重排文件裡的順序，
+    數字會靜默對錯套件。
+    """
+    match = re.search(r"<pkg> = ([\w /]+)", CLAUDE_MD.read_text(encoding="utf-8"))
+    if not match:
+        raise RuntimeError("CLAUDE.md 找不到 `<pkg> = ...` 那行，措辭改了就要一併改本測試")
+    return [name.strip() for name in match.group(1).split("/")]
+
+
+def _libs() -> list[str]:
+    return sorted(p.name for p in (REPO_ROOT / "libs").iterdir() if p.is_dir())
+
+
+def _workspace_members() -> list[str]:
+    """根 pyproject.toml 宣告的 workspace 成員，glob 展開成實際目錄。"""
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    members: list[str] = []
+    for pattern in data["tool"]["uv"]["workspace"]["members"]:
+        if "*" in pattern:
+            members.extend(
+                sorted(
+                    p.relative_to(REPO_ROOT).as_posix()
+                    for p in REPO_ROOT.glob(pattern)
+                    if p.is_dir()
+                )
+            )
+        else:
+            members.append(pattern)
+    return members
+
+
+PACKAGES = _packages_from_claude_md()
+LIBS = _libs()
 DOC_FILES = [
     CLAUDE_MD,
     ROOT_README,
     *(REPO_ROOT / pkg / "README.md" for pkg in PACKAGES),
     *(REPO_ROOT / "libs" / lib / "README.md" for lib in LIBS),
 ]
-
-LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
-ADR_FILENAME_RE = re.compile(r"^(\d{3})-[a-z0-9-]+\.md$")
 
 
 def _adr_files() -> list[Path]:
@@ -61,7 +101,20 @@ def _readme_adr_index_rows() -> list[str]:
 
 
 def _test_file_count(pkg_dir: Path) -> int:
-    return len(list((pkg_dir / "tests").glob("test_*.py")))
+    """遞迴計數，與 pytest 的收集方式一致——放進子目錄的測試檔也要算進去。"""
+    return len(list((pkg_dir / "tests").rglob("test_*.py")))
+
+
+def test_coverage_matches_workspace_members():
+    """本測試的涵蓋範圍要等於 workspace 成員，新增成員不能靜默落在護欄外。
+
+    `libs/*` 是 glob，新增一個 lib 會自動成為成員；涵蓋範圍若是硬編碼，該 lib 的
+    README 連結永遠不會被驗。這與下方對缺檔採 fail loud 的立場是同一件事。
+    """
+    covered = {*PACKAGES, *(f"libs/{lib}" for lib in LIBS)}
+    assert covered == set(_workspace_members()), (
+        f"涵蓋範圍 {sorted(covered)} 與 workspace 成員 {_workspace_members()} 不一致"
+    )
 
 
 def test_adr_files_follow_naming_and_placement():
@@ -91,6 +144,20 @@ def test_readme_adr_index_covers_every_adr_file():
     assert not missing, f"這些 ADR 檔不在 README 的索引表裡：{missing}"
 
 
+def test_readme_adr_index_labels_match_linked_files():
+    """索引表顯示的編號要與它連到的檔案編號相符。
+
+    表格列是複製上一列改出來的，改了連結忘了改標籤不會有任何訊號——而編號正是
+    被 issue 與 PR 直接引用的那個識別碼。
+    """
+    mismatched = [
+        f"標籤 [{m.group(1)}] 連到 {m.group(2)}"
+        for row in _readme_adr_index_rows()
+        if (m := ADR_INDEX_ROW_RE.search(row)) and m.group(1).zfill(3) != m.group(3)
+    ]
+    assert not mismatched, f"README 索引表的編號標籤與連結對不上：{mismatched}"
+
+
 def test_adr_numbers_are_a_gapless_global_sequence():
     """CLAUDE.md：編號是全域流水號、與子目錄無關，新增一律取下一號。
 
@@ -108,12 +175,14 @@ def test_adr_numbers_are_a_gapless_global_sequence():
 
 
 def test_claude_md_package_test_counts_match_reality():
-    """CLAUDE.md 常用指令段寫的四包測試檔數。"""
+    """CLAUDE.md 常用指令段寫的四包測試檔數，依 `<pkg> = ...` 的順序對位。"""
     text = CLAUDE_MD.read_text(encoding="utf-8")
     match = re.search(r"四包各 ([\d／]+) 支測試檔", text)
     assert match, "CLAUDE.md 找不到「四包各 N／N／N／N 支測試檔」的字樣"
     claimed = [int(n) for n in match.group(1).split("／")]
-    assert len(claimed) == len(PACKAGES), f"宣稱的數字有 {len(claimed)} 個，四包應為 4 個"
+    assert len(claimed) == len(PACKAGES), (
+        f"宣稱的數字有 {len(claimed)} 個，`<pkg> = ...` 列了 {len(PACKAGES)} 個套件"
+    )
     actual = [_test_file_count(REPO_ROOT / pkg) for pkg in PACKAGES]
     assert claimed == actual, f"CLAUDE.md 宣稱 {claimed}，實際 {dict(zip(PACKAGES, actual))}"
 
@@ -139,7 +208,7 @@ def test_markdown_links_point_to_existing_paths(doc: Path):
     """
     assert doc.exists(), (
         f"{doc.relative_to(REPO_ROOT)} 不存在。文件若已改名或搬走，"
-        "請一併更新本測試的 DOC_FILES，不要讓涵蓋範圍靜默縮小"
+        "請一併更新本測試的涵蓋範圍，不要讓它靜默縮小"
     )
     broken = []
     for target in LINK_RE.findall(doc.read_text(encoding="utf-8")):
