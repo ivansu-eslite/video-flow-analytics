@@ -27,6 +27,7 @@ jobs:
   lint-test:
     name: ${{ matrix.pkg }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +52,7 @@ jobs:
   video-analyze:
     name: video_analyze (torch)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.0.1
