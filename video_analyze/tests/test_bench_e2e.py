@@ -18,6 +18,7 @@ from bench_e2e import (
     RunRecord,
     _count_segments,
     _engine_path,
+    _model_classes,
     artifact_paths,
     bucket_output_dir,
     build_run_env,
@@ -222,6 +223,33 @@ def test_engine_path_prefers_the_environment_override(tmp_path):
 
     assert (from_config, source_config) == ("from_config.engine", f"config:{config}")
     assert (from_env, source_env) == ("from_env.engine", "env:MODEL__MODEL_PATH")
+
+
+def test_model_classes_prefers_the_environment_override(tmp_path):
+    """偵測類別要記**實際生效的**那組，理由與引擎身分同型。
+
+    `MODEL__CLASSES` 覆寫 `config.toml` 時只讀設定檔，meta 會記下一組沒被量到的類別；
+    而少偵測一個類別本來就會比較快——事後就分不出「這層改動變快了」與「這層量的東西
+    比較少」。
+    """
+    config = tmp_path / "config.toml"
+    config.write_text("[model]\nclasses = [0, 2]\n", encoding="utf-8")
+
+    assert _model_classes(config, {}) == "[0, 2]"
+    assert _model_classes(config, {"MODEL__CLASSES": "[2]"}) == "[2]"
+
+
+def test_model_classes_rejects_an_empty_classes_setting(tmp_path):
+    """類別設定是空的就中止，不留白往下跑。
+
+    記成空字串的話產物看起來完整、每個欄位都在，只有「這輪偵測了什麼」永遠查不回來，
+    而這是判讀跨層 FPS 差異的前提。
+    """
+    config = tmp_path / "config.toml"
+    config.write_text("[model]\nmodel_path = \"x.engine\"\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="classes"):
+        _model_classes(config, {})
 
 
 # --------------------------------------------------------------------------------------
