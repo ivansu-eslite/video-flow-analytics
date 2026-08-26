@@ -195,7 +195,9 @@ Negative
   `shm_available_mb` 與 **`backing_dirs`**——最後一項比對配置前後 `/proc/self/maps` 上的
   arena 映射，記的是這塊**實際**落在哪，不是由可用空間推論（同機其他行程也在動用
   `/dev/shm`，推論會失準）。~~**主動擋下**是 issue #106，本次只留訊號、不擋。~~
-  **（issue #106 後更新）配置前的擋已補上**：`require_shm_capacity` 在配置第一塊之前比
+  **（issue #106 後更新）配置前的擋已補上**：`create_ring_buffers` 在配置第一塊之前呼叫
+  `require_shm_capacity`（擋與配置收在同一個函式——分開時呼叫端漏掉那道擋不會有任何
+  症狀，正是它要防的失敗模式），比
   「全部路合計 vs `/dev/shm` 總容量」，不足即拋 `RuntimeError`。判準刻意不用逐塊比對
   可用空間——那是 CPython 自己已經在做的事，而它的處置是靜默改用 `/tmp`。這道擋是必要
   非充分（同機其他行程佔用時，合計沒超過總容量也可能降級），`backing_dirs` 仍是唯一能

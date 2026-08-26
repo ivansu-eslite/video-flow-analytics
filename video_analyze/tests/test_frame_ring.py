@@ -13,6 +13,7 @@ from video_analyze.services import frame_ring
 from video_analyze.services.frame_ring import (
     FrameRing,
     create_ring_buffer,
+    create_ring_buffers,
     require_shm_capacity,
 )
 
@@ -101,7 +102,12 @@ _ONE_BUFFER_BYTES = _SLOTS * _H * _W * 3  # 一塊 22.5 MiB（出貨設定 batch
 
 
 def _fake_statvfs(total_bytes: int, monkeypatch) -> None:
-    """把 `/dev/shm` 的總容量假造成 `total_bytes`（`f_frsize` 固定 1）。"""
+    """把 `/dev/shm` 的總容量假造成 `total_bytes`（`f_frsize` 固定 1）。
+
+    這裡換掉的是模組看到的 `os.statvfs`，不是同檔其他測試用的 `_SHM_DIR` 指向不存在的
+    路徑——那個做法只控制得了「有沒有」，這一組要同時控制 `f_blocks` 與 `f_bavail` 兩個
+    值，才問得出「判準取的是哪一個」。
+    """
 
     class _Stat:
         f_blocks = total_bytes
@@ -151,3 +157,36 @@ def test_shm_capacity_is_a_noop_without_dev_shm(monkeypatch):
     assert frame_ring.shm_total_bytes() is None
 
     require_shm_capacity(9999, _SLOTS, _H, _W)
+
+
+def test_create_ring_buffers_allocates_one_per_stream(monkeypatch):
+    """正常情況下每路一塊，且每塊都能包成可讀寫的 `FrameRing`。"""
+    _fake_statvfs(_ONE_BUFFER_BYTES * 9, monkeypatch)
+
+    buffers = create_ring_buffers(3, _NUM_SLOTS, _HEIGHT, _WIDTH)
+
+    assert len(buffers) == 3
+    ring = FrameRing(buffers[0], _NUM_SLOTS, _HEIGHT, _WIDTH)
+    ring.write_slot(0, _frame(7))
+    assert np.array_equal(ring.view_slot(0), _frame(7))
+
+
+def test_create_ring_buffers_allocates_nothing_when_the_total_does_not_fit(monkeypatch):
+    """裝不下時一塊都不配。
+
+    擋與配置收在同一個函式，是因為分開時「呼叫端漏掉那道擋」不會有任何症狀——測試全綠、
+    輸出正確，只有讀寫變成磁碟等級。這支釘的就是「拿得到緩衝 ⇒ 擋跑過了」這個保證：
+    真的配下去之後才發現不夠，前幾塊已經落在 /dev/shm 上了。
+    """
+    _fake_statvfs(_ONE_BUFFER_BYTES * 2, monkeypatch)
+    allocated = []
+    monkeypatch.setattr(
+        frame_ring,
+        "create_ring_buffer",
+        lambda *args, **kwargs: allocated.append(args) or object(),
+    )
+
+    with pytest.raises(RuntimeError, match="共享記憶體不足"):
+        create_ring_buffers(9, _SLOTS, _H, _W)
+
+    assert allocated == []

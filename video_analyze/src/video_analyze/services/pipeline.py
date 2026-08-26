@@ -13,11 +13,7 @@ from video_analyze.services.batching import (
     TRACK_QUEUE_SLOTS,
 )
 from video_analyze.services.detector import YOLODetector
-from video_analyze.services.frame_ring import (
-    FrameRing,
-    create_ring_buffer,
-    require_shm_capacity,
-)
+from video_analyze.services.frame_ring import FrameRing, create_ring_buffers
 from video_analyze.services.inference import InferencePipeline
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
 from video_analyze.services.track_worker import TRACK_FAILED, run_track_worker
@@ -77,7 +73,7 @@ def run_inference_pipeline(
     Args:
         data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
         free_queues: 各路歸還環形緩衝 slot 用的佇列，索引為 stream_id。
-        ring_buffers: 各路 `create_ring_buffer` 建立的共享記憶體。
+        ring_buffers: 各路 `create_ring_buffers` 建立的共享記憶體。
         stream_names: 各路攝影機的 `stream_dirname`。
         track_queue: 送往追蹤進程的佇列。
     """
@@ -182,16 +178,13 @@ def analyze_daily(
     # 影格走共享記憶體環形緩衝，queue 只傳輕量索引，避免每格 6MB 走 pickle + pipe
     data_queues = [mp.Queue() for _ in range(num_streams)]
     free_queues = [mp.Queue() for _ in range(num_streams)]
-    # 配置第一塊之前先擋掉「九路合計裝不進 /dev/shm」的組態：CPython 逐塊判斷，不夠
-    # 時是靜默改用 /tmp（磁碟）而不是報錯，程式照跑、輸出正常，只有讀寫成本悄悄變成
-    # 磁碟等級。見 frame_ring.require_shm_capacity。
-    require_shm_capacity(num_streams, RING_SLOTS, INFER_HEIGHT, INFER_WIDTH)
     # 讀取端已把影格縮成推論尺寸，緩衝只需存 640×384（4K 每格 23.73 MiB → 0.70 MiB）。
     # frame_shapes 仍然要留著、且必須是原始解析度：它要寫進 parquet，也是追蹤進程
-    # 反算座標的依據（見 `services/letterbox.py`）
-    ring_buffers = [
-        create_ring_buffer(RING_SLOTS, INFER_HEIGHT, INFER_WIDTH) for _ in frame_shapes
-    ]
+    # 反算座標的依據（見 `services/letterbox.py`）。合計裝不進 /dev/shm 的組態由
+    # `create_ring_buffers` 在配置第一塊之前擋下（見 frame_ring.require_shm_capacity）
+    ring_buffers = create_ring_buffers(
+        len(frame_shapes), RING_SLOTS, INFER_HEIGHT, INFER_WIDTH
+    )
     processes: list[mp.Process] = []
 
     def _raise_if_abnormal(procs: list[mp.Process]) -> None:

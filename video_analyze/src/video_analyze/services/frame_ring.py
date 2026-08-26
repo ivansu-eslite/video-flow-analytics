@@ -41,8 +41,10 @@ def require_shm_capacity(
     擋的是**未來**：有人調大 `[model].batch`、增加路數或換執行環境時，失敗方式應該是
     啟動時 fail loud，而不是靜默慢下來。
 
-    取不到 `/dev/shm`（非 Linux、或該路徑不存在）時直接放行：那些平台上 `mp.RawArray`
-    本來就不走 tmpfs，沒有這個失敗模式。
+    取不到 `/dev/shm`（`os.statvfs` 拋 `OSError`）時直接放行：沒有這個目錄的環境上
+    `mp.RawArray` 本來就不走 tmpfs，沒有這個失敗模式。⚠ Windows 連 `os.statvfs` 都沒有，
+    那裡會是 `AttributeError` 而不是放行——與同檔 `_shm_available_mb` 的既有處置一致，
+    這條 pipeline 只跑 Linux，不為此加分支。
 
     Args:
         num_buffers: 要配置幾塊（= 路數）。
@@ -81,6 +83,10 @@ def create_ring_buffer(num_slots: int, height: int, width: int):
 
     Returns:
         `mp.RawArray`，可傳給子進程建構 `FrameRing`。
+
+    Note:
+        **多路一次配置請用 `create_ring_buffers`**——配置前的擋在那裡，直接逐塊呼叫本
+        函式會繞過它。
     """
     total_bytes = num_slots * height * width * _CHANNELS
     # CPython 逐塊比對「`/dev/shm` 剩餘空間 >= 本塊大小」，不夠就**靜默**改用 /tmp（磁碟上
@@ -110,8 +116,33 @@ def create_ring_buffer(num_slots: int, height: int, width: int):
     return buffer
 
 
+def create_ring_buffers(
+    num_buffers: int, num_slots: int, height: int, width: int
+) -> list:
+    """配置 `num_buffers` 塊環形緩衝，配置第一塊之前先跑 `require_shm_capacity`。
+
+    擋與配置刻意收在同一個函式：兩者分開時，呼叫端漏掉那道擋**不會有任何症狀**——測試
+    照樣全綠、輸出完全正確，只有讀寫成本悄悄變成磁碟等級，正是這道擋本身要防的失敗
+    模式。收在一起之後，能拿到緩衝就代表擋跑過了。
+
+    Args:
+        num_buffers: 要配置幾塊（= 路數）。
+        num_slots: 每塊的 slot 數。
+        height: 影格高度（pixel）。
+        width: 影格寬度（pixel）。
+
+    Returns:
+        `num_buffers` 個 `mp.RawArray`。
+
+    Raises:
+        RuntimeError: 合計需求超過 `/dev/shm` 總容量（一塊都不會配）。
+    """
+    require_shm_capacity(num_buffers, num_slots, height, width)
+    return [create_ring_buffer(num_slots, height, width) for _ in range(num_buffers)]
+
+
 def shm_total_bytes() -> int | None:
-    """`/dev/shm` 的**總容量**（bytes）；非 Linux 或該路徑不存在時回傳 `None`。
+    """`/dev/shm` 的**總容量**（bytes）；該路徑不存在（`statvfs` 拋 `OSError`）時回傳 `None`。
 
     與 `_shm_available_mb`（剩餘空間）刻意分開：容量是這個環境給的上限、不隨其他行程
     變動，是配置前檢查唯一能用的基準；剩餘空間只適合當事後的餘裕訊號。
