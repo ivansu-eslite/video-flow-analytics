@@ -746,8 +746,16 @@ def _engine_path(config_path: Path, env: Mapping[str, str]) -> tuple[str, str]:
     量測過的引擎的 sha256——而引擎身分正是這份 meta 最需要可信的欄位之一。
     """
     override = env.get("MODEL__MODEL_PATH")
-    if override:
-        return override, "env:MODEL__MODEL_PATH"
+    if override is not None:
+        # 設了卻是空白＝誤用。回退到設定檔的話 meta 會記下一顆從未被量測過的引擎，
+        # 正是這欄要防的事；空字串更糟——`Path("").is_file()` 一定是 False，
+        # sha256 會被記成「找不到引擎檔」，看起來像是真的量到卻找不到引擎檔案。
+        if not override.strip():
+            raise SystemExit(
+                "環境變數 MODEL__MODEL_PATH 是空的，量測記不下引擎身分"
+                "（要用設定檔的值就不要設這個變數）"
+            )
+        return override.strip(), "env:MODEL__MODEL_PATH"
     if not config_path.is_file():
         raise SystemExit(f"找不到設定檔 {config_path}（本工具要在 repo 根目錄執行）")
     with config_path.open("rb") as handle:
