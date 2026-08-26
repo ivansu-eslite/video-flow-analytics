@@ -1,8 +1,5 @@
 name: CI
 
-# 刻意不過濾路徑：文件契約測試驗的是「文件宣稱 vs repo 現況」，而現況變動遍布
-# 各處——新增測試檔、新增共用 lib、新增 ADR 都該讓它紅，這些路徑無法窮舉。
-# 過濾會讓護欄在最需要它的時候剛好不跑，而這個 job 只要數十秒。
 on:
   pull_request:
     branches: [main]
@@ -14,8 +11,6 @@ jobs:
   # 經 workspace 解析會為了跑文件檢查而 resolve 八十幾個套件、裝上 video_analyze
   # 的 torch 依賴子樹。ruff 同理；根 pyproject.toml 沒有 [project] 區塊，
   # 但 [tool.ruff] 仍會被讀到（line-length 100、select E/F/I/W）。
-  #
-  # 四包與三個共用 lib 的測試與 lint 尚未納入 CI，見 issue #123。
   docs-contract:
     name: docs-contract (root tests/)
     runs-on: ubuntu-latest
@@ -26,3 +21,40 @@ jobs:
           enable-cache: true
       - run: uv run --no-project --with pytest pytest tests/
       - run: uv run --no-project --with ruff ruff check tests/
+
+  # 四包中的三個 CPU-only 成員 + 三個共用 lib：pytest/ruff 一律用 --directory（切 cwd）
+  # 而非 --package，避免從 repo 根遞迴收集撞名（四包都有 tests/test_config.py 等同名檔）。
+  lint-test:
+    name: ${{ matrix.pkg }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg:
+          - zone_mapping
+          - line_counting
+          - flow_report
+          - libs/vfa_registry
+          - libs/vfa_observability
+          - libs/vfa_config
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv run --directory ${{ matrix.pkg }} ruff check .
+      - run: uv run --directory ${{ matrix.pkg }} pytest
+
+  # video_analyze 獨立成一個 job：唯一含 torch/torchvision/ultralytics/tensorrt-cu12
+  # 的成員，依賴子樹遠比其餘三包重，拆開才不會拖慢 matrix 裡的輕量套件、也讓快取
+  # key（依 pyproject.toml/uv.lock 內容）不必與輕量套件混在一起輪替。
+  video-analyze:
+    name: video_analyze (torch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv run --directory video_analyze ruff check .
+      - run: uv run --directory video_analyze pytest
