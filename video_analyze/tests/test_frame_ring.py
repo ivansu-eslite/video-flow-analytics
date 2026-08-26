@@ -10,7 +10,11 @@ import numpy as np
 import pytest
 
 from video_analyze.services import frame_ring
-from video_analyze.services.frame_ring import FrameRing, create_ring_buffer
+from video_analyze.services.frame_ring import (
+    FrameRing,
+    create_ring_buffer,
+    require_shm_capacity,
+)
 
 _HEIGHT = 4
 _WIDTH = 6
@@ -82,3 +86,68 @@ def test_write_slot_rejects_a_frame_of_a_different_shape():
 
     with pytest.raises(ValueError, match="與環形緩衝"):
         ring.write_slot(0, np.zeros((_HEIGHT + 1, _WIDTH, 3), dtype=np.uint8))
+
+
+# --------------------------------------------------------------------------------------
+# 配置前的擋（`require_shm_capacity`）
+#
+# 這一組釘的是「合計 vs 總容量」這個判準本身。判準改成逐塊比對可用空間時，下面兩支
+# 期待拋錯的會失敗、放行的兩支照過（實測過）——那正是要防的實作：逐塊比對是 CPython
+# 自己已經在做的事，而它的處置是靜默改用 /tmp，不是報錯。
+# --------------------------------------------------------------------------------------
+
+_SLOTS, _H, _W = 32, 384, 640
+_ONE_BUFFER_BYTES = _SLOTS * _H * _W * 3  # 一塊 22.5 MiB（出貨設定 batch=16 的每路用量）
+
+
+def _fake_statvfs(total_bytes: int, monkeypatch) -> None:
+    """把 `/dev/shm` 的總容量假造成 `total_bytes`（`f_frsize` 固定 1）。"""
+
+    class _Stat:
+        f_blocks = total_bytes
+        f_frsize = 1
+        # 可用空間刻意留成「單塊放得下」，逐塊比對的實作會因此全數放行
+        f_bavail = _ONE_BUFFER_BYTES
+
+    monkeypatch.setattr(frame_ring.os, "statvfs", lambda _path: _Stat())
+
+
+def test_shm_capacity_passes_when_the_total_fits(monkeypatch):
+    """合計放得下就不能擋——這道檢查誤擋的話整條 pipeline 起不來。"""
+    _fake_statvfs(_ONE_BUFFER_BYTES * 9, monkeypatch)
+
+    require_shm_capacity(9, _SLOTS, _H, _W)
+
+
+def test_shm_capacity_blocks_when_only_one_buffer_fits(monkeypatch):
+    """單塊放得下、九塊合計放不下——CPython 正是在這種組態下靜默把後幾塊改丟 /tmp。
+
+    `f_bavail` 刻意設成單塊放得下：逐塊比對可用空間的實作在這裡每一塊都會通過、一路
+    放行到底，而那正是 CPython 自己做完之後選擇靜默降級的那個判斷。這支失敗代表判準
+    被改回逐塊口徑，這道擋就等於不存在。
+    """
+    _fake_statvfs(_ONE_BUFFER_BYTES * 2, monkeypatch)
+
+    with pytest.raises(RuntimeError, match="共享記憶體不足"):
+        require_shm_capacity(9, _SLOTS, _H, _W)
+
+
+def test_shm_capacity_message_names_both_numbers(monkeypatch):
+    """訊息要同時帶「需要多少」與「只有多少」，否則看到錯誤也不知道該調哪個旋鈕。"""
+    _fake_statvfs(_ONE_BUFFER_BYTES * 2, monkeypatch)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        require_shm_capacity(9, _SLOTS, _H, _W)
+
+    message = str(excinfo.value)
+    assert f"{_ONE_BUFFER_BYTES * 9 / (1024 * 1024):.2f} MiB" in message
+    assert f"{_ONE_BUFFER_BYTES * 2 / (1024 * 1024):.2f} MiB" in message
+
+
+def test_shm_capacity_is_a_noop_without_dev_shm(monkeypatch):
+    """取不到 /dev/shm 的平台上 `mp.RawArray` 不走 tmpfs，沒有這個失敗模式，不得誤擋。"""
+    monkeypatch.setattr(frame_ring, "_SHM_DIR", "/nonexistent-shm")
+
+    assert frame_ring.shm_total_bytes() is None
+
+    require_shm_capacity(9999, _SLOTS, _H, _W)

@@ -13,6 +13,61 @@ _SHM_DIR = "/dev/shm"
 _CHANNELS = 3  # BGR
 
 
+def require_shm_capacity(
+    num_buffers: int, num_slots: int, height: int, width: int
+) -> None:
+    """配置任何一塊之前，先擋下「全部緩衝合計裝不進 `/dev/shm`」的組態。
+
+    **失敗模式是靜默降級，不是崩潰。** `mp.RawArray` 的整數路徑在配置當下就
+    `ctypes.memset` 寫滿整塊，tmpfs 空間是真的被佔掉的；而 `heap.py` 的 `_choose_dir`
+    每配一塊比一次 `st.f_bavail * st.f_frsize >= size`，不夠就改用 `util.get_temp_dir()`
+    （`/tmp`，磁碟上的 mmap），**不拋例外、不留 log**。因為 memset 讓前幾塊的佔用真的
+    看得到，CPython 那個逐塊檢查本身是有效的，不會 over-commit 到執行中才 SIGBUS。
+    問題出在它的**處置**：程式照跑、輸出完全正確，只有讀寫成本悄悄變成磁碟等級。
+
+    同機制的容器內實測（CPython 3.12.3、`--shm-size=64m`、九塊各 22.50 MiB）：第 1、2
+    塊落在 `/dev/shm`（剩餘 41.5 → 19.0 MiB），第 3 塊起 19.0 < 22.5 就全部落到 `/tmp`，
+    九塊都寫得滿、行程 exit 0。合計 202.50 MiB > 64 MiB 這件事沒有任何訊號會主動報錯。
+
+    **這道擋是必要條件，不是充分條件。** 它比的是「合計需求 vs 總容量」（`f_blocks`），
+    而 CPython 降級的判準是逐塊的**可用**空間（`f_bavail`）——同機其他行程佔著
+    `/dev/shm` 時，合計沒超過總容量也可能降級。所以 `create_ring_buffer` 的
+    `backing_dirs` 不是被這道擋取代的裝飾，而是**唯一**能確認實際落點的手段：這裡擋掉
+    「一定裝不下」的組態，那裡回答「這次實際落在哪」，兩者互補、都要留。
+
+    也因此判準不能改成逐塊比對 `f_bavail`——那是 CPython 自己已經在做的事，再做一次
+    不會多擋到任何東西，只會讓這道擋看起來存在。
+
+    擋的是**未來**：有人調大 `[model].batch`、增加路數或換執行環境時，失敗方式應該是
+    啟動時 fail loud，而不是靜默慢下來。
+
+    取不到 `/dev/shm`（非 Linux、或該路徑不存在）時直接放行：那些平台上 `mp.RawArray`
+    本來就不走 tmpfs，沒有這個失敗模式。
+
+    Args:
+        num_buffers: 要配置幾塊（= 路數）。
+        num_slots: 每塊的 slot 數。
+        height: 影格高度（pixel）。
+        width: 影格寬度（pixel）。
+
+    Raises:
+        RuntimeError: 合計需求超過 `/dev/shm` 總容量。
+    """
+    total_bytes = shm_total_bytes()
+    if total_bytes is None:
+        return
+    required = num_buffers * num_slots * height * width * _CHANNELS
+    if required > total_bytes:
+        raise RuntimeError(
+            f"共享記憶體不足：{num_buffers} 塊環形緩衝合計需要 "
+            f"{required / (1024 * 1024):.2f} MiB，但 {_SHM_DIR} 總容量只有 "
+            f"{total_bytes / (1024 * 1024):.2f} MiB。"
+            "調小 [model].batch（RING_SLOTS 由它推導，見 services/batching.py）、"
+            "減少同時處理的路數，或把執行環境的 /dev/shm 調大"
+            "（docker run --shm-size、k8s 的 emptyDir: {medium: Memory}）。"
+        )
+
+
 def create_ring_buffer(num_slots: int, height: int, width: int):
     """在父進程建立可跨 fork 子進程共享的環形緩衝底層記憶體。
 
@@ -36,7 +91,9 @@ def create_ring_buffer(num_slots: int, height: int, width: int):
     # 本次配置的。不用「可用空間 vs 大小」去推論，是因為那是預測（同機其他行程也在動用
     # /dev/shm，且檢查與配置之間有時間差），而這裡讀得到已發生的事實。`shm_available_mb`
     # 仍保留，但作用是容量餘裕（還剩多少、下次調大 batch 會不會爆），不是判斷落點。
-    # 主動擋下是 issue #106，本函式只負責留下訊號。
+    # 「合計一定裝不下」的組態由 `require_shm_capacity` 在配置前擋掉，本函式只負責留下
+    # 訊號——那道擋是必要非充分（比的是總容量，擋不掉同機其他行程佔用造成的降級），
+    # 落點仍然只有這裡回答得了。
     arenas_before = _arena_paths()
     buffer = mp.RawArray(ctypes.c_uint8, total_bytes)
     logger.info(
@@ -51,6 +108,19 @@ def create_ring_buffer(num_slots: int, height: int, width: int):
         ),
     )
     return buffer
+
+
+def shm_total_bytes() -> int | None:
+    """`/dev/shm` 的**總容量**（bytes）；非 Linux 或該路徑不存在時回傳 `None`。
+
+    與 `_shm_available_mb`（剩餘空間）刻意分開：容量是這個環境給的上限、不隨其他行程
+    變動，是配置前檢查唯一能用的基準；剩餘空間只適合當事後的餘裕訊號。
+    """
+    try:
+        stat = os.statvfs(_SHM_DIR)
+    except OSError:
+        return None
+    return stat.f_blocks * stat.f_frsize
 
 
 def _shm_available_mb() -> float | None:
