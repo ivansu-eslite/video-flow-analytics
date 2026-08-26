@@ -570,6 +570,17 @@ def test_write_report_puts_each_value_under_its_paired_header(tmp_path):
     _write(path, _full_frames(date="2026-05-01", weekday="星期五", period="09:00"), "append")
 
     wb = openpyxl.load_workbook(path)
+    zone_hourly = wb[SHEET_ZONE_HOURLY]
+    assert dict(
+        zip([c.value for c in zone_hourly[1]], [c.value for c in zone_hourly[2]])
+    ) == {
+        "日期": "2026-05-01",
+        "星期": "星期五",
+        "小時": "09:00",
+        "區域": "checkout",
+        "人流量": 10,
+    }
+
     zone_peak = wb[SHEET_ZONE_PEAK]
     assert dict(
         zip([c.value for c in zone_peak[1]], [c.value for c in zone_peak[2]])
