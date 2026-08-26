@@ -686,6 +686,58 @@ def _git_output(*args: str) -> str:
     return completed.stdout.strip()
 
 
+def _host_cpu(cpuinfo_path: Path = Path("/proc/cpuinfo")) -> str:
+    """這輪跑在什麼 CPU 上（`/proc/cpuinfo` 的第一個 `model name`）。
+
+    2026-08-26 在 T4 上量到同組態跨天差 7.9%，最可能的解釋是 VM 重開機換了實體主機——
+    但**事後補不回來**：meta 沒有任何一欄記得住那輪跑在哪台機器上，VM 一關就查不到
+    （`gcloud describe` 對 TERMINATED 的機器回 `Unknown CPU Platform`）。`--machine` 是
+    人給的代號，同一個代號跨天可能落在不同世代的主機上。
+
+    雲端客體看到的粒度很粗（「Intel(R) Xeon(R) CPU @ 2.30GHz」這種，SKU 被抹掉了），
+    但足以分辨世代，也就足以判斷「這兩輪能不能相減」。讀不到就記 `<未知>`——這是給人
+    判讀用的線索，不是量測的前提條件。
+    """
+    try:
+        text = cpuinfo_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "<未知>"
+    for line in text.splitlines():
+        if line.startswith("model name"):
+            _, _, value = line.partition(":")
+            if value.strip():
+                return " ".join(value.split())
+    return "<未知>"
+
+
+def _model_classes(config_path: Path, env: Mapping[str, str]) -> str:
+    """回傳這輪實際生效的 `[model].classes`（JSON 字串）。
+
+    與 `_engine_path` 同一個理由要記進 meta：偵測幾個類別（`[0, 2]` 對 `[2]`）是功能
+    差異，而 FPS 表上完全看不出來——同一支工具、同一顆引擎，少偵測一個類別就是比較
+    快，事後沒有這個欄位就分不出「改動變快了」與「量的東西變少了」。環境變數
+    `MODEL__CLASSES` 會覆寫設定檔（pydantic-settings 對複合型別吃 JSON），所以先看它。
+    """
+    override = env.get("MODEL__CLASSES")
+    if override is not None:
+        # 設了卻是空白＝誤用。回退到設定檔的話 meta 會記下一組沒被量到的類別，正是這欄
+        # 要防的事；空字串更糟——產物看起來完整，只有這欄默默沒有內容
+        if not override.strip():
+            raise SystemExit(
+                "環境變數 MODEL__CLASSES 是空的，量測記不下偵測類別"
+                "（要用設定檔的值就不要設這個變數）"
+            )
+        return override.strip()
+    if not config_path.is_file():
+        raise SystemExit(f"找不到設定檔 {config_path}（本工具要在 repo 根目錄執行）")
+    with config_path.open("rb") as handle:
+        config = tomllib.load(handle)
+    classes = config.get("model", {}).get("classes")
+    if not classes:
+        raise SystemExit(f"{config_path} 的 [model].classes 是空的，量測記不下偵測類別")
+    return json.dumps(classes)
+
+
 def _engine_path(config_path: Path, env: Mapping[str, str]) -> tuple[str, str]:
     """回傳 (引擎路徑, 這個值是從哪來的)。
 
@@ -806,8 +858,13 @@ def command_run(args: argparse.Namespace) -> int:
 
     engine, engine_source = _engine_path(args.config, os.environ)
     engine_sha256 = _sha256(Path(engine)) if Path(engine).is_file() else "<找不到引擎檔>"
+    model_classes = _model_classes(args.config, os.environ)
+    host_cpu = _host_cpu()
     versions = _probe_versions(sys.executable)
     commit = _git_output("rev-parse", "HEAD")
+    # 逐層打 tag 的量測（每層只差一項改動）光看 commit sha 判讀不出是哪一層；沒打 tag
+    # 的一般執行留一個看得出來的值，不要讓這欄變成空字串
+    layer = _git_output("describe", "--tags", "--exact-match", "HEAD") or "<未打 tag>"
     git_dirty = len(_git_output("status", "--porcelain").splitlines())
     segments = {bucket: _count_segments(bucket, day) for bucket in buckets}
     inherited_env = extra_settings_env(os.environ, MANAGED_SETTINGS_ENV)
@@ -835,12 +892,15 @@ def command_run(args: argparse.Namespace) -> int:
             "name": case.name,
             "label": args.label,
             "machine": args.machine,
+            "host_cpu": host_cpu,
             "codebase": "vfa-main",
+            "layer": layer,
             "commit": commit,
             "git_dirty": git_dirty,
             "bucket": case.bucket,
             "date": args.date,
             "model_batch": case.batch,
+            "model_classes": model_classes,
             "foot_point_method": case.foot_point_method,
             "repeat_index": case.repeat_index,
             "extra_settings_env": inherited_env,

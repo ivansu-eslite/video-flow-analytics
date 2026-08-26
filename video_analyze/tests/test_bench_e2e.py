@@ -18,6 +18,8 @@ from bench_e2e import (
     RunRecord,
     _count_segments,
     _engine_path,
+    _host_cpu,
+    _model_classes,
     artifact_paths,
     bucket_output_dir,
     build_run_env,
@@ -222,6 +224,69 @@ def test_engine_path_prefers_the_environment_override(tmp_path):
 
     assert (from_config, source_config) == ("from_config.engine", f"config:{config}")
     assert (from_env, source_env) == ("from_env.engine", "env:MODEL__MODEL_PATH")
+
+
+def test_model_classes_prefers_the_environment_override(tmp_path):
+    """偵測類別要記**實際生效的**那組，理由與引擎身分同型。
+
+    `MODEL__CLASSES` 覆寫 `config.toml` 時只讀設定檔，meta 會記下一組沒被量到的類別；
+    而少偵測一個類別本來就會比較快——事後就分不出「這層改動變快了」與「這層量的東西
+    比較少」。
+    """
+    config = tmp_path / "config.toml"
+    config.write_text("[model]\nclasses = [0, 2]\n", encoding="utf-8")
+
+    assert _model_classes(config, {}) == "[0, 2]"
+    assert _model_classes(config, {"MODEL__CLASSES": "[2]"}) == "[2]"
+
+
+def test_model_classes_rejects_an_empty_classes_setting(tmp_path):
+    """類別設定是空的就中止，不留白往下跑。
+
+    記成空字串的話產物看起來完整、每個欄位都在，只有「這輪偵測了什麼」永遠查不回來，
+    而這是判讀跨層 FPS 差異的前提。
+    """
+    config = tmp_path / "config.toml"
+    config.write_text("[model]\nmodel_path = \"x.engine\"\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="classes"):
+        _model_classes(config, {})
+
+
+def test_model_classes_rejects_a_blank_environment_override(tmp_path):
+    """`MODEL__CLASSES` 設了卻是空白＝誤用，要中止而不是悄悄回退到設定檔。
+
+    回退的話 meta 記下的是一組沒被量到的類別——正是這個欄位要防的事；記成空字串更糟，
+    產物看起來完整，只有這欄默默沒有內容。
+    """
+    config = tmp_path / "config.toml"
+    config.write_text("[model]\nclasses = [0, 2]\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="MODEL__CLASSES"):
+        _model_classes(config, {"MODEL__CLASSES": "   "})
+
+
+def test_host_cpu_reads_the_first_model_name(tmp_path):
+    """主機身分取 `/proc/cpuinfo` 的第一個 `model name`（多核心會有很多行相同的）。
+
+    沒有這欄的代價已經發生過一次：2026-08-26 量到同組態跨天差 7.9%，最可能的解釋是
+    VM 換了實體主機，但事後查不回來——機器一關就沒有任何地方記得那輪跑在哪裡。
+    """
+    cpuinfo = tmp_path / "cpuinfo"
+    cpuinfo.write_text(
+        "processor\t: 0\nmodel name\t: Intel(R) Xeon(R) CPU @ 2.30GHz\n"
+        "processor\t: 1\nmodel name\t: Intel(R) Xeon(R) CPU @ 2.30GHz\n",
+        encoding="utf-8",
+    )
+
+    assert _host_cpu(cpuinfo) == "Intel(R) Xeon(R) CPU @ 2.30GHz"
+
+
+def test_host_cpu_falls_back_when_cpuinfo_is_unavailable(tmp_path):
+    """讀不到就記 `<未知>`：這是給人判讀用的線索，不能反過來讓量測跑不起來。"""
+    assert _host_cpu(tmp_path / "does-not-exist") == "<未知>"
+    (tmp_path / "no-model-name").write_text("processor\t: 0\n", encoding="utf-8")
+    assert _host_cpu(tmp_path / "no-model-name") == "<未知>"
 
 
 # --------------------------------------------------------------------------------------
