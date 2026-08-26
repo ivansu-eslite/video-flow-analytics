@@ -161,6 +161,8 @@ def test_shm_capacity_is_a_noop_without_dev_shm(monkeypatch):
 
 def test_create_ring_buffers_allocates_one_per_stream(monkeypatch):
     """正常情況下每路一塊，且每塊都能包成可讀寫的 `FrameRing`。"""
+    # 假容量只需大於本測試 3 塊 _NUM_SLOTS/_HEIGHT/_WIDTH 的合計（648 bytes）；
+    # 與 _ONE_BUFFER_BYTES（32/384/640 的另一組常數）無關，沿用只是取個現成的大數字。
     _fake_statvfs(_ONE_BUFFER_BYTES * 9, monkeypatch)
 
     buffers = create_ring_buffers(3, _NUM_SLOTS, _HEIGHT, _WIDTH)

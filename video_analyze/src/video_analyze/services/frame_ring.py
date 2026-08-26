@@ -118,7 +118,7 @@ def create_ring_buffer(num_slots: int, height: int, width: int):
 
 def create_ring_buffers(
     num_buffers: int, num_slots: int, height: int, width: int
-) -> list:
+) -> list[ctypes.Array]:
     """配置 `num_buffers` 塊環形緩衝，配置第一塊之前先跑 `require_shm_capacity`。
 
     擋與配置刻意收在同一個函式：兩者分開時，呼叫端漏掉那道擋**不會有任何症狀**——測試
@@ -155,7 +155,7 @@ def shm_total_bytes() -> int | None:
 
 
 def _shm_available_mb() -> float | None:
-    """`/dev/shm` 目前的可用空間（MiB）；非 Linux 或該路徑不存在時回傳 `None`。"""
+    """`/dev/shm` 目前的可用空間（MiB）；該路徑不存在（`statvfs` 拋 `OSError`）時回傳 `None`。"""
     try:
         stat = os.statvfs(_SHM_DIR)
     except OSError:
