@@ -7,3 +7,8 @@ members = ["video_analyze", "zone_mapping", "line_counting", "flow_report", "lib
 # 根 pyproject 沒有 project 區塊可供推斷，預設會把它排進第三方組。
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.lint]
+# 與四包一致；ruff 的預設規則集不含 I（import 排序）與 W，
+# 不明寫的話 CI 會比本機寬鬆。
+select = ["E", "F", "I", "W"]
