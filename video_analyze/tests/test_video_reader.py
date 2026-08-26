@@ -63,23 +63,33 @@ def test_parse_segment_start_rejects_when_taipei_day_crosses_dir_day():
         )
 
 
-class _FakeCapture:
-    """`cv2.VideoCapture` 的替身，依序吐出指定的影格。"""
+class _FakeAvFrame:
+    """`av` 解碼出的影格替身，只需支援 `to_ndarray(format="bgr24")`。"""
 
-    def __init__(self, frames):
-        self._frames = iter(frames)
+    def __init__(self, array):
+        self._array = array
 
-    def isOpened(self):  # noqa: N802 — 對齊 cv2 的介面命名
-        return True
+    def to_ndarray(self, format="bgr24"):  # noqa: A002 — 對齊 av 的介面命名
+        return self._array
 
-    def get(self, _prop):
-        return 30.0
 
-    def read(self):
-        frame = next(self._frames, None)
-        return (False, None) if frame is None else (True, frame)
+class _FakeStream:
+    def __init__(self, average_rate):
+        self.average_rate = average_rate
 
-    def release(self):
+
+class _FakeContainer:
+    """`av.open()` 的替身，依序吐出指定的影格。"""
+
+    def __init__(self, frames, average_rate=30.0):
+        self._frames = frames
+        self.streams = type("_Streams", (), {"video": [_FakeStream(average_rate)]})()
+
+    def decode(self, video=0):  # noqa: A002 — 對齊 av 的介面命名
+        for frame in self._frames:
+            yield _FakeAvFrame(frame)
+
+    def close(self):
         pass
 
 
@@ -98,7 +108,7 @@ class _RingStub:
 def _reader_over(monkeypatch, frames, source_shape):
     """組一個讀取器，讓 `_read_segment` 讀到 `frames` 這幾格。"""
     monkeypatch.setattr(
-        video_reader.cv2, "VideoCapture", lambda _path: _FakeCapture(frames)
+        video_reader.av, "open", lambda _path: _FakeContainer(frames)
     )
     free_queue: queue.Queue = queue.Queue()
     for slot in range(_RingStub.num_slots):

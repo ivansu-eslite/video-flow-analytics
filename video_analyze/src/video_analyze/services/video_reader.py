@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
-import cv2
+import av
 import numpy as np
 
 from video_analyze.services.frame_ring import FrameRing
@@ -127,18 +127,18 @@ def probe_frame_shape(segment: SegmentInfo) -> FrameShape:
     Raises:
         ValueError: 片段無法開啟，或讀不到任何影格。
     """
-    cap = cv2.VideoCapture(str(segment.path))
-    if not cap.isOpened():
-        cap.release()
-        raise ValueError(f"無法開啟影片片段: {segment.path}")
     try:
-        ret, frame = cap.read()
-        if not ret:
+        container = av.open(str(segment.path))
+    except av.FFmpegError as exc:
+        raise ValueError(f"無法開啟影片片段: {segment.path}") from exc
+    try:
+        frame = next(container.decode(video=0), None)
+        if frame is None:
             raise ValueError(f"片段讀不到任何影格，無法探測解析度: {segment.path}")
-        height, width = frame.shape[:2]
+        height, width = frame.to_ndarray(format="bgr24").shape[:2]
         return FrameShape(height=height, width=width)
     finally:
-        cap.release()
+        container.close()
 
 
 def discover_segments(
@@ -213,19 +213,19 @@ class DailyStreamVideoReader:
             ValueError: 片段無法開啟、讀不到 FPS，或任一影格的解析度與
                 `source_shape` 不符（見迴圈內註解）。
         """
-        cap = cv2.VideoCapture(str(segment.path))
-        if not cap.isOpened():
-            cap.release()
-            raise ValueError(f"無法開啟影片片段: {segment.path}")
         try:
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps <= 0:
+            container = av.open(str(segment.path))
+        except av.FFmpegError as exc:
+            raise ValueError(f"無法開啟影片片段: {segment.path}") from exc
+        try:
+            stream = container.streams.video[0]
+            fps = stream.average_rate
+            if not fps or fps <= 0:
                 raise ValueError(f"無法讀取影片 FPS: {segment.path}")
+            fps = float(fps)
             frame_index = 0
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            for av_frame in container.decode(video=0):
+                frame = av_frame.to_ndarray(format="bgr24")
                 # 「整天解析度固定」的 fail-loud 檢查要在這裡做：縮放前移之前，這件事
                 # 由 `FrameRing.write_slot` 的形狀檢查順便擋下（緩衝依首格解析度配置），
                 # 但 letterbox 會把任何尺寸都抹平成推論尺寸，那道網就失效了。中途換
@@ -253,7 +253,7 @@ class DailyStreamVideoReader:
                 self.data_queue.put((slot, frame_index, timestamp))
                 frame_index += 1
         finally:
-            cap.release()
+            container.close()
 
     def run(self) -> None:
         """依序讀完 `self.segments` 所有片段，並在結束或例外時發出結束訊號。
