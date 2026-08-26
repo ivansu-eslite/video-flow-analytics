@@ -27,6 +27,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [line_counting/README.md](line_counting/README.md)
 - [flow_report/README.md](flow_report/README.md)
 
+**跨專案脈絡**：本 repo 是 `video_analyze` 推論鏈的開發正本，改動會往 argus 的兩份副本
+移植（`pipelines/onprem/` 交付副本 → 各雲端 job）。移植方向、測試素材清單、GPU 環境與
+權限約束、以及各條線目前的進度**不記在本檔**，見 `~/.claude/playbook/vfa-argus-topology.md`
+與 `~/.claude/plans/STATUS.md`（兩者皆為本機個人筆記，不進版控，同仁看不到）。
+
 ## 常用指令
 
 ```bash
@@ -46,6 +51,8 @@ uv run --directory libs/vfa_observability pytest   # （1 支）
 uv run --directory libs/vfa_observability ruff check .
 uv run --directory libs/vfa_config pytest          # （1 支）
 uv run --directory libs/vfa_config ruff check .
+
+uv run --no-project --with pytest pytest tests/    # 文件契約測試（釘住文件裡可機械驗證的斷言）
 ```
 
 **torch 隔離**：workspace 為單一 `.venv`，但 `uv sync --package <pkg>` 只裝該包依賴子樹
@@ -55,6 +62,12 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 **pytest／ruff 用 `--directory`（切換 cwd）而非 `--package`**：`--package` 不改變 cwd，
 `pytest` 會從 repo 根遞迴收集到所有套件的測試而撞名衝突（`tests/test_config.py` 等檔名
 四包重複）；`--directory` 切進該套件資料夾，才會只解析到該套件自己的 `tests/`。
+
+根層的文件契約測試（`tests/`）要**指定路徑**並帶 `--no-project`：不指定路徑會遞迴收集到
+四包而撞名；`--no-project` 則是因為該測試只用標準庫與 pytest，經 workspace 解析會為了跑
+文件檢查而裝上 `video_analyze` 的 torch 依賴子樹。**不要改用在根 `pyproject.toml` 填
+`testpaths` 的寫法**——那會讓 `uv run --package <pkg> pytest` 的撞名保護消失，變成靜默
+只跑文件測試、一支套件測試都沒跑卻回報通過。
 
 **執行 cwd 約束**：`bucket_dir` 與 `OUTPUT_ROOT = Path("outputs")` 是**cwd 相對路徑**，
 與各套件 `config.toml` 的檔案定位（四包 DDD 重構後皆用 `find_project_root` 往上找
@@ -66,7 +79,7 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 
 技術決策記在 [docs/adr/](docs/adr/)，依影響的模組分子目錄：只動一個套件的放
 `docs/adr/<套件名>/`，跨套件的放 `docs/adr/shared/`；編號是全域流水號、與子目錄無關，
-新增一律取下一號。十支 ADR 的清單、影響範圍與各自主題見
+新增一律取下一號。ADR 的清單、影響範圍與各自主題見
 [README.md 的「架構決策紀錄」](README.md#架構決策紀錄)（唯一索引，本檔不另列一份）。
 
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）

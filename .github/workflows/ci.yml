@@ -1,0 +1,28 @@
+name: CI
+
+# 刻意不過濾路徑：文件契約測試驗的是「文件宣稱 vs repo 現況」，而現況變動遍布
+# 各處——新增測試檔、新增共用 lib、新增 ADR 都該讓它紅，這些路徑無法窮舉。
+# 過濾會讓護欄在最需要它的時候剛好不跑，而這個 job 只要數十秒。
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  # 根層 tests/ 的文件契約測試。--no-project 是因為它只用標準庫與 pytest，
+  # 經 workspace 解析會為了跑文件檢查而 resolve 八十幾個套件、裝上 video_analyze
+  # 的 torch 依賴子樹。ruff 同理；根 pyproject.toml 沒有 [project] 區塊，
+  # 但 [tool.ruff] 仍會被讀到（line-length 100、select E/F/I/W）。
+  #
+  # 四包與三個共用 lib 的測試與 lint 尚未納入 CI，見 issue #123。
+  docs-contract:
+    name: docs-contract (root tests/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv run --no-project --with pytest pytest tests/
+      - run: uv run --no-project --with ruff ruff check tests/
