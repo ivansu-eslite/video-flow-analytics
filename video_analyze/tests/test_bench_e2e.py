@@ -226,6 +226,21 @@ def test_engine_path_prefers_the_environment_override(tmp_path):
     assert (from_env, source_env) == ("from_env.engine", "env:MODEL__MODEL_PATH")
 
 
+def test_engine_path_rejects_a_blank_environment_override(tmp_path):
+    """`MODEL__MODEL_PATH` 設了卻是空白＝誤用，要中止而不是悄悄回退到設定檔。
+
+    回退的話 meta 記下的是一顆從未被量測過的引擎的 sha256——而事後判斷「這批數字是
+    哪顆引擎跑的」全靠這個欄位；空字串更糟，`Path("").is_file()` 恆為 False，
+    產物看起來完整，只是 sha256 欄位變成「找不到引擎檔」，掩蓋了實際載入的其實是
+    設定檔那顆引擎。
+    """
+    config = tmp_path / "config.toml"
+    config.write_text('[model]\nmodel_path = "from_config.engine"\n', encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="MODEL__MODEL_PATH"):
+        _engine_path(config, {"MODEL__MODEL_PATH": "   "})
+
+
 def test_model_classes_prefers_the_environment_override(tmp_path):
     """偵測類別要記**實際生效的**那組，理由與引擎身分同型。
 
