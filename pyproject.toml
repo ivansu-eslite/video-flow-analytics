@@ -1,6 +1,2 @@
 [tool.uv.workspace]
 members = ["video_analyze", "zone_mapping", "line_counting", "flow_report", "libs/*"]
-
-[tool.pytest.ini_options]
-# 只收根層的文件契約測試；四包與 libs 的測試各自以 `--directory` 執行（檔名會撞名）
-testpaths = ["tests"]
