@@ -229,10 +229,10 @@ fail loud；沒有任何 `lines` 定義則整批跳過出入口三個分頁、�
 
 ## 其他注意事項
 
-- `*.pt`（模型權重）、`bucket_*/`、`outputs`（刻意不帶尾斜線，讓它是 symlink 時也擋得住）
+- `*.pt`（模型權重）、`bucket_*`、`outputs`（皆刻意不帶尾斜線，讓它是 symlink 時也擋得住）
   皆在 `.gitignore`，不進版控
-  （`camera_registry.yaml` 含 zone／line 定義，隨 `bucket_*/` 一起不進版控）。
-  `bucket_*/` 涵蓋所有 `bucket_` 開頭的目錄，`bucket_name1` 與
+  （`camera_registry.yaml` 含 zone／line 定義，隨 `bucket_*` 一起不進版控）。
+  `bucket_*` 涵蓋所有 `bucket_` 開頭的目錄，`bucket_name1` 與
   `bucket_<日期>_<變體>` 兩種命名都擋得住。
 - 四包版本 pin 成彼此一致（`torch`/`ultralytics`/`numpy`/`opencv` 等推理堆疊、
   `polars`/`pyarrow`/`openpyxl` 等輸出格式相關套件），避免函式庫版本漂移造成非邏輯性的

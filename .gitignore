@@ -22,8 +22,8 @@ wheels/
 # 雲端 GCS bucket 的本機鏡像（含影片與 camera_registry.yaml，皆由雲端輸出，不進版控）
 # pattern 涵蓋所有 bucket_ 開頭的目錄：實際用到的 bucket 除了 bucket_name1，還有
 # bucket_<日期>_<變體>（例如 bucket_20260801_small）這種依資料集命名的。
-# 尾斜線只匹配目錄，bucket 目錄若以 symlink 掛到外部碟則擋不住，需自行留意。
-bucket_*/
+# 刻意不帶尾斜線：尾斜線只匹配目錄，bucket 目錄若以 symlink 掛到外部碟會漏擋。
+bucket_*
 
 # 分析輸出（追蹤結果）；不帶尾斜線，讓 outputs 為 symlink 到外部碟時也擋得住
 outputs
