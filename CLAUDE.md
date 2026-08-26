@@ -46,6 +46,8 @@ uv run --directory libs/vfa_observability pytest   # （1 支）
 uv run --directory libs/vfa_observability ruff check .
 uv run --directory libs/vfa_config pytest          # （1 支）
 uv run --directory libs/vfa_config ruff check .
+
+uv run pytest                                      # 文件契約測試（根層 tests/，釘住文件裡可機械驗證的斷言）
 ```
 
 **torch 隔離**：workspace 為單一 `.venv`，但 `uv sync --package <pkg>` 只裝該包依賴子樹
@@ -66,7 +68,7 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 
 技術決策記在 [docs/adr/](docs/adr/)，依影響的模組分子目錄：只動一個套件的放
 `docs/adr/<套件名>/`，跨套件的放 `docs/adr/shared/`；編號是全域流水號、與子目錄無關，
-新增一律取下一號。十支 ADR 的清單、影響範圍與各自主題見
+新增一律取下一號。ADR 的清單、影響範圍與各自主題見
 [README.md 的「架構決策紀錄」](README.md#架構決策紀錄)（唯一索引，本檔不另列一份）。
 
 ### `tracking_results.parquet` 的影像尺寸欄位（跨套件硬性契約）
