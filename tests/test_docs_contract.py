@@ -35,8 +35,9 @@ CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 ADR_FILENAME_RE = re.compile(r"^(\d{3})-[a-z0-9-]+\.md$")
 ADR_INDEX_ROW_RE = re.compile(r"\[(\d+)\]\((docs/adr/[^)]+/(\d{3})-[^)]+\.md)\)")
-# matrix 的 `pkg:` 與其後同縮排層級的清單列；反向參照釘住縮排，才不會跨區塊亂抓。
-CI_MATRIX_PKG_RE = re.compile(r"^( +)pkg:\n((?:\1 +- \S+\n)+)", re.MULTILINE)
+# matrix 的 `pkg:` 與其後的清單列；反向參照釘住 key 的縮排，才不會跨區塊亂抓。
+# 清單列允許與 key 同縮排（YAML 的 indentless sequence，yq 等工具的預設輸出）。
+CI_MATRIX_PKG_RE = re.compile(r"^( +)pkg:\n((?:\1 *- \S+\n)+)", re.MULTILINE)
 CI_DIRECTORY_RE = re.compile(r"uv run --directory (\S+)")
 
 
@@ -89,18 +90,35 @@ def _ci_covered_members() -> set[str]:
     """ci.yml 實際會執行到的 workspace 成員。
 
     兩個來源合起來：matrix 的 `pkg:` 清單，以及各 job 裡寫死目標的
-    `uv run --directory <成員>`（`${{ matrix.pkg }}` 這種佔位符濾掉）。第二個來源
-    順帶讓「某個成員從 matrix 拆成獨立 job」不必改本測試。
+    `uv run --directory <成員>`（`${{ matrix.pkg }}` 這種佔位符濾掉，加不加引號都算）。
+    第二個來源順帶讓「某個成員從 matrix 拆成獨立 job」不必改本測試；matrix 有多個
+    區塊時全部併集，否則拆成兩個 matrix job 會讓後一個區塊的成員被誤報成沒涵蓋。
+
+    註解列先剔除：被 `#` 註解掉的 job 不會執行，算進來就成了靜默綠燈。被 `if:`
+    停用或被 matrix `exclude:` 排除的 job 仍會被算成有涵蓋，見本檔測試的已知缺口。
     """
-    text = CI_WORKFLOW.read_text(encoding="utf-8")
-    match = CI_MATRIX_PKG_RE.search(text)
-    if not match:
+    lines = [
+        line
+        for line in CI_WORKFLOW.read_text(encoding="utf-8").splitlines(keepends=True)
+        if not line.lstrip().startswith("#")
+    ]
+    text = "".join(lines)
+    blocks = CI_MATRIX_PKG_RE.findall(text)
+    if not blocks:
         raise RuntimeError(
             f"{CI_WORKFLOW.relative_to(REPO_ROOT)} 找不到 matrix 的 `pkg:` 清單，"
             "job 結構改了就要一併改本測試——不解析而算出空集合的話，這道護欄會靜默失效"
         )
-    covered = {line.split("- ", 1)[1].strip() for line in match.group(2).splitlines()}
-    covered |= {t for t in CI_DIRECTORY_RE.findall(text) if not t.startswith("${{")}
+    covered = {
+        line.split("- ", 1)[1].strip()
+        for _, block in blocks
+        for line in block.splitlines()
+    }
+    covered |= {
+        target
+        for raw in CI_DIRECTORY_RE.findall(text)
+        if not (target := raw.strip("\"'")).startswith("${{")
+    }
     return covered
 
 
@@ -152,8 +170,9 @@ def test_ci_runs_every_workspace_member():
     不執行——測試壞掉不會有訊號，正是本檔要消除的那種漂移。
 
     只驗「成員有沒有被列入 CI」，不驗各 job 實際跑了哪些指令：matrix job 的指令
-    目標是佔位符，要把指令與目標配對得真的解析 YAML 的 job 結構。「列入了但只跑
-    一半」不在這道護欄的涵蓋範圍內。
+    目標是佔位符，要把指令與目標配對得真的解析 YAML 的 job 結構。以下三種都算
+    「有涵蓋」而不在這道護欄的範圍內：列入了但只跑 ruff 沒跑 pytest、job 被 `if:`
+    條件停用、成員被 matrix 的 `exclude:` 排除。
     """
     covered = _ci_covered_members()
     members = set(_workspace_members())
