@@ -201,6 +201,30 @@ def test_reader_opens_with_hwaccel_and_forbids_software_fallback(monkeypatch):
     assert hwaccel.allow_software_fallback is False
 
 
+def test_reader_wraps_hwaccel_incompatibility_as_value_error(monkeypatch):
+    """硬解不成立時 PyAV 18.1.0 拋的是裸 `RuntimeError`（不是 `av.FFmpegError` 的
+    子類別，見 `av/container/input.py`「Hardware accelerated decode requested but
+    no stream is compatible」），只接 `FFmpegError` 會讓這個失敗漏網、跳過帶檔名的
+    `ValueError`，這一路對應的片段就無從查起。
+    """
+
+    def fake_open(_path, **_kwargs):
+        raise RuntimeError("Hardware accelerated decode requested but no stream is compatible")
+
+    monkeypatch.setattr(video_reader.av, "open", fake_open)
+    reader = video_reader.DailyStreamVideoReader(
+        stream_id=0,
+        segments=[],
+        data_queue=queue.Queue(),
+        free_queue=queue.Queue(),
+        ring=_RingStub(),
+        source_shape=FrameShape(height=1080, width=1920),
+    )
+
+    with pytest.raises(ValueError, match="無法開啟影片片段"):
+        reader._read_segment(_segment())
+
+
 def _timestamps_of(reader) -> list[datetime.datetime]:
     """把 `_read_segment` 放進 data_queue 的逐格時間戳取出來。"""
     stamps = []
