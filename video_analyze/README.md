@@ -22,13 +22,14 @@
 | 執行環境 | Python `>= 3.12` |
 | 套件管理 | [uv](https://docs.astral.sh/uv/)（安裝與執行皆透過 uv，整個 workspace 共用單一 root `uv.lock`） |
 | GPU | **必要，且必須是建置引擎時的那個 SM**。正式推論路徑是 TensorRT FP16 引擎（[ADR-011](../docs/adr/video_analyze/011-single-inference-backend.md)），引擎綁 GPU 也綁架構，沒有 CPU fallback——CPU 上不是「比較慢」而是一定失敗 |
-| 系統相依 | FFmpeg / 影像編解碼器（OpenCV 解 `mkv` 等格式）；`lap` 為 C 擴充，環境無對應 wheel 時需要編譯工具鏈 |
+| 系統相依 | FFmpeg / 影像編解碼器（PyAV 解 `mkv` 等格式）；`lap` 為 C 擴充，環境無對應 wheel 時需要編譯工具鏈 |
 
 執行期依賴（由 `uv sync` 安裝，各套件用途）：
 
 | 套件 | 用途 |
 | --- | --- |
-| `opencv-python` | 影片片段讀取與解碼 |
+| `av` | 影片片段讀取與解碼（PyAV，wheel 自帶 FFmpeg）|
+| `opencv-python` | 影格縮放與 letterbox 補邊（`services/letterbox.py`）|
 | `ultralytics` | YOLO 偵測 |
 | `torch` / `torchvision` | 前處理／後處理的張量運算，以及建置與比對工具的 Torch FP32 基準（與 `ultralytics` 一併釘住版本） |
 | `tensorrt-cu12` | 正式推論後端。版本帶 **10.8 ～ 10.16**：下緣是 sm120 的 kernel 支援，上緣是 11.0.0 起 strongly-typed 成為預設、移除 `BuilderFlag.FP16`。帶內取已實測的 `10.13.3.9` |

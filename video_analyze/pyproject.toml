@@ -5,9 +5,10 @@ description = "YOLO + ByteTrack multi-stream detection and tracking (GPU, multip
 readme = "README.md"
 requires-python = ">=3.12"
 # 版本 pin 成與 golden 產生時相同：影響偵測數值的推理堆疊
-# （torch/torchvision/ultralytics/numpy/opencv）與輸出格式（polars/pyarrow）逐一
+# （torch/torchvision/ultralytics/numpy/opencv/av）與輸出格式（polars/pyarrow）逐一
 # 對齊，讓 golden 比對只反映「拆分是否改動邏輯」，排除函式庫版本漂移這個變數。
 dependencies = [
+    "av==18.1.0",
     "opencv-python==4.13.0.92",
     "pydantic==2.13.4",
     "pydantic-settings[toml]==2.14.2",

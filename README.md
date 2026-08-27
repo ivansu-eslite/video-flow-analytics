@@ -84,7 +84,7 @@ flowchart LR
 | 執行環境 | Python `>= 3.12`（`.python-version` 釘 `3.12`） |
 | 套件管理 | [uv](https://docs.astral.sh/uv/)（安裝與執行皆透過 uv；單一 root `uv.lock`） |
 | GPU | `video_analyze` **必要**：正式推論路徑是 TensorRT FP16 引擎（[ADR-011](docs/adr/video_analyze/011-single-inference-backend.md)），引擎綁 GPU 也綁架構（`_sm75` 的引擎只能在 Turing 上跑），沒有 CPU fallback，且引擎要用 `video_analyze/tools/build_engine.py` 在**目標卡上**自行建置；`zone_mapping`／`line_counting`／`flow_report` 為純 CPU |
-| 系統相依 | FFmpeg / 影像編解碼器（OpenCV 解 `mkv` 等格式）；`lap` 為 C 擴充，環境無對應 wheel 時需要編譯工具鏈 |
+| 系統相依 | FFmpeg / 影像編解碼器（PyAV 解 `mkv` 等格式）；`lap` 為 C 擴充，環境無對應 wheel 時需要編譯工具鏈 |
 
 各套件的執行期依賴與模型權重說明見各自 README；四包的推理堆疊與輸出格式相關套件版本
 **pin 成彼此一致**，避免版本漂移造成非邏輯性的輸出差異。
