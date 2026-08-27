@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import av
 import numpy as np
+from av.codec.hwaccel import HWAccel
 
 from video_analyze.services.frame_ring import FrameRing
 from video_analyze.services.letterbox import (
@@ -218,7 +219,14 @@ class DailyStreamVideoReader:
                 `source_shape` 不符（見迴圈內註解）。
         """
         try:
-            container = av.open(str(segment.path))
+            container = av.open(
+                str(segment.path),
+                # `allow_software_fallback=False`：硬解不成立要在這裡直接拋出，不准
+                # 靜默退回軟解——允許 fallback 的話，量到的效能數字會是另一個組態的
+                # （同 D⑫ 的教訓，見 report.md 5.2「第二階段」）。與已驗證過的
+                # `outputs/vfa_perf/code/bench_pyav_ctx.py:open_container` 同一組參數。
+                hwaccel=HWAccel(device_type="cuda", allow_software_fallback=False),
+            )
         except av.FFmpegError as exc:
             raise ValueError(f"無法開啟影片片段: {segment.path}") from exc
         try:
