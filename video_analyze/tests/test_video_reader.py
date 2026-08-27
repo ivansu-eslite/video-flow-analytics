@@ -1,5 +1,6 @@
 import datetime
 import queue
+from fractions import Fraction
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -74,18 +75,33 @@ class _FakeAvFrame:
 
 
 class _FakeStream:
-    def __init__(self, average_rate):
+    """視訊串流的替身。速率用 `Fraction`，與 `av` 實際回傳的型別一致。"""
+
+    def __init__(self, average_rate, guessed_rate):
         self.average_rate = average_rate
+        self.guessed_rate = guessed_rate
+
+
+class _FakeStreams:
+    def __init__(self, video):
+        self.video = video
 
 
 class _FakeContainer:
     """`av.open()` 的替身，依序吐出指定的影格。"""
 
-    def __init__(self, frames, average_rate=30.0):
+    def __init__(
+        self,
+        frames,
+        average_rate=Fraction(30, 1),
+        guessed_rate=Fraction(30, 1),
+        has_video=True,
+    ):
         self._frames = frames
-        self.streams = type("_Streams", (), {"video": [_FakeStream(average_rate)]})()
+        streams = [_FakeStream(average_rate, guessed_rate)] if has_video else []
+        self.streams = _FakeStreams(streams)
 
-    def decode(self, video=0):  # noqa: A002 — 對齊 av 的介面命名
+    def decode(self, video=0):  # 參數名對齊 av 的介面
         for frame in self._frames:
             yield _FakeAvFrame(frame)
 
@@ -105,10 +121,10 @@ class _RingStub:
         self.written.append(frame.shape)
 
 
-def _reader_over(monkeypatch, frames, source_shape):
+def _reader_over(monkeypatch, frames, source_shape, **container_kwargs):
     """組一個讀取器，讓 `_read_segment` 讀到 `frames` 這幾格。"""
     monkeypatch.setattr(
-        video_reader.av, "open", lambda _path: _FakeContainer(frames)
+        video_reader.av, "open", lambda _path: _FakeContainer(frames, **container_kwargs)
     )
     free_queue: queue.Queue = queue.Queue()
     for slot in range(_RingStub.num_slots):
@@ -156,3 +172,91 @@ def test_reader_letterboxes_every_frame_to_the_inference_size(monkeypatch):
     reader._read_segment(_segment())
 
     assert reader.ring.written == [(INFER_HEIGHT, INFER_WIDTH, 3)] * 3
+
+
+def _timestamps_of(reader) -> list[datetime.datetime]:
+    """把 `_read_segment` 放進 data_queue 的逐格時間戳取出來。"""
+    stamps = []
+    while not reader.data_queue.empty():
+        _slot, _frame_index, timestamp = reader.data_queue.get()
+        stamps.append(timestamp)
+    return stamps
+
+
+def test_reader_derives_frame_timestamps_from_a_fractional_frame_rate(monkeypatch):
+    """`av` 的速率是 `Fraction`，必須轉成 float 才算得出 `timedelta`。
+
+    直接把 `Fraction` 餵給 `timedelta(seconds=...)` 會拋 `TypeError`，而那是在讀取
+    子進程裡、每一支真實片段都會走到的路徑；替身若用 float 就完全測不到這件事。
+    """
+    frames = [np.zeros((1080, 1920, 3), dtype=np.uint8) for _ in range(3)]
+    reader = _reader_over(
+        monkeypatch,
+        frames,
+        FrameShape(height=1080, width=1920),
+        average_rate=Fraction(15, 1),
+    )
+
+    reader._read_segment(_segment())
+
+    start = _segment().start
+    assert _timestamps_of(reader) == [
+        start,
+        start + datetime.timedelta(seconds=1 / 15),
+        start + datetime.timedelta(seconds=2 / 15),
+    ]
+
+
+def test_reader_falls_back_to_guessed_rate_when_average_rate_is_missing(monkeypatch):
+    """容器沒標 `avg_frame_rate` 時退回 `guessed_rate`，比照 cv2 的 `r_frame_rate`。
+
+    不接這個 fallback 的話，該攝影機一整天會以「無法讀取影片 FPS」中止。
+    """
+    frames = [np.zeros((1080, 1920, 3), dtype=np.uint8) for _ in range(2)]
+    reader = _reader_over(
+        monkeypatch,
+        frames,
+        FrameShape(height=1080, width=1920),
+        average_rate=None,
+        guessed_rate=Fraction(15, 1),
+    )
+
+    reader._read_segment(_segment())
+
+    start = _segment().start
+    assert _timestamps_of(reader) == [start, start + datetime.timedelta(seconds=1 / 15)]
+
+
+def test_reader_rejects_a_segment_whose_frame_rate_is_unknown(monkeypatch):
+    """兩個速率都取不到就 fail loud——猜一個 FPS 會讓整天的時間戳靜默錯位。"""
+    frames = [np.zeros((1080, 1920, 3), dtype=np.uint8)]
+    reader = _reader_over(
+        monkeypatch,
+        frames,
+        FrameShape(height=1080, width=1920),
+        average_rate=Fraction(0, 1),
+        guessed_rate=None,
+    )
+
+    with pytest.raises(ValueError, match="FPS"):
+        reader._read_segment(_segment())
+
+
+def test_reader_rejects_a_segment_without_a_video_stream(monkeypatch):
+    """ffmpeg 開得起來但沒有視訊串流時，要帶著檔名擋下，不是拋裸的 `IndexError`。"""
+    reader = _reader_over(
+        monkeypatch, [], FrameShape(height=1080, width=1920), has_video=False
+    )
+
+    with pytest.raises(ValueError, match="視訊串流"):
+        reader._read_segment(_segment())
+
+
+def test_probe_frame_shape_rejects_a_segment_without_a_video_stream(monkeypatch):
+    """探測解析度在主進程跑，訊息裡沒有檔名的話整批中止後查不出是哪一支片段。"""
+    monkeypatch.setattr(
+        video_reader.av, "open", lambda _path: _FakeContainer([], has_video=False)
+    )
+
+    with pytest.raises(ValueError, match="視訊串流"):
+        video_reader.probe_frame_shape(_segment())

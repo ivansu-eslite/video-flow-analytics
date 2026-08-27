@@ -125,13 +125,17 @@ def probe_frame_shape(segment: SegmentInfo) -> FrameShape:
         該路的 `FrameShape(height, width)`。
 
     Raises:
-        ValueError: 片段無法開啟，或讀不到任何影格。
+        ValueError: 片段無法開啟、不含視訊串流，或讀不到任何影格。
     """
     try:
         container = av.open(str(segment.path))
     except av.FFmpegError as exc:
         raise ValueError(f"無法開啟影片片段: {segment.path}") from exc
     try:
+        if not container.streams.video:
+            # ffmpeg 開得起來但沒有視訊串流（例如只有音軌）時，`decode(video=0)` 會拋出
+            # 不帶檔名的 `IndexError`；cv2 這種檔案是 `isOpened()` 為否，走 fail loud。
+            raise ValueError(f"片段不含視訊串流: {segment.path}")
         frame = next(container.decode(video=0), None)
         if frame is None:
             raise ValueError(f"片段讀不到任何影格，無法探測解析度: {segment.path}")
@@ -210,7 +214,7 @@ class DailyStreamVideoReader:
         """讀完單一片段的所有影格，逐格核對解析度後縮放、寫入 slot。
 
         Raises:
-            ValueError: 片段無法開啟、讀不到 FPS，或任一影格的解析度與
+            ValueError: 片段無法開啟、不含視訊串流、讀不到 FPS，或任一影格的解析度與
                 `source_shape` 不符（見迴圈內註解）。
         """
         try:
@@ -218,10 +222,19 @@ class DailyStreamVideoReader:
         except av.FFmpegError as exc:
             raise ValueError(f"無法開啟影片片段: {segment.path}") from exc
         try:
+            if not container.streams.video:
+                # 同 `probe_frame_shape`：沒有視訊串流時要帶檔名擋下，不要讓
+                # `streams.video[0]` 拋出不帶檔名的 `IndexError`。
+                raise ValueError(f"片段不含視訊串流: {segment.path}")
             stream = container.streams.video[0]
-            fps = stream.average_rate
+            # `average_rate` 是容器標的 `avg_frame_rate`，某些檔案為 0／None；cv2 的
+            # `CAP_PROP_FPS` 這時會退回 `r_frame_rate`，`guessed_rate` 是同一個值，
+            # 不接的話這路整天會以「無法讀取影片 FPS」中止。
+            fps = stream.average_rate or stream.guessed_rate
             if not fps or fps <= 0:
                 raise ValueError(f"無法讀取影片 FPS: {segment.path}")
+            # `average_rate`／`guessed_rate` 是 `Fraction`，而下游用它算 `timedelta`
+            # （`Fraction` 會讓 `timedelta(seconds=...)` 拋 `TypeError`）。
             fps = float(fps)
             frame_index = 0
             for av_frame in container.decode(video=0):
