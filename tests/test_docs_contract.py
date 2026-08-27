@@ -10,6 +10,10 @@
 lib 清單來自 libs/ 目錄、兩者合起來要等於 workspace members，新增成員沒被納入檢查
 時會紅燈。硬編碼的話，新增一個 lib 只會讓它靜默落在護欄外。
 
+同一個立場也套用到 CI 設定：.github/workflows/ci.yml 的成員清單是人工維護的，
+這裡把它釘回 workspace members——否則新增成員時本檔的文件斷言會因 libs/* glob
+自動納入而通過，該成員的 lint 與測試卻靜默不執行。
+
 執行方式見 CLAUDE.md 常用指令段——本測試只用標準庫與 pytest，刻意不經 workspace
 解析執行，避免為了跑文件檢查而裝上 video_analyze 的 torch 依賴子樹。
 """
@@ -26,10 +30,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ADR_DIR = REPO_ROOT / "docs" / "adr"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 ROOT_README = REPO_ROOT / "README.md"
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 ADR_FILENAME_RE = re.compile(r"^(\d{3})-[a-z0-9-]+\.md$")
 ADR_INDEX_ROW_RE = re.compile(r"\[(\d+)\]\((docs/adr/[^)]+/(\d{3})-[^)]+\.md)\)")
+# matrix 的 `pkg:` 與其後同縮排層級的清單列；反向參照釘住縮排，才不會跨區塊亂抓。
+CI_MATRIX_PKG_RE = re.compile(r"^( +)pkg:\n((?:\1 +- \S+\n)+)", re.MULTILINE)
+CI_DIRECTORY_RE = re.compile(r"uv run --directory (\S+)")
 
 
 def _packages_from_claude_md() -> list[str]:
@@ -77,6 +85,25 @@ DOC_FILES = [
 ]
 
 
+def _ci_covered_members() -> set[str]:
+    """ci.yml 實際會執行到的 workspace 成員。
+
+    兩個來源合起來：matrix 的 `pkg:` 清單，以及各 job 裡寫死目標的
+    `uv run --directory <成員>`（`${{ matrix.pkg }}` 這種佔位符濾掉）。第二個來源
+    順帶讓「某個成員從 matrix 拆成獨立 job」不必改本測試。
+    """
+    text = CI_WORKFLOW.read_text(encoding="utf-8")
+    match = CI_MATRIX_PKG_RE.search(text)
+    if not match:
+        raise RuntimeError(
+            f"{CI_WORKFLOW.relative_to(REPO_ROOT)} 找不到 matrix 的 `pkg:` 清單，"
+            "job 結構改了就要一併改本測試——不解析而算出空集合的話，這道護欄會靜默失效"
+        )
+    covered = {line.split("- ", 1)[1].strip() for line in match.group(2).splitlines()}
+    covered |= {t for t in CI_DIRECTORY_RE.findall(text) if not t.startswith("${{")}
+    return covered
+
+
 def _adr_files() -> list[Path]:
     """所有 ADR 檔。故意用寬鬆的 glob，放錯位置或命名不合規的檔要被下面的測試抓到。"""
     return sorted(ADR_DIR.glob("**/*.md"))
@@ -114,6 +141,25 @@ def test_coverage_matches_workspace_members():
     covered = {*PACKAGES, *(f"libs/{lib}" for lib in LIBS)}
     assert covered == set(_workspace_members()), (
         f"涵蓋範圍 {sorted(covered)} 與 workspace 成員 {_workspace_members()} 不一致"
+    )
+
+
+def test_ci_runs_every_workspace_member():
+    """CI 的涵蓋範圍也要等於 workspace 成員，新增成員不能靜默不被 CI 執行。
+
+    這是上一支斷言的另一半。`libs/*` 是 glob，新增一個 lib 時上一支會自動納入而
+    通過；ci.yml 的清單卻是人工維護的，沒有這道斷言的話該成員的 lint 與測試靜默
+    不執行——測試壞掉不會有訊號，正是本檔要消除的那種漂移。
+
+    只驗「成員有沒有被列入 CI」，不驗各 job 實際跑了哪些指令：matrix job 的指令
+    目標是佔位符，要把指令與目標配對得真的解析 YAML 的 job 結構。「列入了但只跑
+    一半」不在這道護欄的涵蓋範圍內。
+    """
+    covered = _ci_covered_members()
+    members = set(_workspace_members())
+    assert covered == members, (
+        f"沒被 CI 執行的 workspace 成員：{sorted(members - covered)}；"
+        f"CI 列了但不是 workspace 成員的：{sorted(covered - members)}"
     )
 
 
