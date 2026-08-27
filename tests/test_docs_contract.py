@@ -86,13 +86,28 @@ DOC_FILES = [
 
 
 def _matrix_pkgs(job: dict) -> set[str]:
-    """一個 job 的 matrix 會展開出哪些 `pkg` 值（`include` 算進來、`exclude` 扣掉）。"""
+    """一個 job 的 matrix 會展開出哪些 `pkg` 值（`include` 算進來、`exclude` 扣掉）。
+
+    `pkg` 不是清單就當沒有（`${{ fromJSON(...) }}` 這種動態寫法會是字串，逐字元
+    迭代出來的單字元集合比誤報還難解讀）。`exclude` 只認單鍵的條目：GitHub 的
+    語義是「列出的鍵全部吻合才排除」，多維 matrix 的 `{pkg: x, os: y}` 排掉的只是
+    其中一種組合，`x` 仍會在別的 os 上跑，扣掉就成了誤報。
+    """
     matrix = job.get("strategy", {}).get("matrix", {})
-    if not isinstance(matrix, dict):  # matrix 整個是 ${{ fromJSON(...) }} 的動態寫法
+    if not isinstance(matrix, dict):  # matrix 整個是動態運算式
         return set()
-    pkgs = {str(p) for p in matrix.get("pkg", [])}
-    pkgs |= {str(e["pkg"]) for e in matrix.get("include", []) if "pkg" in e}
-    return pkgs - {str(e["pkg"]) for e in matrix.get("exclude", []) if "pkg" in e}
+    raw = matrix.get("pkg", [])
+    pkgs = {str(p) for p in raw} if isinstance(raw, list) else set()
+    pkgs |= {
+        str(e["pkg"])
+        for e in matrix.get("include", [])
+        if isinstance(e, dict) and "pkg" in e
+    }
+    return pkgs - {
+        str(e["pkg"])
+        for e in matrix.get("exclude", [])
+        if isinstance(e, dict) and set(e) == {"pkg"}
+    }
 
 
 def _ci_covered_members() -> set[str]:
@@ -119,11 +134,15 @@ def _ci_covered_members() -> set[str]:
         )
     covered: set[str] = set()
     for job in jobs.values():
+        if not isinstance(job, dict):  # job 主體被註解掉、只剩名字
+            continue
         covered |= _matrix_pkgs(job)
         for step in job.get("steps", []):
-            match = CI_DIRECTORY_RE.search(str(step.get("run", "")))
-            if match and not match.group(1).startswith("${{"):
-                covered.add(match.group(1))
+            # 一個 step 可能是 `run: |` 多行區塊，逐個 match 取，不能只取第一個
+            for raw in CI_DIRECTORY_RE.findall(str(step.get("run", ""))):
+                target = raw.strip("\"'")
+                if not target.startswith("${{"):
+                    covered.add(target)
     return covered
 
 

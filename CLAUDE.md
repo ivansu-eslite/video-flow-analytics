@@ -64,8 +64,9 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 四包重複）；`--directory` 切進該套件資料夾，才會只解析到該套件自己的 `tests/`。
 
 根層的文件契約測試（`tests/`）要**指定路徑**並帶 `--no-project`：不指定路徑會遞迴收集到
-四包而撞名；`--no-project` 則是因為該測試只用標準庫與 pytest，經 workspace 解析會為了跑
-文件檢查而裝上 `video_analyze` 的 torch 依賴子樹。**不要改用在根 `pyproject.toml` 填
+四包而撞名；`--no-project` 則是因為該測試的相依只有 pytest 與 pyyaml（後者用來解析
+`.github/workflows/ci.yml`），經 workspace 解析會為了跑文件檢查而裝上 `video_analyze`
+的 torch 依賴子樹。**不要改用在根 `pyproject.toml` 填
 `testpaths` 的寫法**——那會讓 `uv run --package <pkg> pytest` 的撞名保護消失，變成靜默
 只跑文件測試、一支套件測試都沒跑卻回報通過。
 
