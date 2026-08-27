@@ -14,8 +14,9 @@ lib 清單來自 libs/ 目錄、兩者合起來要等於 workspace members，新
 這裡把它釘回 workspace members——否則新增成員時本檔的文件斷言會因 libs/* glob
 自動納入而通過，該成員的 lint 與測試卻靜默不執行。
 
-執行方式見 CLAUDE.md 常用指令段——本測試只用標準庫與 pytest，刻意不經 workspace
-解析執行，避免為了跑文件檢查而裝上 video_analyze 的 torch 依賴子樹。
+執行方式見 CLAUDE.md 常用指令段——本測試刻意不經 workspace 解析執行，避免為了跑
+文件檢查而裝上 video_analyze 的 torch 依賴子樹；相依只有 pytest 與 pyyaml（後者用來
+解析 ci.yml，理由見 _ci_covered_members），兩者都以 `--with` 帶進去。
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ADR_DIR = REPO_ROOT / "docs" / "adr"
@@ -35,9 +37,6 @@ CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 ADR_FILENAME_RE = re.compile(r"^(\d{3})-[a-z0-9-]+\.md$")
 ADR_INDEX_ROW_RE = re.compile(r"\[(\d+)\]\((docs/adr/[^)]+/(\d{3})-[^)]+\.md)\)")
-# matrix 的 `pkg:` 與其後的清單列；反向參照釘住 key 的縮排，才不會跨區塊亂抓。
-# 清單列允許與 key 同縮排（YAML 的 indentless sequence，yq 等工具的預設輸出）。
-CI_MATRIX_PKG_RE = re.compile(r"^( +)pkg:\n((?:\1 *- \S+\n)+)", re.MULTILINE)
 CI_DIRECTORY_RE = re.compile(r"uv run --directory (\S+)")
 
 
@@ -86,39 +85,45 @@ DOC_FILES = [
 ]
 
 
+def _matrix_pkgs(job: dict) -> set[str]:
+    """一個 job 的 matrix 會展開出哪些 `pkg` 值（`include` 算進來、`exclude` 扣掉）。"""
+    matrix = job.get("strategy", {}).get("matrix", {})
+    if not isinstance(matrix, dict):  # matrix 整個是 ${{ fromJSON(...) }} 的動態寫法
+        return set()
+    pkgs = {str(p) for p in matrix.get("pkg", [])}
+    pkgs |= {str(e["pkg"]) for e in matrix.get("include", []) if "pkg" in e}
+    return pkgs - {str(e["pkg"]) for e in matrix.get("exclude", []) if "pkg" in e}
+
+
 def _ci_covered_members() -> set[str]:
     """ci.yml 實際會執行到的 workspace 成員。
 
-    兩個來源合起來：matrix 的 `pkg:` 清單，以及各 job 裡寫死目標的
-    `uv run --directory <成員>`（`${{ matrix.pkg }}` 這種佔位符濾掉，加不加引號都算）。
-    第二個來源順帶讓「某個成員從 matrix 拆成獨立 job」不必改本測試；matrix 有多個
-    區塊時全部併集，否則拆成兩個 matrix job 會讓後一個區塊的成員被誤報成沒涵蓋。
+    兩個來源合起來：各 job 的 matrix `pkg` 值，以及 step 的 `run` 裡寫死目標的
+    `uv run --directory <成員>`（`${{ matrix.pkg }}` 這種佔位符濾掉）。第二個來源
+    讓「某個成員從 matrix 拆成獨立 job」不必改本測試，第一個來源則涵蓋反方向。
 
-    註解列先剔除：被 `#` 註解掉的 job 不會執行，算進來就成了靜默綠燈。被 `if:`
-    停用或被 matrix `exclude:` 排除的 job 仍會被算成有涵蓋，見本檔測試的已知缺口。
+    **用 YAML 解析而非掃文字**：改動初版用正則掃整份檔案，review 實測出十種合法的
+    ci.yml 寫法會給錯答案——行尾註解、`include:`、清單項帶引號、indentless sequence、
+    檔尾無換行都會誤紅，而被 `#` 註解掉的 job 更是靜默算成「有涵蓋」。這些全是
+    YAML 語法層的事，交給 parser 才不會每加一種寫法就多一個破口。
+
+    仍擋不到的是被 `if:` 條件停用的 job：條件要在 GitHub 的執行期才求得出值。
+    見本檔測試的已知缺口。
     """
-    lines = [
-        line
-        for line in CI_WORKFLOW.read_text(encoding="utf-8").splitlines(keepends=True)
-        if not line.lstrip().startswith("#")
-    ]
-    text = "".join(lines)
-    blocks = CI_MATRIX_PKG_RE.findall(text)
-    if not blocks:
+    workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+    jobs = workflow.get("jobs") if isinstance(workflow, dict) else None
+    if not jobs:
         raise RuntimeError(
-            f"{CI_WORKFLOW.relative_to(REPO_ROOT)} 找不到 matrix 的 `pkg:` 清單，"
-            "job 結構改了就要一併改本測試——不解析而算出空集合的話，這道護欄會靜默失效"
+            f"{CI_WORKFLOW.relative_to(REPO_ROOT)} 解析不出任何 job。"
+            "檔案搬走或結構改寫時要一併改本測試——算出空集合的話，這道護欄會靜默失效"
         )
-    covered = {
-        line.split("- ", 1)[1].strip()
-        for _, block in blocks
-        for line in block.splitlines()
-    }
-    covered |= {
-        target
-        for raw in CI_DIRECTORY_RE.findall(text)
-        if not (target := raw.strip("\"'")).startswith("${{")
-    }
+    covered: set[str] = set()
+    for job in jobs.values():
+        covered |= _matrix_pkgs(job)
+        for step in job.get("steps", []):
+            match = CI_DIRECTORY_RE.search(str(step.get("run", "")))
+            if match and not match.group(1).startswith("${{"):
+                covered.add(match.group(1))
     return covered
 
 
@@ -163,22 +168,26 @@ def test_coverage_matches_workspace_members():
 
 
 def test_ci_runs_every_workspace_member():
-    """CI 的涵蓋範圍也要等於 workspace 成員，新增成員不能靜默不被 CI 執行。
+    """每個 workspace 成員都要被 CI 執行到，新增成員不能靜默落在 CI 之外。
 
     這是上一支斷言的另一半。`libs/*` 是 glob，新增一個 lib 時上一支會自動納入而
     通過；ci.yml 的清單卻是人工維護的，沒有這道斷言的話該成員的 lint 與測試靜默
     不執行——測試壞掉不會有訊號，正是本檔要消除的那種漂移。
 
-    只驗「成員有沒有被列入 CI」，不驗各 job 實際跑了哪些指令：matrix job 的指令
-    目標是佔位符，要把指令與目標配對得真的解析 YAML 的 job 結構。以下三種都算
-    「有涵蓋」而不在這道護欄的範圍內：列入了但只跑 ruff 沒跑 pytest、job 被 `if:`
-    條件停用、成員被 matrix 的 `exclude:` 排除。
+    **只檢查單向（成員 ⊆ CI 涵蓋）**，不要求兩者相等：CI 跑了成員以外的目錄
+    （例如 `uv run --directory .`）不是漂移，拿相等去驗只會製造與本斷言目的無關的
+    紅燈。反方向——成員被刪掉但 ci.yml 還列著——本來就會讓該 job 以「目錄不存在」
+    失敗，不需要這裡再驗一次。
+
+    只驗「成員有沒有被 CI 執行到」，不驗各 job 實際跑了哪些指令：matrix job 的指令
+    目標是佔位符，要把指令與目標配對得建模 GitHub Actions 的展開規則。兩種情況因此
+    算「有涵蓋」而不在範圍內：列入了但只跑 ruff 沒跑 pytest、job 被 `if:` 條件停用
+    （條件要在 GitHub 的執行期才求得出值）。
     """
-    covered = _ci_covered_members()
-    members = set(_workspace_members())
-    assert covered == members, (
-        f"沒被 CI 執行的 workspace 成員：{sorted(members - covered)}；"
-        f"CI 列了但不是 workspace 成員的：{sorted(covered - members)}"
+    missing = set(_workspace_members()) - _ci_covered_members()
+    assert not missing, (
+        f"這些 workspace 成員沒被 CI 執行到：{sorted(missing)}。"
+        "新增成員時 .github/workflows/ci.yml 要一併加上，否則它的 lint 與測試靜默不跑"
     )
 
 

@@ -52,7 +52,7 @@ uv run --directory libs/vfa_observability ruff check .
 uv run --directory libs/vfa_config pytest          # （1 支）
 uv run --directory libs/vfa_config ruff check .
 
-uv run --no-project --with pytest pytest tests/    # 文件契約測試（釘住文件裡可機械驗證的斷言）
+uv run --no-project --with pytest --with pyyaml pytest tests/    # 文件契約測試（釘住文件裡可機械驗證的斷言）
 ```
 
 **torch 隔離**：workspace 為單一 `.venv`，但 `uv sync --package <pkg>` 只裝該包依賴子樹

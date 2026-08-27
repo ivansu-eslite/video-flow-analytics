@@ -7,9 +7,9 @@ on:
     branches: [main]
 
 jobs:
-  # 根層 tests/ 的文件契約測試。--no-project 是因為它只用標準庫與 pytest，
-  # 經 workspace 解析會為了跑文件檢查而 resolve 八十幾個套件、裝上 video_analyze
-  # 的 torch 依賴子樹。ruff 同理；根 pyproject.toml 沒有 [project] 區塊，
+  # 根層 tests/ 的文件契約測試。--no-project 是因為它的相依只有 pytest 與 pyyaml
+  # （後者用來解析本檔），經 workspace 解析會為了跑文件檢查而 resolve 八十幾個
+  # 套件、裝上 video_analyze 的 torch 依賴子樹。ruff 同理；根 pyproject.toml 沒有 [project] 區塊，
   # 但 [tool.ruff] 仍會被讀到（line-length 100、select E/F/I/W）。
   docs-contract:
     name: docs-contract (root tests/)
@@ -19,7 +19,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
-      - run: uv run --no-project --with pytest pytest tests/
+      - run: uv run --no-project --with pytest --with pyyaml pytest tests/
       - run: uv run --no-project --with ruff ruff check tests/
 
   # 四包中的三個 CPU-only 成員 + 三個共用 lib：pytest/ruff 一律用 --directory（切 cwd）
