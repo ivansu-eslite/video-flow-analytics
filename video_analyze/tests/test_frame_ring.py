@@ -80,7 +80,7 @@ def test_allocation_still_works_where_the_shm_diagnostics_are_unavailable(monkey
 def test_write_slot_rejects_a_frame_of_a_different_shape():
     """尺寸不符直接拋錯（fail-loud）：緩衝是照推論尺寸一次配置的。
 
-    產線上最可能的成因是讀取端漏了 `letterbox()`；`test_letterbox.py` 用真實的推論
+    產線上最可能的成因是讀取端漏了 `letterbox_nv12()`；`test_letterbox.py` 用真實的推論
     尺寸釘那個組合，這裡只驗這道檢查本身在自訂尺寸下也在。
     """
     ring = _make_ring()
