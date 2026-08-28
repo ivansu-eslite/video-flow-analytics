@@ -66,9 +66,11 @@ def test_batch_mixes_sources_when_the_starting_stream_runs_short():
     """起點那路供不上滿批時，同一批會由下一路補齊——混來源批次仍可能發生。
 
     正式執行時各路解碼速度不同（4K 那路補滿一批要數百 ms），輪替過後回到同一路時
-    queue 未必已補滿。混來源批次的影格尺寸可能不同，ultralytics 會走
-    `same_shapes=False` 的 letterbox 分支，前處理隨批次組成變動——這是 CLAUDE.md 記載
-    的「`tracking_results.parquet` 不可重現」來源之一，本次改動沒有消除它。
+    queue 未必已補滿，所以混來源批次仍會發生，本次改動沒有消除它。但它**不會改變偵測
+    結果**：影格在讀取端就已縮成統一的推論尺寸（issue #108），進到 ultralytics 的一批
+    形狀相同，走不到 `same_shapes=False` 那條會隨批次組成變動的 letterbox 分支。實測
+    佐證見 CLAUDE.md 的「`tracking_results.parquet` 的重現性與正確性判準」——只改推論
+    批次大小（16→8，批次組成必然不同）跑出來的座標與基準逐值相同。
     """
     num_streams = 3
     pipeline = _make_pipeline(num_streams)
