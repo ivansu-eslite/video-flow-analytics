@@ -409,6 +409,39 @@ def test_merge_accepts_a_part_from_a_shard_that_saw_nothing(tmp_path):
     assert pl.read_parquet(results_path).schema == pl.Schema(TRACKING_RESULTS_SCHEMA)
 
 
+def test_merge_streams_row_groups_instead_of_reading_whole_parts(tmp_path, monkeypatch):
+    """合併要逐 row group 搬，不能把整支 part 具體化成一個 arrow table。
+
+    一整天的追蹤明細磁碟上約 2 GB、攤成 arrow 是 4.9 GB，而 `TRACKER__SHARDS=1`
+    （量測用的對照組）就是一支 part 裝整天。`pq.read_table` 那條路徑輸出完全正確，
+    只是峰值記憶體跟著天數規模走——沒有任何其他訊號。
+
+    把批次列數壓到 3 才驗得到：正式值是 65536，而測試資料不可能有那麼多列。
+    """
+    results_path = _results_path(tmp_path)
+    parts_dir = parts_dir_for(results_path)
+    parts_dir.mkdir(parents=True)
+    part_path = shard_part_path(parts_dir, 0)
+    _write_part(part_path, "loc_cam001", rows=9)
+    # 重寫成多個 row group，讓「有沒有串流」看得出差別
+    pq.write_table(pq.read_table(part_path), part_path, row_group_size=3)
+    batch_rows: list[int] = []
+    real_write_batch = pq.ParquetWriter.write_batch
+
+    def _recording_write_batch(self, batch, *args, **kwargs):
+        batch_rows.append(batch.num_rows)
+        return real_write_batch(self, batch, *args, **kwargs)
+
+    monkeypatch.setattr(op.pq.ParquetWriter, "write_batch", _recording_write_batch)
+    monkeypatch.setattr(op, "_MERGE_BATCH_ROWS", 3)
+
+    rows = merge_parts(results_path, [part_path])
+
+    assert rows == 9
+    assert batch_rows, "沒有走 write_batch，整支 part 被讀進記憶體了"
+    assert max(batch_rows) < 9, f"一次搬了 {max(batch_rows)} 列，等於整支讀進來"
+
+
 def test_merge_removes_the_parts_directory(tmp_path):
     """正常跑完之後 parts 目錄不該留下，輸出樹要與分片前逐檔一致。"""
     results_path = _results_path(tmp_path)

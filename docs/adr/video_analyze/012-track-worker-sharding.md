@@ -116,7 +116,9 @@ description 不屬於 fd，因此只要任一進程還開著它鎖就在。**iss
 - 跑到一半時輸出目錄多一個 `tracking_results.parts/`，正常跑完就不存在。`.tmp` 殘檔的
   形態也跟著從「輸出目錄下的一個大檔」變成「parts 目錄裡的數個檔」。
 - 合併是一段新的序列尾巴（1–2 GB 的讀入再寫出），耗時與列數記進 log。磁碟峰值在合併
-  期間約 2 倍（part 與正式檔並存）。
+  期間約 2 倍（part 與正式檔並存）。**搬運逐批串流**（`iter_batches`）而不是
+  `pq.read_table`：整天 4500 萬列攤成 arrow table 是 4.9 GB，而 `TRACKER__SHARDS=1`
+  就是一支 part 裝整天——那條路徑輸出完全正確，只是峰值記憶體跟著天數規模走。
 - 緩衝隨 N 線性成長：`_FLUSH_EVERY_ROWS` 是每個 collector 各自的門檻，N=2 時同時開著
   兩個。20 萬列以每列十餘個 Python 物件估約 40–80 MB，加倍後仍在百 MB 級，故本次不動
   這個值、只記錄實測 RSS。

@@ -53,6 +53,11 @@ _CLAIM_ATTEMPTS = 5
 # 由呼叫端明確給定，本模組不掃目錄。
 _MERGE_TMP_FILENAME = "merged.parquet.tmp"
 
+# 合併時一次搬多少列。明寫而不是吃 `iter_batches` 的預設值，是因為它決定合併的峰值
+# 記憶體：實際峰值是「一個 row group 或這個數字，取大的」——row group 由寫入端的
+# `_FLUSH_EVERY_ROWS`（20 萬列）決定，這裡設得比它小沒有意義，設得比它大則白白抬高峰值。
+_MERGE_BATCH_ROWS = 65_536
+
 
 def parts_dir_for(results_path: Path) -> Path:
     """回傳 `results_path` 對應的 parts 目錄（與正式輸出同一層）。"""
@@ -239,9 +244,12 @@ def plan_routes(stream_fps: list[float], shards: int) -> list[int]:
 def merge_parts(results_path: Path, part_paths: list[Path]) -> int:
     """把各片的 part 檔合併成下游看的那一個 parquet，成功後清掉 parts 目錄。
 
-    逐檔 `pq.read_table` 再寫進單一 writer：一支 part 是整天的 1/N，逐檔讀入的峰值與
-    天數規模無關。全部 part 由同一份 `TRACKING_RESULTS_SCHEMA` 產出，schema 天然一致；
-    混入異質 part 時 `write_table` 會拋錯，那是想要的 fail loud。
+    **逐批串流搬運，不整支讀進記憶體**：一整天的追蹤明細在磁碟上約 2 GB（4500 萬列），
+    攤成 arrow table 是 4.9 GB——`pq.read_table` 會把它整份具體化，而 `TRACKER__SHARDS=1`
+    （量測用的對照組）就是一支 part 裝整天。改走 `iter_batches` 之後峰值只有一個 row
+    group（20 萬列、數十 MB）的量級，與天數規模無關，輸出的檔案內容不變。全部 part 由
+    同一份 `TRACKING_RESULTS_SCHEMA` 產出，schema 天然一致；混入異質 part 時
+    `write_batch` 會拋錯，那是想要的 fail loud。
 
     **`N=1` 不特例跳過合併**：特例會讓兩條路徑的測試覆蓋分裂。代價是多一次整天檔的
     讀寫，計入下面那行 log 的耗時。
@@ -285,11 +293,15 @@ def merge_parts(results_path: Path, part_paths: list[Path]) -> int:
     writer: pq.ParquetWriter | None = None
     try:
         for part_path in part_paths:
-            table = pq.read_table(part_path)
-            if writer is None:
-                writer = pq.ParquetWriter(str(merge_tmp), table.schema)
-            writer.write_table(table)
-            total_rows += table.num_rows
+            part = pq.ParquetFile(part_path)
+            try:
+                if writer is None:
+                    writer = pq.ParquetWriter(str(merge_tmp), part.schema_arrow)
+                for batch in part.iter_batches(batch_size=_MERGE_BATCH_ROWS):
+                    writer.write_batch(batch)
+                total_rows += part.metadata.num_rows
+            finally:
+                part.close()
     finally:
         if writer is not None:
             writer.close()
