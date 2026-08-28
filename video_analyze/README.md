@@ -29,7 +29,7 @@
 | 套件 | 用途 |
 | --- | --- |
 | `av` | 影片片段讀取與解碼（PyAV，wheel 自帶 FFmpeg）|
-| `opencv-python` | 影格縮放與 letterbox 補邊（`services/letterbox.py`）|
+| `opencv-python` | 影格縮放（在解碼出的 nv12 兩個平面上）、色彩轉換與 letterbox 補邊（`services/letterbox.py`）|
 | `ultralytics` | YOLO 偵測 |
 | `torch` / `torchvision` | 前處理／後處理的張量運算，以及建置與比對工具的 Torch FP32 基準（與 `ultralytics` 一併釘住版本） |
 | `tensorrt-cu12` | 正式推論後端。版本帶 **10.8 ～ 10.16**：下緣是 sm120 的 kernel 支援，上緣是 11.0.0 起 strongly-typed 成為預設、移除 `BuilderFlag.FP16`。帶內取已實測的 `10.13.3.9` |
@@ -358,7 +358,7 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | `services/tracking_results.py` | 追蹤明細累積與 parquet 寫出 |
 | `services/fps_meter.py` | 處理 FPS 統計 |
 | `services/frame_ring.py` | 共享記憶體環形緩衝 |
-| `services/letterbox.py` | 縮放到推論尺寸與座標反算（正反兩半共用同一組參數） |
+| `services/letterbox.py` | 在 nv12 平面上縮放到推論尺寸與座標反算（正反兩半共用同一組參數） |
 | `services/video_reader.py` | 逐日掃描片段、讀影格、縮到推論尺寸 |
 
 I/O 邊界（讀寫檔、子進程、影像解碼）依 argus 慣例一律放 `services/`，不另立
@@ -385,7 +385,11 @@ zone 與 line 幾何都不會被驗證。
   `/dev/shm`」的組態：空間不夠時 CPython 的處置是靜默改用 `/tmp`（磁碟上的 mmap），
   程式照跑、輸出完全正常，只有讀寫成本悄悄變成磁碟等級，因此這裡要在啟動時就 fail
   loud。這道擋是必要非充分（比的是總容量），實際落點仍由 log 的 `backing_dirs` 回答。
-- **讀取進程**：解碼後立即 letterbox 成推論尺寸再寫入 slot（`letterbox.py`）。無空 slot
+- **讀取進程**：解碼後立即 letterbox 成推論尺寸再寫入 slot（`letterbox.py`）。縮放做在
+  **解碼出的 nv12 兩個平面上**，縮完才轉 BGR（issue #130 第三階段）：搬動的資料量只有
+  BGR 的一半，色彩轉換也只需處理縮小後的畫面，實測讀取端 CPU 地端 2.03 → 0.88 核、
+  T4 6.093 → 1.343 核。代價是色度在 1/2 解析度上插值，畫面與「先轉 BGR 再縮」不逐位元
+  相同。無空 slot
   時阻塞，形成對推理進程的天然背壓——slot 在 predict 完成當下就歸還，所以這條背壓只覆蓋
   到推論為止，追蹤那一段由 `track_queue` 的容量上限接手。**時間戳 = 該片段檔名時間 ＋ 片段內幀序 / fps**
   （逐段計算，不能用全日累計幀數推算）。
@@ -438,7 +442,14 @@ zone 與 line 幾何都不會被驗證。
 - **`frame_shapes` 傳成推論尺寸 → `run_track_worker` 拋 `ValueError`**。那代表
   拿到的是縮放後的尺寸而非原始解析度，反算會退化成恆等、parquet 的 `frame_width` 也一起
   寫成 640，而下游 zone／line 只檢查欄位存在（ADR-004／ADR-006）。影格尺寸與緩衝配置
-  不符（例如讀取端漏了 `letterbox()`）則由 `write_slot` 擋下。
+  不符（例如讀取端漏了 `letterbox_nv12()`）則由 `write_slot` 擋下。
+- **解碼出的影格不是 `nv12` → 讀取子進程拋 `ValueError`**。讀取端的縮放綁在 nv12 的
+  平面佈局上（前 H 列 Y、其後 H/2 列交錯 UV）；yuv420p 攤成 ndarray 的形狀與 nv12
+  完全相同，只是 U、V 分成兩塊而非交錯，當成 nv12 縮不會拋錯、只會讓顏色靜默錯亂。
+  `allow_software_fallback=False` 擋的是整條退回軟解，擋不到這裡。
+- **等比縮放後的寬高不是偶數 → `letterbox_nv12` 拋 `ValueError`**（非 16:9 來源）。
+  色度平面是 2×2 取樣，奇數尺寸拼不回 nv12；此處不把尺寸調成偶數，那會讓實際縮放
+  比例與反算用的 `letterbox_params` 分岔，每個座標靜默偏掉而輸出完全正常。
 - `analyze_daily` 以 0.5 秒輪詢所有子進程；任一非零結束 → 先終止所有子進程再拋
   `RuntimeError`；`KeyboardInterrupt` → 終止後以 exit code 130 收斂。
 - 追蹤明細 parquet 先寫 `.tmp`、收到 `TRACK_DONE` 才 `rename` 成正式檔名（`rename` 具

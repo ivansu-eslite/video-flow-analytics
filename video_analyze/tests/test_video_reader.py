@@ -64,14 +64,28 @@ def test_parse_segment_start_rejects_when_taipei_day_crosses_dir_day():
         )
 
 
+class _FakeFormat:
+    """`av` 影格的像素格式替身；讀取端只用到 `name`。"""
+
+    def __init__(self, name):
+        self.name = name
+
+
 class _FakeAvFrame:
-    """`av` 解碼出的影格替身，只需支援 `to_ndarray(format="bgr24")`。"""
+    """`av` 硬解出的影格替身：nv12，`to_ndarray()` 給 `(H * 3 // 2, W)` 的平面佈局。
 
-    def __init__(self, array):
-        self._array = array
+    替身刻意不吐 BGR：讀取端改成在 nv12 的平面上縮放之後，畫面尺寸要從 `height` /
+    `width` 屬性取得（不是 `to_ndarray().shape`），格式也要逐格核對——用 BGR 替身
+    的話這兩件事都測不到。
+    """
 
-    def to_ndarray(self, format="bgr24"):  # noqa: A002 — 對齊 av 的介面命名
-        return self._array
+    def __init__(self, height, width, format_name="nv12"):
+        self.height = height
+        self.width = width
+        self.format = _FakeFormat(format_name)
+
+    def to_ndarray(self):
+        return np.zeros((self.height + self.height // 2, self.width), dtype=np.uint8)
 
 
 class _FakeStream:
@@ -102,8 +116,7 @@ class _FakeContainer:
         self.streams = _FakeStreams(streams)
 
     def decode(self, video=0):  # 參數名對齊 av 的介面
-        for frame in self._frames:
-            yield _FakeAvFrame(frame)
+        yield from self._frames
 
     def close(self):
         pass
@@ -165,8 +178,8 @@ def test_reader_rejects_a_resolution_change_mid_stream(monkeypatch):
     值，連下游「該攝影機 frame_width 唯一」的檢查都照樣通過。
     """
     frames = [
-        np.zeros((1080, 1920, 3), dtype=np.uint8),
-        np.zeros((2160, 3840, 3), dtype=np.uint8),  # 中途換成 4K
+        _FakeAvFrame(1080, 1920),
+        _FakeAvFrame(2160, 3840),  # 中途換成 4K
     ]
     reader = _reader_over(monkeypatch, frames, FrameShape(height=1080, width=1920))
 
@@ -176,7 +189,7 @@ def test_reader_rejects_a_resolution_change_mid_stream(monkeypatch):
 
 def test_reader_letterboxes_every_frame_to_the_inference_size(monkeypatch):
     """解析度一致時照常讀完，且寫進 slot 的一律是推論尺寸。"""
-    frames = [np.zeros((1080, 1920, 3), dtype=np.uint8) for _ in range(3)]
+    frames = [_FakeAvFrame(1080, 1920) for _ in range(3)]
     reader = _reader_over(monkeypatch, frames, FrameShape(height=1080, width=1920))
 
     reader._read_segment(_segment())
@@ -192,7 +205,7 @@ def test_reader_opens_with_hwaccel_and_forbids_software_fallback(monkeypatch):
     `device_type` 屬性可斷言，`allow_software_fallback` 是唯一能斷言、也是
     規格唯一要求的屬性。
     """
-    frames = [np.zeros((1080, 1920, 3), dtype=np.uint8)]
+    frames = [_FakeAvFrame(1080, 1920)]
     reader = _reader_over(monkeypatch, frames, FrameShape(height=1080, width=1920))
 
     reader._read_segment(_segment())
@@ -225,6 +238,20 @@ def test_reader_wraps_hwaccel_incompatibility_as_value_error(monkeypatch):
         reader._read_segment(_segment())
 
 
+def test_reader_rejects_a_frame_whose_pixel_format_is_not_nv12(monkeypatch):
+    """縮放綁在 nv12 的平面佈局上，讀到別的格式必須當場中止。
+
+    `allow_software_fallback=False` 擋的是「整條退回軟解」，擋不到這裡：yuv420p 攤成
+    ndarray 的形狀與 nv12 完全相同（`(H * 3 // 2, W)`），只是後半段是分開的 U、V 兩塊
+    而非交錯，當成 nv12 縮不會拋錯，只會讓每一格的顏色靜默錯亂。
+    """
+    frames = [_FakeAvFrame(1080, 1920, format_name="yuv420p")]
+    reader = _reader_over(monkeypatch, frames, FrameShape(height=1080, width=1920))
+
+    with pytest.raises(ValueError, match="像素格式"):
+        reader._read_segment(_segment())
+
+
 def _timestamps_of(reader) -> list[datetime.datetime]:
     """把 `_read_segment` 放進 data_queue 的逐格時間戳取出來。"""
     stamps = []
@@ -240,7 +267,7 @@ def test_reader_derives_frame_timestamps_from_a_fractional_frame_rate(monkeypatc
     直接把 `Fraction` 餵給 `timedelta(seconds=...)` 會拋 `TypeError`，而那是在讀取
     子進程裡、每一支真實片段都會走到的路徑；替身若用 float 就完全測不到這件事。
     """
-    frames = [np.zeros((1080, 1920, 3), dtype=np.uint8) for _ in range(3)]
+    frames = [_FakeAvFrame(1080, 1920) for _ in range(3)]
     reader = _reader_over(
         monkeypatch,
         frames,
@@ -263,7 +290,7 @@ def test_reader_falls_back_to_guessed_rate_when_average_rate_is_missing(monkeypa
 
     不接這個 fallback 的話，該攝影機一整天會以「無法讀取影片 FPS」中止。
     """
-    frames = [np.zeros((1080, 1920, 3), dtype=np.uint8) for _ in range(2)]
+    frames = [_FakeAvFrame(1080, 1920) for _ in range(2)]
     reader = _reader_over(
         monkeypatch,
         frames,
@@ -280,7 +307,7 @@ def test_reader_falls_back_to_guessed_rate_when_average_rate_is_missing(monkeypa
 
 def test_reader_rejects_a_segment_whose_frame_rate_is_unknown(monkeypatch):
     """兩個速率都取不到就 fail loud——猜一個 FPS 會讓整天的時間戳靜默錯位。"""
-    frames = [np.zeros((1080, 1920, 3), dtype=np.uint8)]
+    frames = [_FakeAvFrame(1080, 1920)]
     reader = _reader_over(
         monkeypatch,
         frames,

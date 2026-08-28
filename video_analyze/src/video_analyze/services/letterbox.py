@@ -11,6 +11,10 @@ zone／line 兩包拿去跟攝影機幾何比對），所以縮放與反算是�
 
 共享記憶體也跟著受益：原本每格存原始解析度（4K 約 23.73 MiB），改存 640×384 後是
 0.70 MiB。
+
+縮放做在**解碼出來的 nv12 平面上**（`letterbox_nv12`），不是先轉成 BGR 再縮：搬動的
+資料量只有一半，`cvtColor` 也只需處理縮小後的畫面。這裡沒有 BGR 版的縮放函式，因為
+讀取端拿到的一律是 nv12（NVDEC 硬解的輸出格式），留一份 BGR 版只會讓兩條路各自漂移。
 """
 
 import cv2
@@ -55,30 +59,71 @@ def letterbox_params(orig_height: int, orig_width: int) -> tuple[float, int, int
     return scale, pad_x, pad_y
 
 
-def letterbox(frame: np.ndarray) -> np.ndarray:
-    """把影格等比縮到 `INFER_WIDTH` × `INFER_HEIGHT` 並置中填充。
+def letterbox_nv12(planes: np.ndarray, height: int, width: int) -> np.ndarray:
+    """把 nv12 影格在兩個平面上縮到推論尺度，轉成 BGR 後置中填充到推論尺寸。
+
+    縮放與色彩轉換的順序是反過來的：先在 Y 與交錯的 UV 兩個平面上各自 `cv2.resize`，
+    縮完才 `cvtColor` 成 BGR。與「先轉 BGR 再縮」得到的畫面不逐位元相同——色度是在
+    1/2 解析度上插值的——但省下的是縮放與色彩轉換兩邊的搬運量（nv12 每像素 1.5 byte
+    對 BGR 的 3 byte），實測讀取端 CPU 地端 2.03 → 0.88 核、T4 6.093 → 1.343 核。
+
+    縮放後的尺寸與 `letterbox_params` 給的是同一組（`round(邊長 × scale)`），填充量
+    因此也沿用同一組參數，反算才對得回原始解析度。
 
     Args:
-        frame: 原始 BGR 影格。
+        planes: 解碼出的 nv12 影格（`av` 的 `frame.to_ndarray()`），形狀為
+            `(height * 3 // 2, width)`：前 `height` 列是 Y，其後 `height // 2` 列是
+            交錯的 UV（色度本來就是 1/2 解析度）。
+        height: 影格高度（pixel）。
+        width: 影格寬度（pixel）。
 
     Returns:
-        `(INFER_HEIGHT, INFER_WIDTH, 3)` 的新陣列；已是該尺寸時原樣回傳（不複製）。
+        `(INFER_HEIGHT, INFER_WIDTH, 3)` 的 BGR 陣列。
+
+    Raises:
+        ValueError: `planes` 的形狀不是 `(height, width)` 對應的 nv12 佈局（呼叫端拿
+            到的不是 nv12，或尺寸與宣告的不符）；或等比縮放後的寬高不是偶數。
     """
-    height, width = frame.shape[:2]
-    if (height, width) == (INFER_HEIGHT, INFER_WIDTH):
-        return frame
+    if planes.shape != (height + height // 2, width):
+        raise ValueError(
+            f"nv12 影格的形狀應為 {(height + height // 2, width)}（前 {height} 列 Y、"
+            f"其後 {height // 2} 列交錯 UV），實得 {planes.shape}：呼叫端拿到的畫面"
+            "不是 nv12，或尺寸與宣告的不符。"
+        )
     scale, pad_x, pad_y = letterbox_params(height, width)
-    resized = cv2.resize(
-        frame,
-        (round(width * scale), round(height * scale)),
+    new_width = round(width * scale)
+    new_height = round(height * scale)
+    if new_width % 2 or new_height % 2:
+        # 色度平面是 2×2 取樣，寬高其一為奇數就拼不回 nv12 佈局。此處只能 fail loud，
+        # 不能把尺寸調成偶數：那會讓實際縮放比例與 `letterbox_params` 的 `scale` 分岔，
+        # 而反算用的是後者——每個座標靜默偏掉，輸出卻完全正常。16:9 來源（1080p 與 4K）
+        # 縮完是 640×360，兩邊都是偶數；非 16:9 要重新對過縮放與填充參數。
+        raise ValueError(
+            f"{width}×{height} 等比縮到 {new_width}×{new_height} 後寬高不是偶數，"
+            "無法在 nv12 的色度平面（2×2 取樣）上縮放：本模組假設來源為 16:9，"
+            "接入其他長寬比要重新對過縮放與反算參數。"
+        )
+    luma = cv2.resize(
+        planes[:height],
+        (new_width, new_height),
         # 縮小一律用 INTER_LINEAR，與 ultralytics LetterBox 一致；換插值法會讓偵測
         # 結果與改動前對不起來，而那個差異看起來會像是「把縮放搬到讀取端造成的」
         interpolation=cv2.INTER_LINEAR,
     )
+    chroma = cv2.resize(
+        # 交錯的 UV 攤成兩通道才縮得對：當成單通道縮的話 U 與 V 會互相混進對方
+        planes[height:].reshape(height // 2, width // 2, 2),
+        (new_width // 2, new_height // 2),
+        interpolation=cv2.INTER_LINEAR,
+    )
+    packed = np.empty((new_height + new_height // 2, new_width), dtype=planes.dtype)
+    packed[:new_height] = luma
+    packed[new_height:] = chroma.reshape(new_height // 2, new_width)
+    resized = cv2.cvtColor(packed, cv2.COLOR_YUV2BGR_NV12)
     # 右／下緣吃掉除不盡的那半格（單邊除不盡時比左／上多 1），與 ultralytics 的
     # `round(pad + 0.1)` 等值。內容的起點就是 `letterbox_params` 給的 pad，反算才對得回去
-    bottom = INFER_HEIGHT - resized.shape[0] - pad_y
-    right = INFER_WIDTH - resized.shape[1] - pad_x
+    bottom = INFER_HEIGHT - new_height - pad_y
+    right = INFER_WIDTH - new_width - pad_x
     return cv2.copyMakeBorder(
         resized,
         pad_y,

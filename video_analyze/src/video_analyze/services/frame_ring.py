@@ -216,7 +216,7 @@ class FrameRing:
 
         Raises:
             ValueError: `frame.shape` 與緩衝的 `frame_shape` 不符。緩衝照推論尺寸配置，
-                所以最可能的成因是呼叫端漏了 `letterbox()`（其次是同一路整天解析度
+                所以最可能的成因是呼叫端漏了 `letterbox_nv12()`（其次是同一路整天解析度
                 並非固定，那是配置時的假設）。
         """
         if frame.shape != self.frame_shape:
