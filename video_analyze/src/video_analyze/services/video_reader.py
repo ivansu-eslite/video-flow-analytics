@@ -13,7 +13,7 @@ from video_analyze.services.frame_ring import FrameRing
 from video_analyze.services.letterbox import (
     INFER_HEIGHT,
     INFER_WIDTH,
-    letterbox,
+    letterbox_nv12,
 )
 
 # 讀取進程正常讀完整天片段時放入 queue 的結束訊號；與 READER_FAILED 對稱，讓推理進程
@@ -28,6 +28,10 @@ READER_FAILED = "__READER_FAILED__"
 # 台北在地時間，讓下游 parquet / zone_counts / report 一律以台北 wall-clock 處理。
 _FILENAME_TZ = timezone.utc
 _LOCAL_TZ = ZoneInfo("Asia/Taipei")
+
+# NVDEC 硬解解出來的畫面格式（`av_hwframe_transfer_data` 在 decode 當下就下載回主
+# 記憶體）。縮放在這個格式的兩個平面上做，故讀到別的格式要擋下，見 `_read_segment`。
+_HW_PIXEL_FORMAT = "nv12"
 
 
 class FrameShape(NamedTuple):
@@ -179,9 +183,9 @@ def discover_segments(
 class DailyStreamVideoReader:
     """依時間序逐段讀取單一攝影機一整天的片段。
 
-    影格先 letterbox 成推論尺寸（見 `services/letterbox.py`）再 memcpy 進共享環形緩衝的
-    slot、queue 只傳「slot 索引 + metadata」，避免逐格 pickle。無空 slot 時阻塞，形成對
-    推理進程的天然背壓。
+    影格先在解碼出的 nv12 平面上 letterbox 成推論尺寸（見 `services/letterbox.py`）再
+    memcpy 進共享環形緩衝的 slot、queue 只傳「slot 索引 + metadata」，避免逐格 pickle。
+    無空 slot 時阻塞，形成對推理進程的天然背壓。
     """
 
     def __init__(
@@ -212,11 +216,11 @@ class DailyStreamVideoReader:
         self.source_shape = source_shape
 
     def _read_segment(self, segment: SegmentInfo) -> None:
-        """讀完單一片段的所有影格，逐格核對解析度後縮放、寫入 slot。
+        """讀完單一片段的所有影格，逐格核對解析度與像素格式後縮放、寫入 slot。
 
         Raises:
             ValueError: 片段無法開啟、不含視訊串流、讀不到 FPS，或任一影格的解析度與
-                `source_shape` 不符（見迴圈內註解）。
+                `source_shape` 不符、像素格式不是 `nv12`（見迴圈內註解）。
         """
         try:
             container = av.open(
@@ -252,28 +256,42 @@ class DailyStreamVideoReader:
             fps = float(fps)
             frame_index = 0
             for av_frame in container.decode(video=0):
-                frame = av_frame.to_ndarray(format="bgr24")
                 # 「整天解析度固定」的 fail-loud 檢查要在這裡做：縮放前移之前，這件事
                 # 由 `FrameRing.write_slot` 的形狀檢查順便擋下（緩衝依首格解析度配置），
                 # 但 letterbox 會把任何尺寸都抹平成推論尺寸，那道網就失效了。中途換
                 # 解析度而沒擋下的後果全是靜默的：反算參數仍是首格那組，座標按錯誤的
                 # 比例縮放（1080p→4K 差一半），parquet 的 frame_width 每列照樣寫首格
                 # 的值，下游「該攝影機 frame_width 唯一」的檢查也照樣通過。
-                if frame.shape[:2] != (
+                if (av_frame.height, av_frame.width) != (
                     self.source_shape.height,
                     self.source_shape.width,
                 ):
                     raise ValueError(
                         f"{segment.path} 第 {frame_index} 格的解析度 "
-                        f"{frame.shape[1]}×{frame.shape[0]} 與該路探測到的 "
+                        f"{av_frame.width}×{av_frame.height} 與該路探測到的 "
                         f"{self.source_shape.width}×{self.source_shape.height} 不符"
                         "（假設單一攝影機整天解析度固定）：座標反算與 parquet 的尺寸"
                         "欄位都綁在探測值上，中途變動只會讓輸出靜默算錯。"
                     )
+                # 縮放吃的是 nv12 的平面佈局，格式不符就 fail loud。yuv420p（軟解的
+                # 輸出）攤成 ndarray 的形狀與 nv12 完全相同，只是後半段是分開的 U、V
+                # 兩塊而非交錯，當成 nv12 縮只會得到顏色錯亂的畫面而不會拋錯；10-bit
+                # 來源的 p010 則連 dtype 都不同。`allow_software_fallback=False` 擋的
+                # 是「整條退回軟解」，擋不到這裡。
+                if av_frame.format.name != _HW_PIXEL_FORMAT:
+                    raise ValueError(
+                        f"{segment.path} 第 {frame_index} 格的像素格式為 "
+                        f"{av_frame.format.name}，非預期的 {_HW_PIXEL_FORMAT}："
+                        "讀取端的縮放綁在 nv12 的平面佈局上，換格式會讓畫面靜默錯亂。"
+                    )
                 # 縮到推論尺寸這件事本來在推論進程內由 ultralytics 做（每格 1.84 ms、
                 # 佔該進程 8.5%），而那是序列瓶頸；N 個讀取進程各自做則是並行的。
                 # 代價是框與落腳點的反算改由推論端負責，見 services/letterbox.py。
-                frame = letterbox(frame)
+                # 縮放在 nv12 兩個平面上做、縮完才轉 BGR：搬動量只有 BGR 的一半，
+                # 也省下對整張原始解析度畫面做色彩轉換。
+                frame = letterbox_nv12(
+                    av_frame.to_ndarray(), av_frame.height, av_frame.width
+                )
                 slot = self.free_queue.get()  # 無空 slot 時阻塞（背壓）
                 self.ring.write_slot(slot, frame)
                 timestamp = segment.start + timedelta(seconds=frame_index / fps)
@@ -289,8 +307,8 @@ class DailyStreamVideoReader:
         推理進程能區分兩者、避免把中途崩潰誤判為正常結束繼續寫出結果。
 
         Raises:
-            ValueError: 任一片段開檔／讀取 FPS 失敗，或影格解析度與探測值不符
-                （見 `_read_segment`）。
+            ValueError: 任一片段開檔／讀取 FPS 失敗，或影格解析度與探測值不符、
+                像素格式不是 `nv12`（見 `_read_segment`）。
         """
         # free_queue 由 reader 自己起跑時填滿，避免「父進程先 put 再 fork」的競態
         for slot in range(self.ring.num_slots):
@@ -321,7 +339,8 @@ def run_video_reader(
 
     尺寸不由呼叫端傳入，直接取 `INFER_*`：`_read_segment` 寫進 slot 之前已把影格
     letterbox 成推論尺寸，緩衝的尺寸因此不再是「該路的解析度」這種 per-stream 屬性，
-    而是與 `letterbox()` 綁在一起的固定約定。留成參數只會讓日後有人又傳回原始解析度。
+    而是與 `letterbox_nv12()` 綁在一起的固定約定。留成參數只會讓日後有人又傳回原始
+    解析度。
 
     Args:
         stream_id: 該路攝影機的編號。
