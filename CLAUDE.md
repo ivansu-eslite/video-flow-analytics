@@ -221,17 +221,25 @@ fail loud；沒有任何 `lines` 定義則整批跳過出入口三個分頁、�
 **偵測結果本身可重現，`track_id` 與列順序不可重現。** 以 `(camera_id, timestamp)` 對齊
 同一格畫面之後，該格內的框座標集合逐值相同——2026-08-28 實測（issue #130 第二階段驗收，
 九路全開）同一份程式碼自身重跑、以及只改推論批次大小（16→8）兩組，偏差 p50／p99／p99.9／
-最大值全部是 0.0、配對率 100%、逐格偵測數 0 差。但 **ByteTrack 的 `track_id` 指派在重跑
-間會改變**（同一組 1018 個 id 只有 730 個在兩次跑批中重複出現），多進程落盤的列順序也不
-固定，所以檔案不會 byte 級相同。
+最大值全部是 0.0、配對率 100%、逐格偵測數 0 差；`foot_x`／`foot_y` 也一併驗過，
+146,124 列全部逐值相同。但 **ByteTrack 的 `track_id` 指派在重跑間會改變**（同一組 1018
+個 id 只有 730 個在兩次跑批中重複出現），多進程落盤的列順序也不固定，所以檔案不會
+byte 級相同。
 
-- 比對用的 join key 是 `(camera_id, timestamp)`。**不可用 `frame_id`**（片段內幀序、跨
-  片段重複，會笛卡兒展開而算出假的大幅座標差），**也不可拿 `track_id` 當 key**。
+- **`(camera_id, timestamp)` 是「同一格畫面」的識別，不是唯一鍵**（一格內每個目標一列）。
+  比對要分兩步：先用它把兩份的同一格取出來，再在該格內以框的距離做配對。直接拿它當
+  SQL join key 會笛卡兒展開，算出假的大幅偏差——這正是下一句要避開 `frame_id` 的同一種
+  錯誤。
+- **不可用 `frame_id`**（片段內幀序、跨片段重複，同一個值會對到不同片段的畫面），
+  **也不可拿 `track_id` 當 key**（重跑就變）。
 - 逐 byte／逐列比對對這份檔案沒有意義，但那不代表它不可重現——是 key 的選法問題。
-- `zone_counts.parquet`／`line_counts.parquet` 經 `time_bucket` 聚合後連 byte 級都一致
-  （聚合掉了 `track_id` 與列順序），是**交付期／大重構做 golden 回歸比對**時更省事的
-  標的（vfa 日常改動的把關是各包 pytest、不依賴 golden；golden 產在交付期、存放於
-  argus GCS）。
+- `zone_counts.parquet`／`line_counts.parquet` 經 `time_bucket` 聚合後**比逐格穩定得多**，
+  是**交付期／大重構做 golden 回歸比對**時更省事的標的（vfa 日常改動的把關是各包
+  pytest、不依賴 golden；golden 產在交付期、存放於 argus GCS）。⚠ 但**不是 byte 級一致
+  的保證**：`unique_visitors` 是 `n_unique(track_id)`、entries 與計數線進出都以
+  `.over("track_id")` 分窗，仍吃 track 的分群結果，[ADR-006](docs/adr/zone_mapping/006-zone-boundary-band.md)
+  就記過同設定重跑訪客數 55→57 的案例。2026-08-28 那批的下游輸出確實 byte 級相同，
+  但那是該批的實測值，不能當成通則。
 
 **改動會改變送進模型的畫面時（換解碼器、改縮放或色彩轉換路徑），判準用「相當於多大的
 輸入擾動」，不要用「不大於控制組自身重跑」。** 後者曾經是本檔寫的判準，但既然自身重跑
