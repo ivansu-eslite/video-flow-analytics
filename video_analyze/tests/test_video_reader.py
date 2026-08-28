@@ -122,14 +122,22 @@ class _RingStub:
 
 
 def _reader_over(monkeypatch, frames, source_shape, **container_kwargs):
-    """組一個讀取器，讓 `_read_segment` 讀到 `frames` 這幾格。"""
-    monkeypatch.setattr(
-        video_reader.av, "open", lambda _path: _FakeContainer(frames, **container_kwargs)
-    )
+    """組一個讀取器，讓 `_read_segment` 讀到 `frames` 這幾格。
+
+    `av.open` 的替身額外記下呼叫時收到的關鍵字參數（`captured_open_kwargs`），
+    供斷言 `hwaccel` 有沒有被正確傳入。
+    """
+    captured_open_kwargs: dict = {}
+
+    def fake_open(_path, **kwargs):
+        captured_open_kwargs.update(kwargs)
+        return _FakeContainer(frames, **container_kwargs)
+
+    monkeypatch.setattr(video_reader.av, "open", fake_open)
     free_queue: queue.Queue = queue.Queue()
     for slot in range(_RingStub.num_slots):
         free_queue.put(slot)
-    return video_reader.DailyStreamVideoReader(
+    reader = video_reader.DailyStreamVideoReader(
         stream_id=0,
         segments=[],
         data_queue=queue.Queue(),
@@ -137,6 +145,8 @@ def _reader_over(monkeypatch, frames, source_shape, **container_kwargs):
         ring=_RingStub(),
         source_shape=source_shape,
     )
+    reader.captured_open_kwargs = captured_open_kwargs
+    return reader
 
 
 def _segment() -> video_reader.SegmentInfo:
@@ -172,6 +182,47 @@ def test_reader_letterboxes_every_frame_to_the_inference_size(monkeypatch):
     reader._read_segment(_segment())
 
     assert reader.ring.written == [(INFER_HEIGHT, INFER_WIDTH, 3)] * 3
+
+
+def test_reader_opens_with_hwaccel_and_forbids_software_fallback(monkeypatch):
+    """硬解不成立要 fail loud，`allow_software_fallback` 絕不能是 `True`——
+
+    允許 fallback 的話，硬解失敗會靜默退化成軟解，量到的效能數字是另一個組態的
+    （同 D⑫ 的教訓，見 report.md 5.2「第二階段」）。`HWAccel` 沒有公開的
+    `device_type` 屬性可斷言，`allow_software_fallback` 是唯一能斷言、也是
+    規格唯一要求的屬性。
+    """
+    frames = [np.zeros((1080, 1920, 3), dtype=np.uint8)]
+    reader = _reader_over(monkeypatch, frames, FrameShape(height=1080, width=1920))
+
+    reader._read_segment(_segment())
+
+    hwaccel = reader.captured_open_kwargs["hwaccel"]
+    assert hwaccel.allow_software_fallback is False
+
+
+def test_reader_wraps_hwaccel_incompatibility_as_value_error(monkeypatch):
+    """硬解不成立時 PyAV 18.1.0 拋的是裸 `RuntimeError`（不是 `av.FFmpegError` 的
+    子類別，見 `av/container/input.py`「Hardware accelerated decode requested but
+    no stream is compatible」），只接 `FFmpegError` 會讓這個失敗漏網、跳過帶檔名的
+    `ValueError`，這一路對應的片段就無從查起。
+    """
+
+    def fake_open(_path, **_kwargs):
+        raise RuntimeError("Hardware accelerated decode requested but no stream is compatible")
+
+    monkeypatch.setattr(video_reader.av, "open", fake_open)
+    reader = video_reader.DailyStreamVideoReader(
+        stream_id=0,
+        segments=[],
+        data_queue=queue.Queue(),
+        free_queue=queue.Queue(),
+        ring=_RingStub(),
+        source_shape=FrameShape(height=1080, width=1920),
+    )
+
+    with pytest.raises(ValueError, match="無法開啟影片片段"):
+        reader._read_segment(_segment())
 
 
 def _timestamps_of(reader) -> list[datetime.datetime]:

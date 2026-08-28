@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import av
 import numpy as np
+from av.codec.hwaccel import HWAccel
 
 from video_analyze.services.frame_ring import FrameRing
 from video_analyze.services.letterbox import (
@@ -218,8 +219,21 @@ class DailyStreamVideoReader:
                 `source_shape` 不符（見迴圈內註解）。
         """
         try:
-            container = av.open(str(segment.path))
-        except av.FFmpegError as exc:
+            container = av.open(
+                str(segment.path),
+                # `allow_software_fallback=False`：硬解不成立要在這裡直接拋出，不准
+                # 靜默退回軟解——允許 fallback 的話，量到的效能數字會是另一個組態的
+                # （同 D⑫ 的教訓，見 report.md 5.2「第二階段」）。與已驗證過的
+                # `outputs/vfa_perf/code/bench_pyav_ctx.py:open_container` 同一組參數。
+                hwaccel=HWAccel(device_type="cuda", allow_software_fallback=False),
+            )
+        except (av.FFmpegError, RuntimeError) as exc:
+            # `allow_software_fallback=False` 且沒有任何串流吃得到硬解時，PyAV 18.1.0
+            # 是從 `InputContainer` 的初始化路徑直接拋一個裸 `RuntimeError`
+            # （"Hardware accelerated decode requested but no stream is compatible"，
+            # `av/container/input.py`），不是 `av.FFmpegError` 的子類別——只接
+            # `FFmpegError` 會讓這個失敗漏網，跳過帶檔名的 `ValueError`，這一路的
+            # 對應片段就無從查起。
             raise ValueError(f"無法開啟影片片段: {segment.path}") from exc
         try:
             if not container.streams.video:
