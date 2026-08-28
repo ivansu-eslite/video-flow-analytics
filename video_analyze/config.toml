@@ -5,6 +5,10 @@ new_track_thresh = 0.6
 track_buffer = 30
 match_thresh = 0.8
 fuse_score = true
+# 追蹤進程的個數：各片負責一組固定的攝影機（依 fps 加權分配），輸出先各寫自己的 part
+# 檔、跑完由主進程合併成 tracking_results.parquet。不改變任何一格的結果，只影響列順序
+# 與吞吐；大於路數會 clamp 到路數。`TRACKER__SHARDS=1` 可切回單一追蹤進程做對照。
+shards = 2
 
 [model]
 # TensorRT FP16 引擎（正式推論路徑只吃 .engine，見 ADR-011），路徑為 cwd 相對。

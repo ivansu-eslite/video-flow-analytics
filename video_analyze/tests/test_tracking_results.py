@@ -11,15 +11,13 @@ line_counting 直接吃這份 schema）、跨 flush 的資料不遺漏也不重�
 `foot_x` / `foot_y` 同屬「寫錯也不會報錯」的欄位：它與 `tracks` 是兩個獨立參數，
 列數對不上或順序錯開都會讓每一列的落腳點配到別條軌跡，而 parquet 本身完全正常。
 
-第四件是 `claim_tmp_slot`（issue #113）：追蹤進程被 SIGKILL 或整機斷電時 `save()` 與
-`discard()` 都走不到，`.tmp` 留在輸出目錄沒有人會回來收，只能由下一次寫同一條路徑的
-執行清掉。它要清得掉殘檔、又不能誤刪另一個執行**正在寫**的暫存檔，所以這裡的斷言
-分成「拿得到鎖 → 清掉」與「拿不到鎖 → 一個 byte 都不准動」兩側。
+認領與殘檔清理（issue #113 的 `claim_tmp_slot`）**不在這裡**：追蹤進程分片之後，認領
+的對象換成 `tracking_results.parts/.lock`、持有者換成主進程，那批測試整批搬到
+`test_output_parts.py`。本檔留下的是 collector 自己的身分比對——`_tmp_identity` 在首次
+flush 記下之後，寫入、刪除、改名三處都要確認動到的是自己那一份。
 """
 
 import datetime
-import fcntl
-import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -31,7 +29,7 @@ from video_analyze.config.constants import TRACKING_RESULTS_SCHEMA
 from video_analyze.services import tracking_results as tr
 from video_analyze.services.tracking_results import (
     TrackingResultCollector,
-    claim_tmp_slot,
+    identity_of,
     tmp_path_for,
 )
 
@@ -40,6 +38,33 @@ _BASE = datetime.datetime(2026, 5, 1, 9, 0, tzinfo=_TAIPEI)
 
 # 寬 1920 / 高 1080：兩者不相等，寬高寫反時斷言會失敗
 _WIDTH, _HEIGHT = 1920, 1080
+
+
+def _claim(results_path: Path) -> tuple[int, int]:
+    """建出暫存檔並取回它的身分，模擬 collector 首次 flush 之後的狀態。
+
+    分片之前這是 `claim_tmp_slot` 的工作（那批測試已搬到 `test_output_parts.py`）；
+    現在正式路徑上 collector 的身分是首次 flush 建檔時自己記下的，而底下這幾支要驗的
+    是「身分對不上就不准動」，所以直接把身分餵進去。
+    """
+    tmp_file = tmp_path_for(results_path)
+    tmp_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file.touch()
+    identity = identity_of(tmp_file)
+    assert identity is not None
+    return identity
+
+
+def _taken_over_by_another_run(tmp_file: Path, payload: bytes) -> None:
+    """讓 `tmp_file` 這個名字指向另一份檔案，模擬「有人手動 rm 掉之後別的執行接手」。
+
+    先在旁邊建好再 `replace()` 過去，而不是 `unlink()` 完再建同名的：後者會把 inode
+    釋放掉，檔案系統經常**原地重用同一個 inode 號碼**，身分比對就照樣通過，測試在
+    沒有防護的情況下也會綠。
+    """
+    stand_in = tmp_file.with_name(tmp_file.name + ".another-run")
+    stand_in.write_bytes(payload)
+    stand_in.replace(tmp_file)
 
 
 def _stamp(frame_index: int) -> datetime.datetime:
@@ -215,17 +240,16 @@ def test_save_without_any_row_still_writes_schema(tmp_path):
 
 
 def test_save_without_any_row_takes_the_claimed_tmp_file_with_it(tmp_path):
-    """零列的那條分支不經過 rename，`claim_tmp_slot` 建出來的空暫存檔要自己收掉。
+    """零列的那條分支不經過 rename，既有的空暫存檔要自己收掉。
 
-    留著的話正常跑完的一天也會在輸出目錄留下一個 `.tmp`，而這個 issue 要的正是
-    「輸出目錄不留無人清理的暫存檔」——留一個 0 byte 的等於讓那個判準失去意義。
+    留著的話正常跑完的一天也會留下一個 `.tmp`，而 issue #113 立起來的判準正是「輸出
+    目錄不留無人清理的暫存檔」——留一個 0 byte 的等於讓它失去意義。
     """
     results_path = tmp_path / "tracking_results.parquet"
-    fd, identity = claim_tmp_slot(results_path)
+    identity = _claim(results_path)
     assert tmp_path_for(results_path).exists()  # 認領當下就把檔案建出來了
 
     TrackingResultCollector(results_path, identity).save()
-    os.close(fd)
 
     assert results_path.exists()
     assert not tmp_path_for(results_path).exists()
@@ -282,110 +306,23 @@ def test_schema_declares_frame_size_columns():
     assert TRACKING_RESULTS_SCHEMA["frame_height"] == pl.Int64
 
 
-def test_claim_clears_the_residue_left_by_a_dead_run(tmp_path):
-    """拿得到鎖 → 這個殘檔的持有者已經不在了 → 就地清空。
-
-    斷言看的是**大小**而不是存在與否：留著 inode 是刻意的（鎖掛在上面），要回收的是
-    那份整天追蹤明細的空間。
-    """
-    results_path = tmp_path / "tracking_results.parquet"
-    residue = tmp_path_for(results_path)
-    residue.write_bytes(b"x" * 4096)  # 上一次執行被 SIGKILL 時留下的半成品
-
-    fd, _identity = claim_tmp_slot(results_path)
-    os.close(fd)
-
-    assert residue.exists()
-    assert residue.stat().st_size == 0
-
-
-def test_claim_is_refused_while_another_run_holds_the_tmp_file(tmp_path):
-    """拿不到鎖 → 那是另一個執行**正在寫**的檔 → fail loud，一個 byte 都不准動。
-
-    這條是「判斷依據不能只看檔名」的正面表述：本測試裡的殘檔與上一支測試的長得一模
-    一樣，差別只在還有沒有人持有鎖。改成看檔名或 mtime 的話，這支會把別人寫到一半的
-    整天明細清掉，而且不會有任何訊號。
-    """
-    results_path = tmp_path / "tracking_results.parquet"
-    in_flight = tmp_path_for(results_path)
-    in_flight.write_bytes(b"x" * 4096)
-    holder = os.open(in_flight, os.O_RDWR)
-    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-    try:
-        with pytest.raises(RuntimeError, match="正被另一個進程持有"):
-            claim_tmp_slot(results_path)
-        assert in_flight.stat().st_size == 4096
-    finally:
-        os.close(holder)
-
-
-def test_claim_only_touches_its_own_output_path(tmp_path):
-    """只認領自己那一條路徑，不掃目錄——別的 bucket／別的日期的暫存檔不能被波及。
-
-    輸出路徑是 `outputs/<bucket>/<date>/`，並行執行本來就落在不同目錄；掃目錄的做法
-    在共用輸出根目錄時會跨過這條界線。
-    """
-    mine = tmp_path / "2026-08-01" / "tracking_results.parquet"
-    other = tmp_path / "2026-08-02" / "tracking_results.parquet"
-    other.parent.mkdir(parents=True)
-    other_tmp = tmp_path_for(other)
-    other_tmp.write_bytes(b"x" * 4096)
-
-    fd, _identity = claim_tmp_slot(mine)
-    os.close(fd)
-
-    assert other_tmp.stat().st_size == 4096
-
-
 def test_tmp_naming_has_a_single_source(tmp_path):
-    """collector 與 claim 必須指到同一個檔：兩邊各寫一次命名規則的話，改了後綴會讓
-    claim 靜默守著另一個檔名——鎖照樣拿得到、殘檔照樣沒清掉，也不會有錯誤訊息。"""
+    """collector 的暫存檔名只能由 `tmp_path_for` 決定。
+
+    命名規則寫兩次的話，改了後綴會讓另一邊（合併、清殘骸）靜默守著另一個檔名——不會
+    有任何錯誤訊息，只是殘檔沒被清掉、或合併讀不到這一份。
+    """
     results_path = tmp_path / "tracking_results.parquet"
 
     collector = TrackingResultCollector(results_path)
-    fd, _identity = claim_tmp_slot(results_path)
-    os.close(fd)
 
     assert collector._tmp_path == tmp_path_for(results_path)
-    assert tmp_path_for(results_path).exists()
-
-
-def test_claim_does_not_truncate_a_file_that_was_renamed_away(tmp_path, monkeypatch):
-    """`os.open` 與 `flock` 之間有空窗，鎖到的可能已經不是這個檔名指向的東西。
-
-    另一個執行正好在這期間 `save()`（把同一個 inode rename 成正式檔名）的話，鎖是拿得到
-    的、`fstat` 也看得到非零大小，接著的 `ftruncate` 會把對方剛寫完的**整天結果**清成
-    0 byte，而 log 還寫著「清掉前一次執行留下的暫存檔」。
-
-    這裡用一個會在拿到鎖之後做 rename 的 `flock` 替身，把那個交錯變成確定會發生。
-    """
-    results_path = tmp_path / "tracking_results.parquet"
-    in_flight = tmp_path_for(results_path)
-    in_flight.write_bytes(b"x" * 4096)
-    real_flock = fcntl.flock
-    raced: list[int] = []
-
-    def racing_flock(fd: int, operation: int) -> None:
-        real_flock(fd, operation)
-        if not raced:  # 只在第一輪：模擬「等鎖的期間對方 save() 把它 rename 走了」
-            raced.append(fd)
-            in_flight.replace(results_path)
-
-    monkeypatch.setattr(tr.fcntl, "flock", racing_flock)
-
-    fd, _identity = claim_tmp_slot(results_path)
-    os.close(fd)
-
-    assert raced, "替身沒被呼叫到，這支測試沒驗到東西"
-    assert results_path.stat().st_size == 4096, "把對方剛完成的結果清空了"
-    assert tmp_path_for(results_path).stat().st_size == 0  # 自己認到的是新建的空檔
 
 
 def test_discard_leaves_a_different_file_at_the_same_path_alone(tmp_path):
     """同一個路徑此刻若已經是別份檔案（inode 不同），`discard()` 一個字節都不能動。
 
-    `claim_tmp_slot` 的鎖擋得住「兩個執行同時認領」，但擋不住有人手動 `rm` 掉暫存檔之後
+    parts 目錄的鎖擋得住「兩個執行同時認領」，但擋不住有人手動 `rm` 掉暫存檔之後
     另一個執行接手。依路徑刪的話會刪掉對方寫到一半的內容，而對方要到最後 `replace()`
     才會以 `FileNotFoundError` 爆掉——錯誤發生的位置離原因很遠。
     """
@@ -479,10 +416,9 @@ def test_flush_refuses_to_write_over_a_file_it_did_not_claim(tmp_path):
     """
     results_path = tmp_path / "tracking_results.parquet"
     tmp_file = tmp_path_for(results_path)
-    fd, identity = claim_tmp_slot(results_path)  # 本次認領到的那一份
+    identity = _claim(results_path)  # 本次認領到的那一份
     collector = TrackingResultCollector(results_path, identity)
-    tmp_file.unlink()  # 被手動清掉
-    tmp_file.write_bytes(b"y" * 4096)  # 另一個執行接手，正在寫的內容
+    _taken_over_by_another_run(tmp_file, b"y" * 4096)  # 另一個執行接手正在寫的內容
 
     collector.add(
         camera_id="loc_cam001",
@@ -495,7 +431,6 @@ def test_flush_refuses_to_write_over_a_file_it_did_not_claim(tmp_path):
     )
     with pytest.raises(RuntimeError, match="不能開始寫入"):
         collector._flush()
-    os.close(fd)
 
     assert tmp_file.read_bytes() == b"y" * 4096  # 對方的內容一個字節都沒動
 
@@ -508,7 +443,7 @@ def test_flush_fails_loud_when_the_claimed_tmp_was_removed(tmp_path):
     留在輸出目錄，兩邊都錯。
     """
     results_path = tmp_path / "tracking_results.parquet"
-    fd, identity = claim_tmp_slot(results_path)
+    identity = _claim(results_path)
     collector = TrackingResultCollector(results_path, identity)
     tmp_path_for(results_path).unlink()  # 例如被清理排程掃掉
 
@@ -523,23 +458,21 @@ def test_flush_fails_loud_when_the_claimed_tmp_was_removed(tmp_path):
     )
     with pytest.raises(RuntimeError, match="不能開始寫入"):
         collector._flush()
-    os.close(fd)
 
     assert not results_path.exists()
 
 
 def test_collector_identity_comes_from_the_claim_not_from_the_path(tmp_path):
-    """身分要由認領那一步帶進來，不能在 collector 裡用 `os.stat` 重新推導一次。
+    """身分要由外面帶進來，不能在 collector 裡用 `os.stat` 重新推導一次。
 
-    認領完到建 collector 之間這個名字仍可能被換掉（有人手動 `rm`、另一個執行接手）。
+    取得身分到建 collector 之間這個名字仍可能被換掉（有人手動 `rm`、另一個執行接手）。
     重新推導的話 collector 會把**別人的 inode** 當成自己的，之後寫入、刪除、改名三道
     比對全部通過——正是 `_require_own_tmp` 要擋的那件事，卻擋不到。
     """
     results_path = tmp_path / "tracking_results.parquet"
     tmp_file = tmp_path_for(results_path)
-    fd, identity = claim_tmp_slot(results_path)
-    tmp_file.unlink()
-    tmp_file.write_bytes(b"y" * 3400)  # 另一個執行接手，正在寫的內容
+    identity = _claim(results_path)
+    _taken_over_by_another_run(tmp_file, b"y" * 3400)  # 另一個執行接手正在寫的內容
 
     collector = TrackingResultCollector(results_path, identity)
     collector.add(
@@ -553,7 +486,6 @@ def test_collector_identity_comes_from_the_claim_not_from_the_path(tmp_path):
     )
     with pytest.raises(RuntimeError, match="不能開始寫入"):
         collector._flush()
-    os.close(fd)
 
     assert tmp_file.read_bytes() == b"y" * 3400
     assert not results_path.exists()
@@ -567,7 +499,7 @@ def test_zero_row_save_never_leaves_a_half_written_official_file(tmp_path, monke
     PAR1」崩在離原因很遠的地方。
     """
     results_path = tmp_path / "tracking_results.parquet"
-    fd, identity = claim_tmp_slot(results_path)
+    identity = _claim(results_path)
     collector = TrackingResultCollector(results_path, identity)
 
     def _out_of_space(self, path, *args, **kwargs):
@@ -579,7 +511,6 @@ def test_zero_row_save_never_leaves_a_half_written_official_file(tmp_path, monke
         collector.save()
     monkeypatch.undo()
     collector.discard()
-    os.close(fd)
 
     assert not results_path.exists(), "半成品寫到正式檔名下了"
     assert not tmp_path_for(results_path).exists()
@@ -592,7 +523,7 @@ def test_discard_after_a_successful_save_says_nothing(tmp_path, capsys):
     執行建立的那一份」——把運維指向一個不存在的並行執行。
     """
     results_path = tmp_path / "tracking_results.parquet"
-    fd, identity = claim_tmp_slot(results_path)
+    identity = _claim(results_path)
     collector = TrackingResultCollector(results_path, identity)
     collector.add(
         camera_id="loc_cam001",
@@ -607,7 +538,6 @@ def test_discard_after_a_successful_save_says_nothing(tmp_path, capsys):
     capsys.readouterr()  # 丟掉 save() 自己那行「追蹤結果已寫入」
 
     collector.discard()
-    os.close(fd)
 
     # `StructuredLogger` 是 print 到 stdout 的，不走 logging，所以看 capsys 而不是 caplog
     assert "略過刪除" not in capsys.readouterr().out

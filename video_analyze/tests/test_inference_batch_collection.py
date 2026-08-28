@@ -30,7 +30,8 @@ def _make_pipeline(num_streams: int) -> InferencePipeline:
     return InferencePipeline(
         stream_names=names,
         detector=None,
-        track_queue=pyqueue.Queue(),
+        track_queues=[pyqueue.Queue()],
+        route=[0] * num_streams,
     )
 
 

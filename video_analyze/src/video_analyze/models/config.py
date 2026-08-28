@@ -17,7 +17,11 @@ logger = StructuredLogger(component="config")
 
 
 class TrackerConfig(BaseModel):
-    """ByteTrack 多路追蹤器參數。
+    """ByteTrack 多路追蹤器參數，外加追蹤進程的分片數。
+
+    ⚠ **這個物件有雙重身分**：它的實例會被直接當成 `BYTETracker(args=...)` 傳進
+    ultralytics（見 `services/tracker.py`），所以每個欄位名都落在那邊的命名空間裡。
+    新增欄位對它無害（它只讀自己認得的屬性），但撞名就會靜默改掉追蹤行為。
 
     Attributes:
         track_high_thresh: 高信心度偵測框的關聯門檻。
@@ -26,6 +30,10 @@ class TrackerConfig(BaseModel):
         track_buffer: 軌跡遺失後可保留等待重新關聯的幀數。
         match_thresh: 偵測框與既有軌跡配對的 IoU 門檻。
         fuse_score: 是否將信心度分數融入 IoU 距離計算。
+        shards: 追蹤進程的個數。各片負責一組固定的攝影機、彼此不共享狀態，輸出先各寫
+            自己的 part 檔再由主進程合併（見 ADR-012）。**改這個值不改變任何一格的
+            結果**——每路的 tracker 狀態獨立、單路的 payload 在推論端保序，分片只影響
+            parquet 的列順序。大於路數時會被 clamp 到路數。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -36,6 +44,7 @@ class TrackerConfig(BaseModel):
     track_buffer: int = Field(default=30, ge=1)
     match_thresh: float = Field(default=0.8, ge=0.0, le=1.0)
     fuse_score: bool = True
+    shards: int = Field(default=2, ge=1)
 
 
 class ModelConfig(BaseModel):

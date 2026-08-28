@@ -14,6 +14,15 @@ OUTPUT_ROOT = Path("outputs")
 # 追蹤結果 parquet 的檔名。
 TRACKING_RESULTS_FILENAME = "tracking_results.parquet"
 
+# 各追蹤進程的 part 檔所在目錄，與正式輸出同一層（`<date>/` 底下）。整天分片跑的期間
+# 才存在，合併完就刪掉；名字由正式檔名推導，兩者因此不可能各自漂移。
+TRACKING_RESULTS_PARTS_DIRNAME = Path(TRACKING_RESULTS_FILENAME).stem + ".parts"
+
+# parts 目錄裡的鎖檔名，永遠 0 byte。認領這一天的是**主進程**（見
+# `services/output_parts.py`），不是任何一個追蹤進程——認領、跑、合併三段要被同一把鎖
+# 蓋住，只有主進程橫跨全程。
+PARTS_LOCK_FILENAME = ".lock"
+
 # 權重的類別 id（CrowdHuman：0=head, 1=vbody, 2=fbody）。fbody 是追蹤目標，head 只
 # 用來推算落腳點、不進 tracker（否則同一個人會多出一條頭部軌跡）。`_validate_classes`
 # 只驗證 id 存在於權重，換權重時這兩個常數要跟著對。

@@ -33,8 +33,12 @@ TARGET_BATCH = settings.model.batch
 # batch 線性成長。
 RING_SLOTS = TARGET_BATCH * 2
 
-# `track_queue` 的容量上限（payload 個數）。**這個上限是背壓，不是調校參數**——它擋的
-# 兩件事都沒有其他機制在擋：
+# 每一條 `track_queue` 的容量上限（payload 個數）。追蹤進程分片之後有 N 條，**這個值
+# 是每條各自的上限、不除以 N**：它擋的兩件事都是每條 queue 各自的性質，除以 N 反而讓
+# 正常抖動更容易變成兩個進程互等。總在途 payload 因此是 N 倍（N=2、預設 batch 下 128
+# 格、幾百 KB）。
+#
+# **這個上限是背壓，不是調校參數**——它擋的兩件事都沒有其他機制在擋：
 #
 # - **backlog 無上限成長**。影格側的背壓是「reader 拿不到空 slot 就阻塞」，而 slot 在
 #   predict 完成當下就歸還（ADR-010），所以那條保護只覆蓋到推論為止。追蹤搬出去之後，
