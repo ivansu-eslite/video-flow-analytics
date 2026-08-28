@@ -30,7 +30,7 @@ CPU fallback（引擎路徑下從「慢」變成「一定失敗」）、`_valida
 ### Option A：維持 Torch FP32 唯一實作
 
 零風險。但既有量測顯示引擎路徑是目前唯一能把一天九路壓進時窗的方案，維持現狀等於放棄整串
-優化（#108／#109／本階段）的收尾。排除。
+優化（#108／#109／本 ADR）的收尾。排除。
 
 ### Option B：把後端做成可切換的設定項（`backend = "torch" | "tensorrt"`）
 
@@ -175,7 +175,7 @@ predict。
 
 檔名格式 `<權重 stem>_sm<SM>.engine`（如 `..._sm75.engine`）。理由不只是「好認」：下游
 argus 的 promotion 用 `Path(source_model_uri).stem` 當 `model_version`，同一份權重的 T4 與
-5090 兩顆引擎**同名會直接撞在一起**。這件事在 vfa 階段就處理，否則階段四要回頭改。
+5090 兩顆引擎**同名會直接撞在一起**。這件事在 vfa 這側就處理，否則同步 argus 那一步要回頭改。
 
 引擎走 artifact，不進版控（`.gitignore` 一併加上 `*.engine` 與匯出中繼的 `*.onnx`）。
 
@@ -242,5 +242,5 @@ Negative
   （釘 hash 對每個部署是額外的維護成本），但「沒在驗」會以 warning 的形式出現在 log 上。
 - **升 TensorRT 版本要重跑 sm75 kernel 檢查**：10.13.3.9 的 `libnvinfer_builder_resource`
   確認含 sm75，版本帶上緣（10.16.x）沒驗過。
-- **argus 的兩份拷貝不隨本次同步**（階段四）：正式節點的映像檔要裝 `tensorrt-cu12`、要能
+- **argus 的兩份拷貝不隨本次同步**：正式節點的映像檔要裝 `tensorrt-cu12`、要能
   取到引擎，`.pt` 的下載鏈也要改成引擎的下載鏈。在那之前，argus 側仍跑 Torch FP32。
