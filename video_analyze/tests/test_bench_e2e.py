@@ -16,6 +16,7 @@ from bench_e2e import (
     FpsReading,
     GpuUsage,
     RunRecord,
+    TrackWorkerReading,
     _count_segments,
     _engine_path,
     _host_cpu,
@@ -48,18 +49,34 @@ _INFERENCE_LINE = json.dumps(
     },
     ensure_ascii=False,
 )
-_TRACK_WORKER_LINE = json.dumps(
-    {
+
+
+def _track_worker_line(
+    shard_id: int | None = 0,
+    *,
+    overall_fps: float = 514.34,
+    tracking_fps: float | None = 968.18,
+    cameras: tuple[str, ...] = ("cam01",),
+) -> str:
+    """一片追蹤進程的結束行。`shard_id=None` 模擬分片之前的舊產物。"""
+    entry = {
         "component": "track_worker",
         "message": "追蹤進程結束",
         "frames": 20590,
         "elapsed_seconds": 40.0,
-        "overall_fps": 514.34,
-        "tracking_fps": 968.18,
+        "overall_fps": overall_fps,
+        "tracking_fps": tracking_fps,
         "severity": "INFO",
-    },
-    ensure_ascii=False,
-)
+    }
+    if shard_id is not None:
+        entry["shard_id"] = shard_id
+        entry["owned_cameras"] = list(cameras)
+    if tracking_fps is None:
+        del entry["tracking_fps"]
+    return json.dumps(entry, ensure_ascii=False)
+
+
+_TRACK_WORKER_LINE = _track_worker_line()
 
 
 def _record(name: str, fps: float | None, *, exit_status: str = "0", **meta: str) -> RunRecord:
@@ -71,7 +88,15 @@ def _record(name: str, fps: float | None, *, exit_status: str = "0", **meta: str
             inference_fps=fps,
             inference_frames=20590 if fps else None,
             inference_elapsed_seconds=40.7 if fps else None,
-            track_worker_fps=514.34,
+            track_workers=(
+                TrackWorkerReading(
+                    shard_id=0,
+                    overall_fps=514.34,
+                    tracking_fps=968.18,
+                    frames=20590,
+                    cameras=("cam01",),
+                ),
+            ),
         ),
         gpu=GpuUsage(samples=20, mean_sm_percent=16.0, max_sm_percent=18.0, max_fb_mb=2287.0),
     )
@@ -104,7 +129,7 @@ def test_parse_fps_log_keeps_both_readings_under_separate_names():
     reading = parse_fps_log(f"{_TRACK_WORKER_LINE}\n{_INFERENCE_LINE}\n")
 
     assert reading.inference_fps == 506.46
-    assert reading.track_worker_fps == 514.34
+    assert reading.min_track_worker_fps == 514.34
     assert not hasattr(reading, "fps")
     assert not hasattr(reading, "overall_fps")
 
@@ -117,18 +142,77 @@ def test_parse_fps_log_does_not_backfill_inference_from_track_worker():
     reading = parse_fps_log(f"{_TRACK_WORKER_LINE}\n")
 
     assert reading.inference_fps is None
-    assert reading.track_worker_fps == 514.34
+    assert reading.min_track_worker_fps == 514.34
     assert reading.completed is False
+
+
+def test_parse_fps_log_collects_one_reading_per_shard():
+    """追蹤進程分片後每片各印一行，全部收下來，餘裕取最慢那片。
+
+    這條壞掉的樣子是 `bench_e2e run` 第一輪跑完就崩（issue #143 之前 `parse_fps_log`
+    對第二行追蹤結束拋 `ValueError`，`command_run` 沒接），矩陣後續輪次一輪都不跑。
+    平均掉各片同樣不行：瓶頸是最慢的那片，平均會把它蓋掉。
+    """
+    log = (
+        f"{_track_worker_line(0, overall_fps=520.0, tracking_fps=1040.0)}\n"
+        f"{_INFERENCE_LINE}\n"
+        f"{_track_worker_line(1, overall_fps=500.0, tracking_fps=800.0, cameras=('cam02',))}\n"
+    )
+
+    reading = parse_fps_log(log)
+
+    assert reading.shard_count == 2
+    assert [item.shard_id for item in reading.track_workers] == [0, 1]
+    assert [item.cameras for item in reading.track_workers] == [("cam01",), ("cam02",)]
+    assert reading.min_track_worker_fps == 500.0
+    assert reading.min_track_worker_headroom == pytest.approx(1.6)
+    assert reading.inference_fps == 506.46
+
+
+def test_parse_fps_log_headroom_is_none_when_any_shard_lacks_tracking_fps():
+    """任一片缺 `tracking_fps` 就不給餘裕，而不是拿剩下幾片算最小值。
+
+    跳過缺值的片會漏掉「可能最慢的那片」，算出的餘裕偏大——這個數字是容量決策的依據，
+    偏大正是會誤事的方向。
+    """
+    log = (
+        f"{_track_worker_line(0, overall_fps=520.0, tracking_fps=1040.0)}\n"
+        f"{_track_worker_line(1, overall_fps=500.0, tracking_fps=None)}\n"
+    )
+
+    reading = parse_fps_log(log)
+
+    assert reading.shard_count == 2
+    assert reading.min_track_worker_fps == 500.0
+    assert reading.min_track_worker_headroom is None
 
 
 def test_parse_fps_log_rejects_duplicate_inference_line():
     """同一份 log 出現兩行推論 `FPS 整體`，代表兩次執行寫進同一份檔案。
 
     靜默取其中一個就是「這輪的 meta 配上另一輪的 log」——產物看起來完好，數字對不上
-    卻查不出原因。
+    卻查不出原因。放寬追蹤那側之後這道更要在：推論行沒有分片，重複只有一種解釋。
     """
     with pytest.raises(ValueError, match="兩行推論進程"):
         parse_fps_log(f"{_INFERENCE_LINE}\n{_INFERENCE_LINE}\n")
+
+
+def test_parse_fps_log_rejects_duplicate_shard_id():
+    """兩行 `shard_id` 相同的追蹤結束＝兩次執行寫進同一份 log，仍要拋錯。
+
+    同一次執行的各片編號互異，所以放寬「多行追蹤結束」之後，`shard_id` 是分辨「N 片」
+    與「跑了兩次」的依據；不擋的話兩次執行會被當成兩片，最小值取到的是另一輪的數字。
+    """
+    with pytest.raises(ValueError, match="shard_id=0"):
+        parse_fps_log(f"{_TRACK_WORKER_LINE}\n{_TRACK_WORKER_LINE}\n")
+
+
+def test_parse_fps_log_rejects_duplicate_track_line_without_shard_id():
+    """分片之前的舊產物沒有 `shard_id`，那時每輪只有一行，兩行同樣算兩次執行。"""
+    old_line = _track_worker_line(None)
+
+    with pytest.raises(ValueError, match="shard_id=None"):
+        parse_fps_log(f"{old_line}\n{old_line}\n")
 
 
 def test_parse_fps_log_skips_non_json_lines():
