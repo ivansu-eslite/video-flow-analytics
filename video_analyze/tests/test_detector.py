@@ -95,21 +95,20 @@ def test_require_engine_file_rejects_a_torch_weight(tmp_path):
 
 
 def test_require_engine_file_rejects_a_missing_engine_naming_the_real_reason(tmp_path):
-    """**這道 `is_file()` 前置檢查不可移除**，它擋的不只是「靜默下載官方權重」。
+    """檔案不存在要在載入之前擋下，且訊息要指得出真正的原因。
 
-    ultralytics 的 `check_file` 在檔案不存在時有三種替代行為，三種都會讓「跑的不是
-    你以為的那顆模型」而輸出檔完全正常：遞迴 glob 整個套件目錄找同名檔、把 `gs://`
-    改寫成公開 HTTPS 下載、把沒有副檔名的值補成官方權重下載。載入引擎一樣會走
-    `check_file`（`Model._load` 對非 `.pt` 一律呼叫它），所以改吃引擎之後這道檢查
-    沒有變得多餘。
+    改用 `AutoBackend` 之後（ADR-013）拿掉這道檢查不會再讓 ultralytics 去找替代來源
+    ——`_model_type` 只看副檔名——但 TensorRT backend 直接 `open()`，拋出來的
+    `FileNotFoundError` 只有一個路徑字串，看不出「`model_path` 是 cwd 相對路徑、跑錯
+    目錄了」這個實際上最常見的原因。
 
-    斷言訊息內容而不只是例外型別：`check_file` 自己找不到檔時也拋 `FileNotFoundError`，
-    只驗型別的話這道檢查被拿掉仍然全綠。
+    斷言訊息內容而不只是例外型別：`open()` 自己也拋 `FileNotFoundError`，只驗型別的話
+    這道檢查被拿掉仍然全綠。
     """
-    with pytest.raises(FileNotFoundError, match="glob") as excinfo:
+    with pytest.raises(FileNotFoundError, match="cwd") as excinfo:
         _require_engine_file(tmp_path / "missing_sm75.engine")
 
-    assert "gs://" in str(excinfo.value)
+    assert "repo 根" in str(excinfo.value)
 
 
 def test_yolo_detector_rejects_a_torch_weight_before_touching_the_gpu(
@@ -129,7 +128,7 @@ def test_yolo_detector_raises_when_the_engine_file_is_missing(monkeypatch, tmp_p
         settings.model, "model_path", str(tmp_path / "missing_sm75.engine")
     )
 
-    with pytest.raises(FileNotFoundError, match="glob"):
+    with pytest.raises(FileNotFoundError, match="cwd"):
         YOLODetector()
 
 

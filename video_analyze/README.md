@@ -30,8 +30,8 @@
 | --- | --- |
 | `av` | 影片片段讀取與解碼（PyAV，wheel 自帶 FFmpeg）|
 | `opencv-python` | 影格縮放（在解碼出的 nv12 兩個平面上）、色彩轉換與 letterbox 補邊（`services/letterbox.py`）|
-| `ultralytics` | YOLO 偵測 |
-| `torch` / `torchvision` | 前處理／後處理的張量運算，以及建置與比對工具的 Torch FP32 基準（與 `ultralytics` 一併釘住版本） |
+| `ultralytics` | 引擎載入與 forward（`AutoBackend`）。前處理與後處理是本套件自己的程式碼，`YOLO`／`predictor`／`Results` 都不在正式推論路徑上（ADR-013）|
+| `torch` / `torchvision` | 前處理的張量運算（H2D 之後在 GPU 上做），以及建置與比對工具的 Torch FP32 基準（與 `ultralytics` 一併釘住版本） |
 | `tensorrt-cu12` | 正式推論後端。版本帶 **10.8 ～ 10.16**：下緣是 sm120 的 kernel 支援，上緣是 11.0.0 起 strongly-typed 成為預設、移除 `BuilderFlag.FP16`。帶內取已實測的 `10.13.3.9` |
 | `lap` | ByteTrack 的線性指派求解 |
 | `numpy` | 影格與追蹤結果的陣列運算 |
@@ -356,7 +356,7 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理／追蹤子進程生命週期） |
 | `services/inference.py` | 推理迴圈（湊批、偵測、把偵測框送往追蹤進程） |
 | `services/track_worker.py` | 追蹤進程（N 個）：偵測框拆分、追蹤、落腳點推算、座標反算、寫自己那支 part；`TRACK_DONE`／`TRACK_FAILED` 訊號與 fan-out |
-| `services/detector.py` | TensorRT 引擎載入與偵測；載入前的四道檢查與執行期的形狀核對 |
+| `services/detector.py` | TensorRT 引擎載入與偵測；載入前的五道檢查、執行期的張量核對，以及自建的前處理（`preprocess_batch`，GPU）與後處理（`postprocess_batch`，整批一次 D2H 後用 numpy 過濾）|
 | `services/engine_metadata.py` | 引擎自帶 metadata 的注入格式、讀取與環境比對（建置端與載入端共用同一份） |
 | `services/foot_point.py` | `FootPointEstimator`：head 框配對與落腳點推算；自行維護跨幀狀態（每條軌跡上次成功推算的偏移量，共用 head 的那些不存） |
 | `services/tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |
@@ -398,13 +398,17 @@ N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程�
   BGR 的一半，色彩轉換也只需處理縮小後的畫面，實測讀取端 CPU 地端 2.03 → 0.88 核、
   T4 6.093 → 1.343 核。代價是色度在 1/2 解析度上插值，畫面與「先轉 BGR 再縮」不逐位元
   相同。無空 slot
-  時阻塞，形成對推理進程的天然背壓——slot 在 predict 完成當下就歸還，所以這條背壓只覆蓋
-  到推論為止，追蹤那一段由 `track_queue` 的容量上限接手。**時間戳 = 該片段檔名時間 ＋ 片段內幀序 / fps**
+  時阻塞，形成對推理進程的天然背壓——slot 在**前處理**完成當下就歸還，所以這條背壓只覆蓋
+  到前處理為止，forward 與追蹤那兩段分別由批次本身與 `track_queue` 的容量上限接手。**時間戳 = 該片段檔名時間 ＋ 片段內幀序 / fps**
   （逐段計算，不能用全日累計幀數推算）。
 - **推理進程**：非阻塞輪詢各路 queue 湊批，維持 GPU 批次效率；每批推論完就把逐格的
-  偵測框丟進 `track_queue`，本身不做追蹤。影格既然是共享記憶體的 view，**整批推論完成
-  才歸還 slot**（生命週期約束見
-  [ADR-010](../docs/adr/video_analyze/010-zero-copy-frame-lifetime.md)），送 payload 排在
+  偵測框丟進 `track_queue`，本身不做追蹤。前處理與後處理都是本套件自己算的
+  （[ADR-013](../docs/adr/video_analyze/013-self-built-pre-post.md)）：整批 `np.stack`
+  ＋一次 H2D 之後在 GPU 上翻通道、換軸、轉 float32 並除以 255；forward 之後整批一次
+  D2H，再用 numpy 逐格過濾（conf → 截斷 → classes，順序不可調動）。影格既然是共享記憶體
+  的 view，**前處理完成就歸還 slot**——像素在 `np.stack` 當下已經複製走，reader 因此不必
+  等整段 forward（生命週期約束見
+  [ADR-010](../docs/adr/video_analyze/010-zero-copy-frame-lifetime.md)）；送 payload 排在
   歸還之後（payload 取的是推論輸出，與 slot 無關）。
 - **追蹤進程**：逐格經 裁切到內容區 → 拆出 fbody／head（只有 fbody 進 tracker）→ 追蹤
   → 推算落腳點 → **框與落腳點映射回原始解析度** → 累積追蹤結果並落盤。追蹤與 GPU 推論
@@ -441,20 +445,27 @@ N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程�
   的日期目錄，寧可中止也不靜默寫錯天。此檢查在 `discover_segments` 掃描時、於主進程
   執行，**任一路踩到就整天中止**（不是只跳過該攝影機或該片段）。
 - 其餘片段的開檔 / 讀 FPS 失敗 → 讀取子進程拋錯、以非零 exitcode 結束。
-- **引擎載入前的四道檢查，任一不過即中止**（`services/detector.py`）：`model_path` 不是
-  `.engine`、引擎檔不存在（**這道 `is_file()` 前置檢查不可移除**——ultralytics 的
-  `check_file` 在檔案不存在時會遞迴 glob 整個套件目錄找同名檔、把 `gs://` 改寫成公開
-  HTTPS 下載、把沒有副檔名的值補成官方權重下載）、引擎 metadata 與當下環境不符
+- **引擎載入前的檢查，任一不過即中止**（`services/detector.py`）：`model_path` 不是
+  `.engine`、引擎檔不存在（`model_path` 是 cwd 相對路徑，跑錯目錄就是這個症狀；自己先
+  擋是為了訊息——TensorRT backend 直接 `open()`，例外裡只有一個路徑字串。改用
+  `AutoBackend` 之前這道檢查還擋得住 ultralytics `check_file` 的三種替代來源解析，
+  見 ADR-013）、引擎 metadata 與當下環境不符
   （compute capability／TensorRT 版本／TensorRT wheel 變體／來源權重 hash，四項各自拋錯、
   訊息指出是哪一項；驅動版本與 torch 的 CUDA 建置版本只記 warning——它們不在 TensorRT 對
   引擎的約束裡）、引擎不是 FP16 建的。沒有 CUDA 也是中止而非 fallback CPU。
 - **引擎不是 dynamic 建的 → 拋 `ValueError`**。靜態引擎會通過其餘全部載入檢查，然後在
   第一個沒湊滿的批次上被 ultralytics 的 assert 擋下（訊息看不出原因）——而湊不滿批是
   常態：T4 上實測一次跑完出現 16 種不同的批次大小。
-- **實際進入推論的張量形狀不是 640×384 → 拋 `ValueError`**。讀的是 TensorRT backend 自己
-  的 binding。這一項取代了 `_validate_imgsz`：dynamic 引擎不套用 metadata 的 `imgsz`
+- **引擎不是 end2end（自帶 NMS）→ 拋 `ValueError`**。載入末端跑一次 zeros forward，
+  輸出不是單一張量、或最後一維不是 6 就擋下。判準用實跑的形狀而不是 metadata 的
+  `end2end` 欄位——後者改了不會改變引擎。沒有內建 NMS 的引擎吐 `(B, 4 + nc, num_anchors)`，
+  自建後處理那三行照樣跑得完，只是把類別分數當成 conf 與 cls（見 ADR-013）。
+- **實際進入推論的張量形狀不是 640×384 → 拋 `ValueError`**，dtype 不是 float32、不是
+  contiguous、不是 4D 或不在 CUDA 上亦然。驗的是本套件自己組出來、即將交給 `execute_v2`
+  的那個張量。形狀這一項取代了 `_validate_imgsz`：dynamic 引擎不套用 metadata 的 `imgsz`
   （`predictor.py` 只在 backend 不是 dynamic 時才套用），照抄那個檢查會得到一個看起來
-  有在驗、其實驗不到的檢查（見 ADR-011）。
+  有在驗、其實驗不到的檢查（見 ADR-011）。dynamic 引擎的高寬維也是動態的，錯誤的高寬
+  不會被 TensorRT 的 assert 擋下。
 - **單次批次超過引擎綁的最大批次 → 拋 `ValueError`**（`services/inference.py`，在主迴圈的
   try 內，送得出 `TRACK_FAILED`）。
 - **`frame_shapes` 傳成推論尺寸 → `run_track_worker` 拋 `ValueError`**。那代表

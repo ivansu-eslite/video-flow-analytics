@@ -34,22 +34,20 @@ END2END_COLUMNS = 6
 def _require_engine_file(model_path: Path) -> None:
     """`model_path` 必須是**存在的** `.engine` 檔，兩條各自 fail loud。
 
-    副檔名這條擋的是「還指著 `.pt`」：那條路載得起來、跑得出結果，只是慢一個量級而
-    完全沒有訊號。
+    副檔名這條擋的是「還指著 `.pt`」：`AutoBackend` 照副檔名選 backend，`.pt` 會走
+    PyTorchBackend——載得起來、跑得出結果，只是慢一個量級而完全沒有訊號（正式套件裡
+    已經沒有 Torch 推論路徑，見 ADR-011）。
 
-    檔案存在性這條擋的是 ultralytics `check_file` 的三種替代行為——**它們都會讓
-    「跑的不是你以為的那顆模型」而輸出檔本身完全正常**：
+    檔案存在性這條擋的是路徑打錯：`model_path` 是 cwd 相對路徑（四包一律在 repo 根
+    執行），在別的 cwd 跑起來就是「檔案不存在」。自己先擋是為了訊息——TensorRT backend
+    直接 `open(weight, "rb")`，拋出來的 `FileNotFoundError` 只有一個路徑字串。
 
-    - `check_model_file_from_stem` 會把 `yolo26m` 這種沒有副檔名的值補成 `yolo26m.pt`
-      並靜默下載官方權重；官方權重的類別 id 剛好也存在，`_validate_classes` 只驗 id
-      存在，擋不下「id 存在但語義不同」。
-    - 檔案不存在時 `check_file` 會 `glob.glob(ROOT/"**"/file, recursive=True)`
-      **遞迴搜尋整個 ultralytics 套件目錄**同名檔，找到就用。
-    - `gs://` 開頭的值會被改寫成 `https://storage.googleapis.com/...` 公開下載
-      （`REMOTE_FILE_PREFIXES`）——連 bucket 是不是我們的都不確定。
-
-    載入引擎的路徑會走 `check_file`（`Model._load` 對非 `.pt` 一律呼叫它），所以這道
-    前置檢查在改成引擎之後**沒有變得多餘，只是擋的對象從 `.pt` 換成 `.engine`**。
+    **改用 `AutoBackend` 之前（ADR-013）這道檢查擋的對象大得多**：`YOLO` 走
+    `Model._load` → `check_file`，而那條路徑在檔案不存在時會遞迴 glob 整個 ultralytics
+    套件目錄找同名檔、把 `gs://` 改寫成公開 HTTPS 下載、把沒有副檔名的值補成官方權重
+    下載——三種都會讓「跑的不是你以為的那顆模型」而輸出檔完全正常。`AutoBackend` 的
+    `_model_type` 只看副檔名、不解析任何替代來源，那三條因此已經不會發生；**這也是
+    日後要改回經 `YOLO` 載入時必須先讀的一段**。
 
     Args:
         model_path: `settings.model.model_path` 指定的路徑。
@@ -66,10 +64,10 @@ def _require_engine_file(model_path: Path) -> None:
         )
     if not model_path.is_file():
         raise FileNotFoundError(
-            f"找不到引擎檔 {model_path}。不讓 ultralytics 自行決定替代來源："
-            "它在檔案不存在時會遞迴 glob 整個套件目錄找同名檔、把 `gs://` 改寫成"
-            "公開 HTTPS 下載、或把沒有副檔名的值補成官方權重下載——這三條都會讓"
-            "「跑的不是你以為的那顆模型」而輸出檔完全正常。"
+            f"找不到引擎檔 {model_path}。`model_path` 是 cwd 相對路徑，四包一律在 "
+            "repo 根執行（`uv run` 不改變 cwd）；在別的 cwd 跑就會是這個症狀。"
+            "自己先擋是為了訊息——TensorRT backend 直接 open()，拋出來的例外只有"
+            "一個路徑字串。"
         )
 
 
@@ -176,8 +174,9 @@ def _validate_dynamic(metadata: dict) -> None:
     出原因是引擎綁死了批次。而湊不滿批是常態而非例外：T4（n1-standard-8）上實測一次
     跑完出現了 16 種不同的批次大小，1 到 16 全都有，解碼餵不滿批。
 
-    接手這件事的 `_check_infer_shape` 幫不上忙——它排在 `predict` **之後**，靜態引擎
-    在 predict 裡就先崩了，永遠輪不到它。所以這一項要在載入時驗。
+    接手這件事的 `_check_infer_shape` 幫不上忙——它排在 forward **之前**沒錯，但驗的是
+    我們自己組出來的張量形狀，那個形狀本來就是對的；崩的是引擎容不下它。所以這一項要
+    在載入時、從 metadata 驗。
 
     Args:
         metadata: `read_engine_metadata` 讀回的 metadata。
