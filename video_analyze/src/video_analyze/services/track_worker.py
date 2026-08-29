@@ -5,8 +5,11 @@
 而它與 GPU 推論之間沒有資料相依（下一批的推論不需要上一批的軌跡），可以重疊。
 
 **跨進程傳的是偵測框而不是影格**：每格幾十個框、幾 KB，pickle 成本遠低於影格。影格在
-推論完成後就沒有用途（環形緩衝的 slot 在推論完成當下就歸還了，見 ADR-010），追蹤只需
-要框。座標一路都停在推論尺度上（影格在讀取端就縮好了），本模組在寫出前才映回原始解析
+推論完成後就沒有用途（環形緩衝的 slot 在**前處理**完成當下就歸還了，見 ADR-010 與
+ADR-013），追蹤只需要框。推論端自建後處理之後，送進來的框已經是 CPU numpy——`Boxes`
+不再出現在跨進程的介面上，本模組是唯一把它包回來餵 tracker 的地方。
+
+座標一路都停在推論尺度上（影格在讀取端就縮好了），本模組在寫出前才映回原始解析
 度——所以每路的反算參數與內容區也跟著搬到這裡。
 
 推論進程中途例外時送 `TRACK_FAILED`（fan-out 到每一片），收到就清掉自己的 `.tmp`
@@ -134,29 +137,31 @@ def split_detections(boxes: Boxes) -> tuple[Boxes, np.ndarray]:
 
 
 def to_payload(
-    stream_id: int, boxes: Boxes | None, frame_index: int, timestamp: datetime
+    stream_id: int, boxes: np.ndarray | None, frame_index: int, timestamp: datetime
 ) -> tuple[int, np.ndarray | None, int, datetime]:
-    """把推論結果轉成可跨進程傳遞的輕量元組。
+    """把一格的偵測結果包成可跨進程傳遞的輕量元組。
 
-    在推論端做這個轉換而不是直接把 `Boxes` 丟進 queue：`Boxes` 內含 tensor、可能還在
-    GPU 上，pickle 過去會連帶把 CUDA 狀態拖進來。轉成 CPU numpy 是幾 KB 的純資料。
+    推論端自建後處理之後（ADR-013），交進來的已經是 CPU numpy 的 N×6——整批一次
+    `.cpu()` 就在那一側做完了，本函式因此只剩「該格沒有偵測就送 None」，省下每格一次
+    空陣列的 pickle。**這裡不複製**：正式路徑的複製由 `mp.Queue` 的 pickle 負責。
 
     送的是**全部類別**的框（含 head），拆分留到 `_track_one` 做：`split_detections` 是
     純函式，而本模組本來就要把 numpy 包回 `Boxes` 才餵得了 tracker，拆在這一側等於零成本。
 
     Args:
         stream_id: 該格所屬的攝影機編號。
-        boxes: 該格的 `results[idx].boxes`，座標位於推論尺度。
+        boxes: `YOLODetector.infer` 回傳的該格 N×6 偵測陣列（x1、y1、x2、y2、conf、
+            cls），座標位於推論尺度。
         frame_index: 該影格在所屬片段內的序號。
         timestamp: 該影格的時間戳（台北在地時間）。
 
     Returns:
-        `(stream_id, box_data, frame_index, timestamp)`；`box_data` 是 `Boxes.data` 的
-        CPU numpy（N×6：x1、y1、x2、y2、conf、cls），該格沒有任何偵測時為 `None`。
+        `(stream_id, box_data, frame_index, timestamp)`；`box_data` 即傳進來的那個
+        N×6 陣列，該格沒有任何偵測時為 `None`。
     """
     if boxes is None or len(boxes) == 0:
         return stream_id, None, frame_index, timestamp
-    return stream_id, boxes.data.cpu().numpy(), frame_index, timestamp
+    return stream_id, boxes, frame_index, timestamp
 
 
 def _reject_inference_sized_shapes(frame_shapes: list[FrameShape]) -> None:

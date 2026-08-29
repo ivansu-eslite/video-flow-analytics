@@ -78,6 +78,12 @@ PR #103 移除；日後若要加回來，是要重新引入取副本的介面，
 歸還的職責因此整個歸呼叫端：`_collect_batch` 只把取用的 `(stream_id, slot)` 回報上去，
 **連 `free_queues` 都不再收**——拿不到就不可能提早歸還，比留著參數再用測試盯強。
 
+> **（issue #142 後更新）歸還點前移到前處理之後。** 偵測器的介面拆成 `preprocess` ＋
+> `infer` 兩步（ADR-013），像素在 `preprocess` 的 `np.stack` 當下就複製進新的 CPU 陣列、
+> H2D 也在它回傳前完成（pageable 記憶體的 `.to()` 是同步的），所以「不能更早」的界線
+> 從「`predict` 回來」移到「`preprocess` 回來」，reader 早一整段 forward 拿回空位。
+> 上面第三點的 `results[i].orig_img` 一併作廢——`Results` 已經不在正式推論路徑上。
+
 ### 3. `RING_SLOTS` 由 `[model].batch` 推導，不寫死
 
 ```python
@@ -116,6 +122,12 @@ RING_SLOTS = TARGET_BATCH * 2          # TARGET_BATCH = settings.model.batch
 **其一：歸還前把 `packet.frame` 與 `results[i].orig_img` 都設為 `None`。** 這兩處是**本
 專案自己持有**的、指向已放行 slot 的參照，清掉之後「日後有人在歸還之後讀畫面」從靜默讀到
 別格畫面變成當場拋錯。代價是 `FramePacket.frame` 的型別放寬為 `np.ndarray | None`。
+
+> **（issue #142 後更新）只剩 `packet.frame` 那半條，而下一段的「擋不住 ultralytics
+> 內部」已不再適用。** 自建前處理與後處理之後（ADR-013）不再呼叫 `predict`，
+> `predictor.dataset.im0` 與 `predictor.batch[1]` 兩個活別名連同 `Results` 一起從正式
+> 路徑消失，推論輸出（N×6 的 numpy）根本不攜帶影格參照。**這不是保護變弱**：那條保護
+> 防的是「日後有人在歸還之後讀影格」，而現在已經沒有可讀的參照留在下游。
 
 **這道保護不覆蓋 ultralytics 內部。** `LoadPilAndNumpy._single_check` 對 numpy 輸入原樣
 回傳，所以 `predictor.dataset.im0` 與 `predictor.batch[1]` 存的就是我們傳進去的那批 view；
@@ -166,6 +178,12 @@ tracking 迴圈與下一輪 `_collect_batch`。刻意不去清它們——動第
 或升級 ultralytics（`orig_img` 的處理是實作細節，不在其 API 契約裡）。屆時要改回取副本，
 而不是調歸還時機——Decision 4 把 `orig_img` 清成 `None`，就是要讓那一刻以 `AttributeError`
 的形式出現，而不是以「座標偏了幾十 px 的正常輸出」的形式出現。
+
+> **（issue #142 後更新）這整條依賴已經不存在。** 前處理與後處理改成本套件自己算
+> （ADR-013），`Results` 不再被建出來，推論輸出是 N×6 的 numpy——「歸還之後仍指著已放行
+> slot 的欄位」沒有了對象。上面四條裡的前兩條連同 predictor 一起消失；BYTETracker 與
+> 結果收集那兩條搬到追蹤進程（issue #109），行為不變。換句話說，這一節記的是**當時**
+> 為何不必取副本，不再是現行程式碼的約束。
 
 ## Consequences
 

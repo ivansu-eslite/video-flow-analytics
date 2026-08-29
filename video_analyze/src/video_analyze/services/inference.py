@@ -84,12 +84,12 @@ class InferencePipeline:
         data_queues: list[mp.Queue],
         rings: list[FrameRing],
     ) -> tuple[list[FramePacket], list[int], list[tuple[int, int]]]:
-        # 影格以 view 免複製取用，slot 因此不在這裡歸還，改由呼叫端在 predict 完成後
+        # 影格以 view 免複製取用，slot 因此不在這裡歸還，改由呼叫端在**前處理**完成後
         # 統一歸還（見 start_loop 的歸還迴圈）；在途影格數受環形緩衝 slot 數上限，
         # 不爆記憶體。刻意不收 free_queues：拿不到就不可能提早歸還，比只靠測試擋強。
         batch_packets: list[FramePacket] = []
         batch_stream_ids: list[int] = []
-        # 本批取用、待推論完成後歸還的 (stream_id, slot)。與 packet 同進退，故空批時
+        # 本批取用、待前處理完成後歸還的 (stream_id, slot)。與 packet 同進退，故空批時
         # 必然為空，呼叫端的空批分支不需要額外歸還
         held_slots: list[tuple[int, int]] = []
         fill_deadline: float | None = None
@@ -197,54 +197,46 @@ class InferencePipeline:
                     # 所有 queue 當下都沒有資料，短暫休眠避免忙等待耗盡 CPU
                     time.sleep(0.001)
                     continue
-                detect_start = time.perf_counter()
-                results = self.detector.predict([p.frame for p in batch_packets])
-                # predict 回傳時 boxes 已具體化到 CPU（隱含同步），此 wall time 已含
-                # GPU 實際耗時，不需額外 cuda.synchronize()
-                self.fps_meter.add_detection_time(time.perf_counter() - detect_start)
-                # predict 的前處理已把影格 letterbox 成新陣列並上傳 GPU，共享記憶體
-                # 可以放行了。歸還點卡在這裡的三個方向：
-                # - 不能更早：predict 的前處理還在讀共享記憶體，早還會讓 reader 邊寫
-                #   邊被讀。
-                # - 不能更晚：追蹤搬進獨立進程後這裡只剩「把框丟進 queue」（每格幾十
-                #   微秒），拖過去的代價比從前小，但方向不變——歸還越晚，reader 空等
-                #   越久。
-                # - `results[i].orig_img` 就是這些 slot 的 view（ultralytics
-                #   `engine/results.py` 是 `self.orig_img = orig_img`，沒有 `.copy()`），
-                #   歸還之後其內容不再可信。本迴圈不使用該欄位，但這是**本版消費路徑
-                #   的性質，不是 ultralytics 的保證**：前處理已把像素複製兩次、後處理
-                #   只取 `shape`、送往追蹤進程的 payload 只取 `boxes.data`（見
-                #   `track_worker.to_payload`，影格不跨進程）。日後開 `verbose=True`、
-                #   呼叫 `plot()` 或升級 ultralytics 都可能讓 `orig_img` 重新被讀到，
-                #   屆時要改回取副本，見 ADR-010；歸還後把該欄位一併清成 None，就是
-                #   為了讓那種情況當場炸出來。
-                # - **ultralytics 內部還留著同一批 view 的別名**：`predictor.dataset.im0`
-                #   與 `predictor.batch[1]` 存的就是我們傳進去的 list（`_single_check`
-                #   對 numpy 原樣回傳），predictor 掛在 model 上、要到下一次 predict 才
-                #   被替換。那兩處我們不清——去動別人的內部狀態，風險大於收益。因此下面
-                #   這道保護擋的是「我們自己的程式碼日後誤用」，不是所有路徑。
+                pre_start = time.perf_counter()
+                im = self.detector.preprocess([p.frame for p in batch_packets])
+                # 前處理只量到這裡：中間的歸還是幾個 queue.put，不計入 detection_time
+                # ——它的口徑是「前處理 ＋ forward ＋ 後處理」，改動前後同一把尺
+                preprocess_elapsed = time.perf_counter() - pre_start
+                # `preprocess` 回來時像素已經複製進新的 CPU 陣列（`np.stack`）並上傳
+                # GPU（pageable 記憶體的 `.to()` 是同步的），共享記憶體可以放行了。
+                # 歸還點卡在這裡的兩個方向：
+                # - 不能更早：`np.stack` 還在讀共享記憶體，早還會讓 reader 邊寫邊被讀。
+                # - 不能更晚：歸還越晚 reader 空等越久。它從「整批推論完成」前移到這裡
+                #   （ADR-013），讓 reader 早一整段 forward 的時間拿回空位。
+                # 影格參照只剩我們自己持有的 `packet.frame` 要切斷：推論輸出不再攜帶
+                # 影格（`Results` 已經不在正式路徑上），不呼叫 `predict` 也就沒有
+                # `predictor.dataset.im0`／`predictor.batch[1]` 那兩個 ultralytics 內部
+                # 的活別名（ADR-010 Decision 4 記的擋不住的那條，見 ADR-013）。清成
+                # None 讓「日後有人在歸還之後讀影格」從靜默讀到同一路幾格之後的畫面
+                # （內容正常、只是錯格，比對輸出也看不出來）變成當場拋錯；這一步與下面
+                # 的歸還不可對調，中間那段「slot 已歸還、參照還在」正是它要消滅的狀態。
                 #
-                # 刻意不包 try/finally：predict 或 READER_FAILED 拋出時 held_slots 不
-                # 歸還，該路 reader 會卡在 free_queue.get()，但不會 hang——推理進程死亡
-                # 後 pipeline.py 的 _raise_if_abnormal 偵測到非零 exitcode，
-                # _terminate_all 會殺掉所有 reader。包起來得讓 held_slots 的作用域橫跨
-                # _collect_batch 與本函式兩層，不值得。
-                # 先切斷**我們自己持有**的兩個 slot 參照，再放行記憶體——順序不能對調：中間那段
-                # 「slot 已歸還、參照還在」正是這道保護要消滅的狀態，而 zip 的 strict
-                # 也可能在此拋錯。清成 None 讓「日後有人在歸還之後讀影格」從靜默讀到
-                # 同一路幾格之後的畫面（內容正常、只是錯格，比對輸出也看不出來）變成
-                # 當場拋錯。`orig_img` 清得掉是因為 Results 建構時已把 `orig_shape`
-                # 另存一份，本迴圈之後只用 `boxes`（其座標系也綁在 `orig_shape` 上）；
-                # strict 順帶釘住 predict 逐格回傳一個 result
-                for packet, result in zip(batch_packets, results, strict=True):
+                # 刻意不包 try/finally：preprocess／infer 或 READER_FAILED 拋出時
+                # held_slots 不歸還，該路 reader 會卡在 free_queue.get()，但不會 hang
+                # ——推理進程死亡後 pipeline.py 的 _raise_if_abnormal 偵測到非零
+                # exitcode，_terminate_all 會殺掉所有 reader。包起來得讓 held_slots 的
+                # 作用域橫跨 _collect_batch 與本函式兩層，不值得。
+                for packet in batch_packets:
                     packet.frame = None
-                    result.orig_img = None
                 for held_stream_id, held_slot in held_slots:
                     free_queues[held_stream_id].put(held_slot)
-                # 送 payload 排在歸還之後：`to_payload` 取的是 `results[idx].boxes`
-                # （推論輸出，不是影格），與 slot 無關，歸還之後仍可取
-                for idx, stream_id in enumerate(batch_stream_ids):
-                    packet = batch_packets[idx]
+                infer_start = time.perf_counter()
+                detections = self.detector.infer(im)
+                # infer 內整批一次 `.cpu()` 已具體化（隱含同步），這段 wall time 已含
+                # GPU 實際耗時，不需額外 cuda.synchronize()
+                self.fps_meter.add_detection_time(
+                    preprocess_elapsed + time.perf_counter() - infer_start
+                )
+                # 送 payload 排在歸還之後：payload 帶的是偵測框（推論輸出，已在 CPU），
+                # 與 slot 無關，歸還之後仍可取。strict 順帶釘住 infer 逐格回傳一個結果
+                for packet, stream_id, boxes in zip(
+                    batch_packets, batch_stream_ids, detections, strict=True
+                ):
                     # 追蹤、落腳點推算、座標反算與寫 parquet 都在追蹤進程做（實測追蹤
                     # 每格 1.81 ms、佔本進程 8.4%，而它與下一批的 GPU 推論之間沒有資料
                     # 相依）。這裡只把該格的全部偵測框丟出去，含 head——拆分也在那邊做。
@@ -255,7 +247,7 @@ class InferencePipeline:
                     self.track_queues[self.route[stream_id]].put(
                         to_payload(
                             stream_id,
-                            results[idx].boxes,
+                            boxes,
                             packet.frame_index,
                             packet.timestamp,
                         )
