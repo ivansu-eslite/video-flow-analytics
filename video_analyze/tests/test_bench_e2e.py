@@ -6,6 +6,7 @@
 能 import `bench_e2e` 是靠 `conftest.py` 把 `tools/` 插進 `sys.path`（見該檔）。
 """
 
+import argparse
 import datetime
 import json
 
@@ -16,8 +17,10 @@ from bench_e2e import (
     FpsReading,
     GpuUsage,
     RunRecord,
+    TrackWorkerReading,
     _count_segments,
     _engine_path,
+    _format_track_summary,
     _host_cpu,
     _model_classes,
     artifact_paths,
@@ -26,6 +29,7 @@ from bench_e2e import (
     check_name_component,
     check_runs_dir_disjoint,
     clear_artifacts,
+    command_report,
     expand_matrix,
     extra_settings_env,
     format_meta,
@@ -48,18 +52,34 @@ _INFERENCE_LINE = json.dumps(
     },
     ensure_ascii=False,
 )
-_TRACK_WORKER_LINE = json.dumps(
-    {
+
+
+def _track_worker_line(
+    shard_id: int | None = 0,
+    *,
+    overall_fps: float = 514.34,
+    tracking_fps: float | None = 968.18,
+    cameras: tuple[str, ...] = ("cam01",),
+) -> str:
+    """一片追蹤進程的結束行。`shard_id=None` 模擬分片之前的舊產物。"""
+    entry = {
         "component": "track_worker",
         "message": "追蹤進程結束",
         "frames": 20590,
         "elapsed_seconds": 40.0,
-        "overall_fps": 514.34,
-        "tracking_fps": 968.18,
+        "overall_fps": overall_fps,
+        "tracking_fps": tracking_fps,
         "severity": "INFO",
-    },
-    ensure_ascii=False,
-)
+    }
+    if shard_id is not None:
+        entry["shard_id"] = shard_id
+        entry["owned_cameras"] = list(cameras)
+    if tracking_fps is None:
+        del entry["tracking_fps"]
+    return json.dumps(entry, ensure_ascii=False)
+
+
+_TRACK_WORKER_LINE = _track_worker_line()
 
 
 def _record(name: str, fps: float | None, *, exit_status: str = "0", **meta: str) -> RunRecord:
@@ -71,7 +91,15 @@ def _record(name: str, fps: float | None, *, exit_status: str = "0", **meta: str
             inference_fps=fps,
             inference_frames=20590 if fps else None,
             inference_elapsed_seconds=40.7 if fps else None,
-            track_worker_fps=514.34,
+            track_workers=(
+                TrackWorkerReading(
+                    shard_id=0,
+                    overall_fps=514.34,
+                    tracking_fps=968.18,
+                    frames=20590,
+                    cameras=("cam01",),
+                ),
+            ),
         ),
         gpu=GpuUsage(samples=20, mean_sm_percent=16.0, max_sm_percent=18.0, max_fb_mb=2287.0),
     )
@@ -104,7 +132,7 @@ def test_parse_fps_log_keeps_both_readings_under_separate_names():
     reading = parse_fps_log(f"{_TRACK_WORKER_LINE}\n{_INFERENCE_LINE}\n")
 
     assert reading.inference_fps == 506.46
-    assert reading.track_worker_fps == 514.34
+    assert reading.min_track_worker_fps == 514.34
     assert not hasattr(reading, "fps")
     assert not hasattr(reading, "overall_fps")
 
@@ -117,18 +145,77 @@ def test_parse_fps_log_does_not_backfill_inference_from_track_worker():
     reading = parse_fps_log(f"{_TRACK_WORKER_LINE}\n")
 
     assert reading.inference_fps is None
-    assert reading.track_worker_fps == 514.34
+    assert reading.min_track_worker_fps == 514.34
     assert reading.completed is False
+
+
+def test_parse_fps_log_collects_one_reading_per_shard():
+    """追蹤進程分片後每片各印一行，全部收下來，餘裕取最慢那片。
+
+    這條壞掉的樣子是 `bench_e2e run` 第一輪跑完就崩（issue #143 之前 `parse_fps_log`
+    對第二行追蹤結束拋 `ValueError`，`command_run` 沒接），矩陣後續輪次一輪都不跑。
+    平均掉各片同樣不行：瓶頸是最慢的那片，平均會把它蓋掉。
+    """
+    log = (
+        f"{_track_worker_line(0, overall_fps=520.0, tracking_fps=1040.0)}\n"
+        f"{_INFERENCE_LINE}\n"
+        f"{_track_worker_line(1, overall_fps=500.0, tracking_fps=800.0, cameras=('cam02',))}\n"
+    )
+
+    reading = parse_fps_log(log)
+
+    assert reading.shard_count == 2
+    assert [item.shard_id for item in reading.track_workers] == [0, 1]
+    assert [item.cameras for item in reading.track_workers] == [("cam01",), ("cam02",)]
+    assert reading.min_track_worker_fps == 500.0
+    assert reading.min_track_worker_headroom == pytest.approx(1.6)
+    assert reading.inference_fps == 506.46
+
+
+def test_parse_fps_log_headroom_is_none_when_any_shard_lacks_tracking_fps():
+    """任一片缺 `tracking_fps` 就不給餘裕，而不是拿剩下幾片算最小值。
+
+    跳過缺值的片會漏掉「可能最慢的那片」，算出的餘裕偏大——這個數字是容量決策的依據，
+    偏大正是會誤事的方向。
+    """
+    log = (
+        f"{_track_worker_line(0, overall_fps=520.0, tracking_fps=1040.0)}\n"
+        f"{_track_worker_line(1, overall_fps=500.0, tracking_fps=None)}\n"
+    )
+
+    reading = parse_fps_log(log)
+
+    assert reading.shard_count == 2
+    assert reading.min_track_worker_fps == 500.0
+    assert reading.min_track_worker_headroom is None
 
 
 def test_parse_fps_log_rejects_duplicate_inference_line():
     """同一份 log 出現兩行推論 `FPS 整體`，代表兩次執行寫進同一份檔案。
 
     靜默取其中一個就是「這輪的 meta 配上另一輪的 log」——產物看起來完好，數字對不上
-    卻查不出原因。
+    卻查不出原因。放寬追蹤那側之後這道更要在：推論行沒有分片，重複只有一種解釋。
     """
     with pytest.raises(ValueError, match="兩行推論進程"):
         parse_fps_log(f"{_INFERENCE_LINE}\n{_INFERENCE_LINE}\n")
+
+
+def test_parse_fps_log_rejects_duplicate_shard_id():
+    """兩行 `shard_id` 相同的追蹤結束＝兩次執行寫進同一份 log，仍要拋錯。
+
+    同一次執行的各片編號互異，所以放寬「多行追蹤結束」之後，`shard_id` 是分辨「N 片」
+    與「跑了兩次」的依據；不擋的話兩次執行會被當成兩片，最小值取到的是另一輪的數字。
+    """
+    with pytest.raises(ValueError, match="shard_id=0"):
+        parse_fps_log(f"{_TRACK_WORKER_LINE}\n{_TRACK_WORKER_LINE}\n")
+
+
+def test_parse_fps_log_rejects_duplicate_track_line_without_shard_id():
+    """分片之前的舊產物沒有 `shard_id`，那時每輪只有一行，兩行同樣算兩次執行。"""
+    old_line = _track_worker_line(None)
+
+    with pytest.raises(ValueError, match="shard_id=None"):
+        parse_fps_log(f"{old_line}\n{old_line}\n")
 
 
 def test_parse_fps_log_skips_non_json_lines():
@@ -140,6 +227,65 @@ def test_parse_fps_log_skips_non_json_lines():
     )
 
     assert parse_fps_log(noisy).inference_fps == 506.46
+
+
+def test_format_track_summary_names_the_slowest_shard_and_its_cameras():
+    """`run` 的摘要列要指出是哪一片最慢、那片扛著哪幾路。
+
+    分片分組是執行當下依路數與 `shards` 算出來的，摘要列不印就得回頭翻 log。
+    """
+    slow = _track_worker_line(
+        1, overall_fps=500.0, tracking_fps=800.0, cameras=("cam02", "cam03")
+    )
+    log = f"{_track_worker_line(0, overall_fps=520.0, tracking_fps=1040.0)}\n{slow}\n"
+
+    summary = _format_track_summary(parse_fps_log(log))
+
+    assert "500.00 張/秒" in summary
+    assert "2 片" in summary
+    assert "最慢 shard 1" in summary
+    assert "最小餘裕 1.60×" in summary
+    assert summary.endswith("；shard 1＝cam02、cam03）")
+
+
+def test_format_track_summary_without_any_track_line():
+    """推論崩在追蹤結束之前，log 一行追蹤結束都沒有。
+
+    這條壞掉的樣子是摘要列對著空 tuple 取 `min()` 而拋 `ValueError`——那一輪本來只是
+    沒跑完，卻讓整個矩陣停在印摘要這一步。
+    """
+    summary = _format_track_summary(parse_fps_log(f"{_INFERENCE_LINE}\n"))
+
+    assert summary == "追蹤（最小）－"
+
+
+def test_format_track_summary_omits_shard_label_for_pre_sharding_logs():
+    """分片之前的舊 log 沒有 `shard_id`，摘要列就不提片編號，也不印攝影機。
+
+    照樣格式化的話會印出「最慢 shard None」；那是把缺值印成一個看起來像編號的東西。
+    """
+    summary = _format_track_summary(parse_fps_log(f"{_track_worker_line(None)}\n"))
+
+    assert summary.startswith("追蹤（最小）514.34 張/秒")
+    assert "shard" not in summary
+    assert "cam" not in summary
+
+
+def test_format_track_summary_marks_missing_headroom():
+    """任一片缺 `tracking_fps` 時餘裕是 `None`，摘要列要說「缺值」而不是套 `:.2f`。
+
+    對 `None` 套格式會 `TypeError`，而這只在跑完一輪印摘要時才會踩到——地端實跑走的是
+    有 `tracking_fps` 的路徑，測不到就等著在別人的舊產物上炸。
+    """
+    log = (
+        f"{_track_worker_line(0, overall_fps=520.0, tracking_fps=1040.0)}\n"
+        f"{_track_worker_line(1, overall_fps=500.0, tracking_fps=None)}\n"
+    )
+
+    summary = _format_track_summary(parse_fps_log(log))
+
+    assert "500.00 張/秒" in summary
+    assert "餘裕缺值" in summary
 
 
 def test_group_runs_averages_inference_values_only():
@@ -433,6 +579,53 @@ def test_load_run_records_isolates_a_broken_artifact(tmp_path):
     assert [record.name for record in records] == ["good"]
     assert len(broken) == 1
     assert broken[0].startswith("bad：")
+
+
+def _write_run(runs_dir, name: str, log_body: str) -> None:
+    """一輪產物：meta 只填 `report` 表格會用到的欄位。"""
+    (runs_dir / f"{name}.meta").write_text(
+        "bucket=bucket_20260801_perf40\nmodel_batch=16\n"
+        "foot_point_method=head\nexit_status=0\n",
+        encoding="utf-8",
+    )
+    (runs_dir / f"{name}.log").write_text(log_body, encoding="utf-8")
+
+
+def test_command_report_prints_dashes_for_missing_track_fields(tmp_path, capsys):
+    """追蹤側三欄缺值時印 `-`，不對 `None` 套 `:.2f`。
+
+    這三欄各有一種缺法：舊產物沒有 `tracking_fps`（算不出餘裕）、崩在追蹤結束之前的輪次
+    連一行追蹤結束都沒有。格式化寫錯不會在解析階段有訊號，要到 `report` 印表才炸，而那
+    時整份報表一列都印不出來——包含跑得好好的那幾輪。
+    """
+    _write_run(
+        tmp_path,
+        "a_sharded",
+        f"{_INFERENCE_LINE}\n"
+        f"{_track_worker_line(0, overall_fps=520.0, tracking_fps=1040.0)}\n"
+        f"{_track_worker_line(1, overall_fps=500.0, tracking_fps=800.0)}\n",
+    )
+    _write_run(
+        tmp_path,
+        "b_no_tracking_fps",
+        f"{_INFERENCE_LINE}\n{_track_worker_line(0, tracking_fps=None)}\n",
+    )
+    _write_run(tmp_path, "c_no_track_line", f"{_INFERENCE_LINE}\n")
+
+    exit_code = command_report(
+        argparse.Namespace(runs_dir=tmp_path, exclude_prefixes="smoke")
+    )
+
+    assert exit_code == 0
+    rows = {
+        line.split()[0]: line.split()
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith(("a_", "b_", "c_"))
+    }
+    # 欄序：run bucket b foot infer_fps trk_min shd hdrm …
+    assert rows["a_sharded"][4:8] == ["506.46", "500.00", "2", "1.60"]
+    assert rows["b_no_tracking_fps"][4:8] == ["506.46", "514.34", "1", "-"]
+    assert rows["c_no_track_line"][4:8] == ["506.46", "-", "-", "-"]
 
 
 @pytest.mark.parametrize(
