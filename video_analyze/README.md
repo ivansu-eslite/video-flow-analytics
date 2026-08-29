@@ -358,7 +358,7 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理／追蹤子進程生命週期） |
 | `services/inference.py` | 推理迴圈（湊批、偵測、把偵測框送往追蹤進程） |
 | `services/track_worker.py` | 追蹤進程（N 個）：偵測框拆分、追蹤、落腳點推算、座標反算、寫自己那支 part；`TRACK_DONE`／`TRACK_FAILED` 訊號與 fan-out |
-| `services/detector.py` | TensorRT 引擎載入與偵測；載入前的五道檢查、執行期的張量核對，以及自建的前處理（`preprocess_batch`，GPU）與後處理（`postprocess_batch`，整批一次 D2H 後用 numpy 過濾）|
+| `services/detector.py` | TensorRT 引擎載入與偵測；載入前看 metadata 的檢查、載入末端驗 end2end 的 zeros forward、執行期的張量核對，以及自建的前處理（`preprocess_batch`，GPU）與後處理（`postprocess_batch`，整批一次 D2H 後用 numpy 過濾）|
 | `services/engine_metadata.py` | 引擎自帶 metadata 的注入格式、讀取與環境比對（建置端與載入端共用同一份） |
 | `services/foot_point.py` | `FootPointEstimator`：head 框配對與落腳點推算；自行維護跨幀狀態（每條軌跡上次成功推算的偏移量，共用 head 的那些不存） |
 | `services/tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |

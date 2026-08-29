@@ -47,8 +47,10 @@ postprocess 則是**逐格**在 GPU 上做 boolean index 再逐格 `.cpu()`：�
   當成連續的讀進去，等於餵了一張錯位的影像。
 - **是 `.float()` 不是 `.half()`**。FP16 引擎的 I/O binding 仍是 FP32
   （`_validate_precision` 的 docstring 已記這件事），送 FP16 進去會變快又變得不一樣。
-  `AutoBackend` 建構時傳 `fp16=False` 是同一條的另一半：填 True 會讓它在送進 backend
-  前把張量 `.half()` 掉。
+  `AutoBackend` 建構時傳的 `fp16=False` 不是這件事的執行機制：engine 這條路徑上
+  `TensorRTBackend.load_model` 會先把 `self.fp16` 設回 False、再依 input binding 的 dtype
+  覆寫，`AutoBackend.forward` 讀的是覆寫後的 `self.backend.fp16`，建構子傳進來的值用不到。
+  填 False 只是不製造相反的訊號。
 
 H2D 的資料量與 GPU 上的算式都沒有變，省下來的就是 Context 的第 1 與第 3 趟。
 

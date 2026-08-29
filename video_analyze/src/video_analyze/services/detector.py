@@ -375,9 +375,13 @@ class YOLODetector:
     def __init__(self):
         """載入 `settings.model.model_path` 指定的 TensorRT 引擎。
 
-        驗證全部排在載入引擎**之前**：這幾項都只看引擎檔頭（ultralytics 把
-        `json.dumps(metadata)` 寫在引擎前面，見 `services/engine_metadata.py`），
-        不合格的引擎不必先吃掉 deserialize 的數秒與數 GB 顯存。
+        **看 metadata 的那幾道排在載入引擎之前**（`_require_engine_file`、
+        `validate_engine_metadata`、`_validate_precision`、`_validate_dynamic`、
+        `_validate_classes`）：它們都只看引擎檔頭（ultralytics 把 `json.dumps(metadata)`
+        寫在引擎前面，見 `services/engine_metadata.py`），不合格的引擎不必先吃掉
+        deserialize 的數秒與數 GB 顯存。**end2end 那道排在載入末端**
+        （`_warmup_and_require_end2end`）：它驗的是引擎實跑出來的輸出形狀，
+        非得先建好 `AutoBackend` 不可。
 
         **直接建 `AutoBackend`，不經 `YOLO`／`predictor`**：後者會連帶帶進一組
         `conf`／`iou`／`classes`／`max_det`，那些參數在自建後處理之後看起來還在生效、
@@ -386,9 +390,11 @@ class YOLODetector:
         代價是 deserialize 從第一批推論提前到這裡——兩者都在推論子進程內，
         `pipeline.py` 的錯誤路徑不變，而提前等於失敗得更早。
 
-        **`fp16=False`**：FP16 引擎的 I/O binding 仍是 FP32，`AutoBackend` 對它永遠
-        回報 `fp16 = False`，這裡填的值只是把既有事實寫明——填 True 會讓
-        `AutoBackend.forward` 在送進 backend 前把張量 `.half()` 掉。
+        **`fp16=False`**：FP16 引擎的 I/O binding 仍是 FP32，而 engine 這條路徑上
+        `fp16` 由 backend 自己從 input binding 的 dtype 決定——`TensorRTBackend.load_model`
+        先把 `self.fp16` 設回 False、再依 binding dtype 覆寫，`AutoBackend.forward`
+        讀的是覆寫後的 `self.backend.fp16`，建構子傳進來的值用不到。這裡填 False
+        只是不製造相反的訊號。
 
         **不呼叫 `.to(device)`**：引擎不是 PyTorch module，呼叫就崩；裝置在建構時指定。
         **也沒有 CPU fallback**：引擎綁 GPU，CPU 上不是「比較慢」而是一定失敗。
