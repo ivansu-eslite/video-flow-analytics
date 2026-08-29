@@ -310,7 +310,8 @@ def run_track_worker(
             parquet 供下游做解析度相關的參數換算，同時是把框與落腳點映射回原始解析度
             的依據（見 `services/letterbox.py`）。同樣是完整清單。
         part_path: 這一片的 part 檔路徑（`tracking_results.parts/shard<k>.parquet`）。
-        shard_id: 這一片的編號，只進 log——N 行「追蹤進程結束」要分得出誰是誰。
+        shard_id: 這一片的編號，只進 log——N 行「追蹤進程結束」要分得出誰是誰，
+            下游的量測工具也靠它辨識「N 片各印一行」與「兩次執行寫進同一份 log」。
         owned_stream_ids: 這一片負責的 stream_id 集合。收到不屬於自己的就拋錯：那是
             路由寫錯時**唯一**的訊號。`MultiStreamByteTracker.update` 對未知 stream_id
             回空陣列那條靜默路徑在這裡走不到（每片都建滿了全部路的 tracker），送錯片
@@ -401,7 +402,12 @@ def run_track_worker(
         elapsed = (
             0.0 if first_payload_at is None else time.perf_counter() - first_payload_at
         )
-        _log_fps_summary(fps_meter, elapsed, shard_id)
+        _log_fps_summary(
+            fps_meter,
+            elapsed,
+            shard_id,
+            [stream_names[stream_id] for stream_id in sorted(owned_stream_ids)],
+        )
         # 收尾的最後一步同樣不受理終止訊號：`save()` 關掉 writer 之後、rename 之前被打斷
         # 的話，暫存檔此刻已經是一份**完整**的 parquet，而 `except` 的 `discard()` 會把它
         # 刪掉——本來只要人工把 `.tmp` 改個名就救得回來的東西就沒了。`finally` 會還原
@@ -430,9 +436,12 @@ def run_track_worker(
 
 
 def _log_fps_summary(
-    fps_meter: FpsMeter, elapsed_seconds: float, shard_id: int
+    fps_meter: FpsMeter,
+    elapsed_seconds: float,
+    shard_id: int,
+    owned_cameras: list[str],
 ) -> None:
-    """把這一片的吞吐與純處理速度印成一行。
+    """把這一片的吞吐、純處理速度與它負責的攝影機印成一行。
 
     追蹤移出推論進程後，這個進程就是下一個候選瓶頸——實測改完之後它的餘裕只剩約 1.68
     倍，人流再多約 2.6 倍就換它當瓶頸。`tracking_fps`（純處理速度）除以 `overall_fps`
@@ -440,12 +449,19 @@ def _log_fps_summary(
     分片之後每片各印一行，**餘裕取各片的最小值**：整條 pipeline 的瓶頸是最慢的那片，
     平均會把它蓋掉。
 
+    `owned_cameras` 印的是攝影機名而不是 `stream_id`：這行是分片分組**在事後唯一可考
+    的紀錄**（分組由路數與 `shards` 在執行當下算出，log 之外沒有留檔），而效能量測要
+    回答的是「哪幾路擠在最慢的那片」，換算 `stream_id` 得另外拿到當次的 `stream_names`
+    順序。「追蹤進程啟動」那行印的 `owned_stream_ids` 不能代替：跑完才知道哪片最慢，
+    屆時要往回配對兩行。
+
     不印 `detection_fps`：本進程不做偵測，那個欄位必為 0，是誤導而不是缺值。
     """
     summary = fps_meter.summary(elapsed_seconds)
     logger.info(
         "追蹤進程結束",
         shard_id=shard_id,
+        owned_cameras=owned_cameras,
         frames=summary.total_frames,
         elapsed_seconds=round(summary.elapsed_seconds, 1),
         overall_fps=round(summary.overall_fps, 2),

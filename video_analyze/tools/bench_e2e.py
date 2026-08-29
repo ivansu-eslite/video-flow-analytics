@@ -7,19 +7,20 @@
 `outputs/` 底下：下次要重跑（換卡、改批次、驗證某次重構有沒有拖慢）得從頭再寫一次。
 
 ⚠ **FPS 口徑：報表的「每秒張數」一律取推論進程**——`component == "inference"` 的
-`FPS 整體` 那行。每輪 log 其實有**兩行** `overall_fps`，追蹤進程結束時也印一行
-（`追蹤進程結束`），但它的分母是該進程自己的 wall clock，與推論進程不是同一個東西，
-混用會系統性高估 1–2%。這件事寫在註解裡活不久，所以本檔改用四道互鎖：
+`FPS 整體` 那行。每輪 log 裡還有**追蹤進程**印的 `overall_fps`（`追蹤進程結束`，
+`[tracker].shards` 有幾片就有幾行），但它的分母是該進程自己的 wall clock，與推論進程
+不是同一個東西，混用會系統性高估 1–2%。這件事寫在註解裡活不久，所以本檔改用四道互鎖：
 
-1. 解析器回傳的 `FpsReading` 是 frozen dataclass，欄位各自帶口徑
-   （`inference_fps`／`track_worker_fps`），**沒有任何欄位叫 `fps` 或 `overall_fps`**，
-   呼叫端拿不到一個泛用的 FPS 可以誤用。
+1. 解析器回傳的 `FpsReading` 是 frozen dataclass，欄位各自帶口徑（`inference_fps`／
+   逐片的 `track_workers`），**沒有任何欄位叫 `fps` 或 `overall_fps`**，呼叫端拿不到
+   一個泛用的 FPS 可以誤用；要單一追蹤數字得走 `min_track_worker_fps`，名字裡就帶著
+   「取最小值」——瓶頸是最慢的那片，平均會把它蓋掉。
 2. 分組統計的輸入只由 `_inference_fps_values()` 產生，追蹤值不傳進去；明細表兩欄分開
    標示，而分組平均只有推論那一個。
 3. 缺推論行時**不以追蹤值遞補**，該列標為未完成並排除在統計外——遞補正好製造系統性高估。
 4. `component` 與 `message` 兩個欄位同時比對；重複的推論行直接拋錯（代表兩次執行寫進
-   同一份 log，靜默取一個是同類錯誤）。**不提供切換口徑的旗標**：給了開關等於承認兩者
-   可互換，而它們分母不同。
+   同一份 log，靜默取一個是同類錯誤），追蹤行則以 `shard_id` 重複來認同一件事。
+   **不提供切換口徑的旗標**：給了開關等於承認兩者可互換，而它們分母不同。
 
 其餘四個刻意的取捨：
 
@@ -134,33 +135,96 @@ _TRACK_WORKER_MESSAGE = "追蹤進程結束"
 
 
 @dataclass(frozen=True)
-class FpsReading:
-    """一輪 log 裡的兩個 `overall_fps`，各自標明是哪個進程量的。
+class TrackWorkerReading:
+    """追蹤進程**一片**結束時印的那行（`shards` 有幾片就有幾行）。
 
-    **沒有泛用的 `fps` 欄位是刻意的**：兩個值的分母不同（推論進程的 wall clock 對
+    `shard_id` 是那片的編號，分片（issue #141）之前的舊產物沒有這個欄位，為 `None`；
+    `cameras` 是 issue #143 才加印的，更早的產物即使有 `shard_id` 也拿不到。
+    `tracking_fps`／`frames` 同理，缺欄位就是 `None` 或空 tuple，不猜也不補。
+    """
+
+    shard_id: int | None
+    overall_fps: float
+    tracking_fps: float | None
+    frames: int | None
+    cameras: tuple[str, ...]
+
+    @property
+    def headroom(self) -> float | None:
+        """這片的餘裕＝純處理速度 ÷ 實際吞吐（含等上游）。缺 `tracking_fps` 時為 None。"""
+        if self.tracking_fps is None or self.overall_fps <= 0:
+            return None
+        return self.tracking_fps / self.overall_fps
+
+
+@dataclass(frozen=True)
+class FpsReading:
+    """一輪 log 裡的推論口徑，加上逐片的追蹤口徑。
+
+    **沒有泛用的 `fps` 欄位是刻意的**：兩個口徑的分母不同（推論進程的 wall clock 對
     追蹤進程的 wall clock），差 1–2%，取名 `fps` 就等於邀請呼叫端隨手取一個。
     `inference_frames`／`inference_elapsed_seconds` 只跟著推論那行走。
+
+    追蹤側**存成逐片而不是先聚合成一個數**：整條 pipeline 的瓶頸是最慢的那片，先平均
+    會把它蓋掉，而平均值看起來完全合理。要單一數字的呼叫端走
+    `min_track_worker_fps`／`min_track_worker_headroom`，名字裡就帶著取最小值這件事。
     """
 
     inference_fps: float | None
     inference_frames: int | None
     inference_elapsed_seconds: float | None
-    track_worker_fps: float | None
+    track_workers: tuple[TrackWorkerReading, ...]
 
     @property
     def completed(self) -> bool:
         """有推論那行才算跑完。追蹤值**不能**拿來遞補（會系統性高估）。"""
         return self.inference_fps is not None
 
+    @property
+    def shard_count(self) -> int:
+        """印出結束行的片數。
+
+        崩在半路的片走不到那行，這個數字因此可能少於 `[tracker].shards`。不在這裡擋：
+        少一片時該輪的 `exit_status` 必然非 0，報表上已經有訊號。
+        """
+        return len(self.track_workers)
+
+    @property
+    def min_track_worker_fps(self) -> float | None:
+        """最慢那片的 `overall_fps`；一片都沒有時為 None。"""
+        if not self.track_workers:
+            return None
+        return min(reading.overall_fps for reading in self.track_workers)
+
+    @property
+    def min_track_worker_headroom(self) -> float | None:
+        """最慢那片的餘裕；**只要有一片缺 `tracking_fps` 就回 None**。
+
+        跳過缺值的片去取剩下幾片的最小值，偏誤方向剛好是「漏掉可能最慢的那片」，
+        算出來的餘裕偏大——而這個數字是容量決策的依據，偏大正是會誤事的方向。
+        """
+        if not self.track_workers:
+            return None
+        headrooms = [reading.headroom for reading in self.track_workers]
+        if any(headroom is None for headroom in headrooms):
+            return None
+        return min(headroom for headroom in headrooms if headroom is not None)
+
 
 def parse_fps_log(text: str) -> FpsReading:
-    """從一輪的 stdout log 取兩個口徑的 `overall_fps`。
+    """從一輪的 stdout log 取推論口徑，以及逐片的追蹤口徑。
 
-    非 JSON 的行（uv 的下載進度、ultralytics 的橫幅）直接略過；同一口徑出現兩行即
-    拋錯——那代表兩次執行寫進同一份 log，靜默取其中一個會產生看似合理的數字。
+    非 JSON 的行（uv 的下載進度、ultralytics 的橫幅）直接略過。
+
+    **追蹤結束多行是正常的**（`[tracker].shards` 有幾片就有幾行，見 ADR-012），所以
+    收集而不拋錯；分辨「多片」與「兩次執行寫進同一份 log」靠的是 `shard_id`——同一次
+    執行的各片編號互異，重複即代表兩次執行，仍拋錯。分片之前的舊產物沒有 `shard_id`，
+    那時每輪本來就只有一行，兩行 `None` 同樣算重複。推論那行沒有分片，重複一律拋錯，
+    這個前提沒變。
     """
     inference: dict | None = None
-    track_worker: dict | None = None
+    track_workers: list[TrackWorkerReading] = []
+    seen_shard_ids: set[int | None] = set()
     for line in text.splitlines():
         if "overall_fps" not in line:
             continue
@@ -180,23 +244,69 @@ def parse_fps_log(text: str) -> FpsReading:
                 )
             inference = entry
         elif component == _TRACK_WORKER_COMPONENT and message == _TRACK_WORKER_MESSAGE:
-            if track_worker is not None:
+            raw_shard_id = entry.get("shard_id")
+            shard_id = None if raw_shard_id is None else int(raw_shard_id)
+            if shard_id in seen_shard_ids:
                 raise ValueError(
-                    f"同一份 log 出現兩行追蹤進程的「{_TRACK_WORKER_MESSAGE}」，"
-                    "代表兩次執行寫進同一份 log。"
+                    f"同一份 log 出現兩行 shard_id={shard_id} 的「{_TRACK_WORKER_MESSAGE}」，"
+                    "代表兩次執行寫進同一份 log（同一次執行的各片編號互異）。"
                 )
-            track_worker = entry
+            seen_shard_ids.add(shard_id)
+            raw_frames = entry.get("frames")
+            raw_tracking_fps = entry.get("tracking_fps")
+            track_workers.append(
+                TrackWorkerReading(
+                    shard_id=shard_id,
+                    overall_fps=float(entry["overall_fps"]),
+                    tracking_fps=(
+                        None if raw_tracking_fps is None else float(raw_tracking_fps)
+                    ),
+                    frames=None if raw_frames is None else int(raw_frames),
+                    cameras=tuple(entry.get("owned_cameras") or ()),
+                )
+            )
     return FpsReading(
         inference_fps=None if inference is None else float(inference["overall_fps"]),
         inference_frames=None if inference is None else int(inference["total_frames"]),
         inference_elapsed_seconds=(
             None if inference is None else float(inference["elapsed_seconds"])
         ),
-        track_worker_fps=(
-            None if track_worker is None else float(track_worker["overall_fps"])
+        track_workers=tuple(
+            sorted(
+                track_workers,
+                key=lambda reading: (reading.shard_id is None, reading.shard_id),
+            )
         ),
     )
 
+
+def _format_track_summary(reading: FpsReading) -> str:
+    """把逐片追蹤讀數縮成摘要列的一段：最慢那片的吞吐、片數與最小餘裕。
+
+    取最小不取平均：整條 pipeline 的瓶頸是最慢的那片，平均會把它蓋掉，而平均值看起來
+    完全合理。片數一起印，是因為「只有一片」與「多片中最慢的一片」是不同的數字；最慢那片
+    負責的攝影機也印出來——分片分組是執行當下依路數與 `shards` 算出來的，不印就得回頭翻
+    log 才知道是哪幾路擠在一起。
+
+    分片之前的舊 log 沒有 `shard_id`（連帶沒有 `owned_cameras`）、更舊的沒有
+    `tracking_fps`，缺哪個就少印哪一段，不以 `None` 硬套格式。
+    """
+    if not reading.track_workers:
+        return "追蹤（最小）－"
+    slowest = min(reading.track_workers, key=lambda item: item.overall_fps)
+    parts = [f"{reading.shard_count} 片"]
+    if slowest.shard_id is not None:
+        parts.append(f"最慢 shard {slowest.shard_id}")
+    headroom = reading.min_track_worker_headroom
+    parts.append(f"最小餘裕 {headroom:.2f}×" if headroom is not None else "餘裕缺值")
+    # 攝影機清單擺在最後、與前面的段落用分號隔開：它本身也用頓號分隔，混在同一串裡
+    # 會讀不出哪裡是一段的邊界
+    cameras = (
+        f"；shard {slowest.shard_id}＝{'、'.join(slowest.cameras)}"
+        if slowest.shard_id is not None and slowest.cameras
+        else ""
+    )
+    return f"追蹤（最小）{slowest.overall_fps:.2f} 張/秒（{'、'.join(parts)}{cameras}）"
 
 # --------------------------------------------------------------------------------------
 # 產物解析
@@ -964,6 +1074,7 @@ def command_run(args: argparse.Namespace) -> int:
             print(
                 f"推論 {reading.inference_fps:.2f} 張/秒"
                 f"（{reading.inference_frames} 格 / {reading.inference_elapsed_seconds:.1f} 秒）"
+                f"、{_format_track_summary(reading)}"
                 f"、wall {usage.wall_seconds:.1f} 秒、max RSS "
                 f"{usage.max_rss_kb / 1024:.0f} MB、exit {usage.exit_status}"
             )
@@ -991,9 +1102,14 @@ def command_report(args: argparse.Namespace) -> int:
     # 欄寬依實際名稱長度，不寫死：run 名稱含 label／日期／bucket tag，寫死的話
     # 稍長一點的組合就會把整張表撐歪
     width = max([len(record.name) for record in records] + [len("run")])
+    # 追蹤側三欄都是「最慢那片」的口徑，欄名短到看不出來，所以在表頭上方寫一次
+    print(
+        "（infer_fps＝推論進程口徑，即報表的每秒張數；trk_min＝各追蹤片 overall_fps 的"
+        "最小值、shd＝片數、hdrm＝各片 tracking_fps÷overall_fps 的最小值）"
+    )
     print(
         f"{'run':<{width}} {'bucket':<18} {'b':<3} {'foot':<12} "
-        f"{'infer_fps':>9} {'track_fps':>9} {'sec':>6} {'frames':>8} "
+        f"{'infer_fps':>9} {'trk_min':>9} {'shd':>3} {'hdrm':>5} {'sec':>6} {'frames':>8} "
         f"{'rss_MB':>7} {'sm%':>5} {'exit':>4}"
     )
     for record in records:
@@ -1009,13 +1125,15 @@ def command_report(args: argparse.Namespace) -> int:
             if record.gpu is not None and record.gpu.mean_sm_percent is not None
             else "-"
         )
-        track = (
-            f"{reading.track_worker_fps:.2f}" if reading.track_worker_fps is not None else "-"
-        )
+        track_min = reading.min_track_worker_fps
+        track = f"{track_min:.2f}" if track_min is not None else "-"
+        shards = str(reading.shard_count) if reading.track_workers else "-"
+        headroom_min = reading.min_track_worker_headroom
+        headroom = f"{headroom_min:.2f}" if headroom_min is not None else "-"
         print(
             f"{record.name:<{width}} {meta.get('bucket', '?').removeprefix('bucket_'):<18} "
             f"{meta.get('model_batch', '?'):<3} {meta.get('foot_point_method', '?'):<12} "
-            f"{reading.inference_fps:>9.2f} {track:>9} "
+            f"{reading.inference_fps:>9.2f} {track:>9} {shards:>3} {headroom:>5} "
             f"{reading.inference_elapsed_seconds:>6.1f} {reading.inference_frames:>8} "
             f"{rss:>7} {sm:>5} {meta.get('exit_status', '?'):>4}"
         )
