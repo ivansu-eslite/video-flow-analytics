@@ -26,8 +26,8 @@ class MultiStreamByteTracker:
 
         Args:
             stream_id: 要更新的攝影機編號。
-            yolo_boxes: YOLO 偵測結果的 boxes（可能位於 CUDA，內部會轉回 CPU
-                供 `BYTETracker` 使用）。
+            yolo_boxes: 該格 fbody 子集的 numpy-backed `Boxes`（`split_detections`
+                包的，資料一路都在 CPU numpy 上，不經 torch）。
 
         Returns:
             numpy 陣列，每列格式由 ultralytics `BYTETracker.update` 決定，
@@ -39,5 +39,4 @@ class MultiStreamByteTracker:
         tracker = self.trackers.get(stream_id)
         if tracker is None:
             return np.array([])
-        # YOLO 推論可能在 CUDA 上執行，BYTETracker 需要 CPU tensor
-        return tracker.update(yolo_boxes.cpu())
+        return tracker.update(yolo_boxes)

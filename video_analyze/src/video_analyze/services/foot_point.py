@@ -15,9 +15,13 @@ H 取**頂邊中點**而非 head 框中心，是為了退化性質：人站直�
 一定不受影響」——ADR-009 實測 82.3% 的列與框底邊中點不同、位移中位 29 px。
 
 配對與選法的取捨（含被實測推翻的直覺）見 docs/adr/shared/009-head-based-foot-point.md。
-"""
 
-from collections import Counter
+配對、反射與偏移量都是**整格一次算完**的 numpy 運算，不逐框迴圈：一格 N 個框、M 顆頭
+時，判準算在 `[N, M]` 的矩陣上。逐框版本每個框都要重算同一份 head 中心與面積，再做十
+來個長度 M 的小陣列運算，那些固定開銷乘上 N 之後是追蹤進程 tracker 以外的最大一段
+（issue #146）。改的只是計算佈局：兩條會影響輸出值的算式（`foot = 2 × C − H`、偏移沿用
+的 `bottom + offset × size`）逐元素運算順序不變，配對本身則是離散決策。
+"""
 
 import numpy as np
 
@@ -56,20 +60,27 @@ def bbox_bottom_center(boxes: np.ndarray) -> np.ndarray:
 
 
 def _axis_tilt_deg(
-    head_centers: np.ndarray, body_center: np.ndarray
+    head_centers: np.ndarray, body_centers: np.ndarray
 ) -> np.ndarray:
-    """主軸（body 中心 → head 中心）與垂直線的夾角（度）。
+    """主軸（body 中心 → head 中心）與垂直線的夾角（度），每個框對每顆頭各一個。
 
     head 在 body 中心正上方時為 0；水平偏移越大角度越大。head 落在中心以下（`dy<=0`）
     的情形由呼叫端另行排除，這裡只保證不除以 0。
+
+    Args:
+        head_centers: `[M, 2]` 的 head 中心。
+        body_centers: `[N, 2]` 的 fbody 框中心。
+
+    Returns:
+        `[N, M]`，第 `i` 列第 `j` 行是第 `i` 個框配第 `j` 顆頭的傾角。
     """
-    dx = head_centers[:, 0] - body_center[0]
-    dy = body_center[1] - head_centers[:, 1]
+    dx = head_centers[None, :, 0] - body_centers[:, None, 0]
+    dy = body_centers[:, None, 1] - head_centers[None, :, 1]
     return np.degrees(np.arctan2(np.abs(dx), np.maximum(dy, 1e-6)))
 
 
-def _match_head(body: np.ndarray, heads: np.ndarray) -> int | None:
-    """替單一 fbody 框挑一顆 head，回傳其在 `heads` 中的索引；挑不到回傳 `None`。
+def _match_heads(boxes: np.ndarray, heads: np.ndarray) -> np.ndarray:
+    """替每個 fbody 框各挑一顆 head，回傳其在 `heads` 中的索引；挑不到為 `-1`。
 
     四項條件全部滿足才算候選：head 中心在框內、head 面積不超過框的
     `_MAX_HEAD_AREA_RATIO`、head 中心在框中心之上（否則主軸方向反轉）、主軸傾角
@@ -81,46 +92,66 @@ def _match_head(body: np.ndarray, heads: np.ndarray) -> int | None:
     後方那個人，主軸判準則因為後方的人多半偏在框的左右上角而能排除他。實測比較與
     被否決的判準見 ADR-009。
 
-    Args:
-        body: 單一 fbody 框 `[x1, y1, x2, y2]`。
-        heads: `[M, 4]` 的 head 框；`M` 為 0 時直接回傳 `None`。
-    """
-    if len(heads) == 0:
-        return None
-    x1, y1, x2, y2 = body
-    center = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
-    body_area = max((x2 - x1) * (y2 - y1), 1e-6)
+    各框彼此獨立——同一顆 head 可以被多個框挑中（沒有全域指派，見 ADR-009 的已知
+    限制），呼叫端要不要因此改變行為由它自己判斷。
 
+    Args:
+        boxes: `[N, 4]` 的 fbody 框。
+        heads: `[M, 4]` 的 head 框。
+
+    Returns:
+        `[N]` 的整數索引，配不到的列為 `-1`；`N` 或 `M` 為 0 時整條回 `-1`
+        （`argmin` 對長度 0 的軸會拋錯，也沒有候選可挑）。
+    """
+    if len(boxes) == 0 or len(heads) == 0:
+        return np.full(len(boxes), -1, dtype=np.int64)
+
+    body_centers = np.stack(
+        [(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2], axis=1
+    )
+    body_areas = np.maximum(
+        (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]), 1e-6
+    )
     head_centers = np.stack(
         [(heads[:, 0] + heads[:, 2]) / 2, (heads[:, 1] + heads[:, 3]) / 2], axis=1
     )
     head_areas = (heads[:, 2] - heads[:, 0]) * (heads[:, 3] - heads[:, 1])
-    tilt = _axis_tilt_deg(head_centers, center)
+    tilt = _axis_tilt_deg(head_centers, body_centers)
 
+    head_x = head_centers[None, :, 0]
+    head_y = head_centers[None, :, 1]
     ok = (
-        (head_centers[:, 0] >= x1)
-        & (head_centers[:, 0] <= x2)
-        & (head_centers[:, 1] >= y1)
-        & (head_centers[:, 1] <= y2)
-        & (head_areas <= _MAX_HEAD_AREA_RATIO * body_area)
-        & (head_centers[:, 1] < center[1])
+        (head_x >= boxes[:, None, 0])
+        & (head_x <= boxes[:, None, 2])
+        & (head_y >= boxes[:, None, 1])
+        & (head_y <= boxes[:, None, 3])
+        & (head_areas[None, :] <= _MAX_HEAD_AREA_RATIO * body_areas[:, None])
+        & (head_y < body_centers[:, None, 1])
         & (tilt <= _MAX_AXIS_TILT_DEG)
     )
-    if not ok.any():
-        return None
-    # 未通過的候選排到最後，argmin 才不會挑中它們
-    return int(np.argmin(np.where(ok, tilt, np.inf)))
+    # 未通過的候選排到最後，argmin 才不會挑中它們；整列都沒通過的再標成 -1
+    best = np.argmin(np.where(ok, tilt, np.inf), axis=1)
+    return np.where(ok.any(axis=1), best, -1)
 
 
-def _reflect(body: np.ndarray, head: np.ndarray) -> np.ndarray:
-    """`foot = 2 × C_body − H`，`H` 取 head 框的頂邊中點。
+def _reflect(bodies: np.ndarray, heads: np.ndarray) -> np.ndarray:
+    """`foot = 2 × C_body − H`，`H` 取 head 框的頂邊中點，逐列對應。
 
     公式只寫這一份：無狀態的 `estimate_from_heads` 與帶跨幀延續的 `FootPointEstimator`
     都呼叫它，兩條路徑才不可能各自漂移（例如其中一邊被改成用 head 中心當基準）。
+
+    Args:
+        bodies: `[N, 4]` 的 fbody 框。
+        heads: `[N, 4]` 的 head 框，第 `i` 列是配給第 `i` 個框的那一顆。
+
+    Returns:
+        `[N, 2]` 的落腳點。
     """
-    center = np.array([(body[0] + body[2]) / 2, (body[1] + body[3]) / 2])
-    head_top_mid = np.array([(head[0] + head[2]) / 2, head[1]])
-    return 2 * center - head_top_mid
+    centers = np.stack(
+        [(bodies[:, 0] + bodies[:, 2]) / 2, (bodies[:, 1] + bodies[:, 3]) / 2], axis=1
+    )
+    head_top_mid = np.stack([(heads[:, 0] + heads[:, 2]) / 2, heads[:, 1]], axis=1)
+    return 2 * centers - head_top_mid
 
 
 def estimate_from_heads(boxes: np.ndarray, heads: np.ndarray) -> np.ndarray:
@@ -137,10 +168,10 @@ def estimate_from_heads(boxes: np.ndarray, heads: np.ndarray) -> np.ndarray:
     boxes = np.asarray(boxes, dtype=float).reshape(-1, 4)
     heads = np.asarray(heads, dtype=float).reshape(-1, 4)
     points = bbox_bottom_center(boxes)
-    for i, body in enumerate(boxes):
-        j = _match_head(body, heads)
-        if j is not None:
-            points[i] = _reflect(body, heads[j])
+    matched = _match_heads(boxes, heads)
+    found = matched >= 0
+    if found.any():
+        points[found] = _reflect(boxes[found], heads[matched[found]])
     return points
 
 
@@ -241,29 +272,47 @@ class FootPointEstimator:
         self._ticks[stream_id] = tick
         heads = np.asarray(heads, dtype=float).reshape(-1, 4)
 
+        matched = _match_heads(boxes, heads)
+        found = matched >= 0
+        sizes = np.stack(
+            [
+                np.maximum(boxes[:, 2] - boxes[:, 0], 1e-6),
+                np.maximum(boxes[:, 3] - boxes[:, 1], 1e-6),
+            ],
+            axis=1,
+        )
+        bottom = points.copy()  # 覆寫前先留著，偏移量是相對它算的
+        if found.any():
+            points[found] = _reflect(boxes[found], heads[matched[found]])
+        track_ids = tracks[:, 4].astype(np.int64).tolist()
+
         # 同一幀被兩個以上 fbody 配到的 head：其中至少一邊是錯配，而沒有全域指派就
         # 分不出是哪一邊。這種推算結果只用在這一格、不進快取，錯配才不會被沿用成最多
         # 60 格的持續偏移。
-        matched = [_match_head(body, heads) for body in boxes]
-        shared = {
-            j for j, n in Counter(j for j in matched if j is not None).items() if n > 1
-        }
+        used, counts = np.unique(matched[found], return_counts=True)
+        shared_heads = used[counts > 1]
+        shared = (
+            np.isin(matched, shared_heads)
+            if shared_heads.size
+            else np.zeros(len(matched), dtype=bool)
+        )
 
-        for i, body in enumerate(boxes):
-            key = (stream_id, int(tracks[i][4]))
-            size = np.array(
-                [max(body[2] - body[0], 1e-6), max(body[3] - body[1], 1e-6)]
-            )
-            bottom = points[i].copy()  # 覆寫前先留著，偏移量是相對它算的
-            j = matched[i]
-            if j is not None:
-                points[i] = _reflect(body, heads[j])
-                if j not in shared:
-                    self._offsets[key] = ((points[i] - bottom) / size, tick)
-                continue
-            remembered = self._offsets.get(key)
-            if remembered is not None and tick - remembered[1] <= _OFFSET_TTL_FRAMES:
-                points[i] = bottom + remembered[0] * size
+        # 整格算好偏移量，只有「配到頭且沒被共用」的列寫進快取。配不到頭的列此刻
+        # points 仍等於 bottom，算出來是 0、不會被寫進去
+        offsets = (points - bottom) / sizes
+        for i in np.nonzero(found & ~shared)[0]:
+            self._offsets[(stream_id, track_ids[i])] = (offsets[i].copy(), tick)
+
+        rows = []
+        remembered = []
+        for i in np.nonzero(~found)[0]:
+            entry = self._offsets.get((stream_id, track_ids[i]))
+            if entry is not None and tick - entry[1] <= _OFFSET_TTL_FRAMES:
+                rows.append(i)
+                remembered.append(entry[0])
+        if rows:
+            index = np.asarray(rows)
+            points[index] = bottom[index] + np.asarray(remembered) * sizes[index]
 
         self._prune(tick)
         return points

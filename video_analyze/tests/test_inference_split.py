@@ -11,19 +11,16 @@ tracker，由 test_track_worker.py 釘住。
 """
 
 import numpy as np
-import torch
-from ultralytics.engine.results import Boxes
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
 from video_analyze.services.track_worker import split_detections
 
 _VBODY_CLASS_ID = 1
-_ORIG_SHAPE = (1080, 1920)
 
 
-def _boxes(rows: list[tuple[float, float, float, float, float, int]]) -> Boxes:
+def _boxes(rows: list[tuple[float, float, float, float, float, int]]) -> np.ndarray:
     """`rows` 為 `(x1, y1, x2, y2, conf, cls)`，與 ultralytics 的 data 佈局一致。"""
-    return Boxes(torch.tensor(rows, dtype=torch.float32), _ORIG_SHAPE)
+    return np.array(rows, dtype=np.float32)
 
 
 def test_only_fbody_reaches_the_tracker():
@@ -40,7 +37,7 @@ def test_only_fbody_reaches_the_tracker():
 
     assert fbody.cls.tolist() == [FBODY_CLASS_ID, FBODY_CLASS_ID]
     np.testing.assert_allclose(
-        fbody.xyxy.numpy(), [[0.0, 0.0, 100.0, 200.0], [300.0, 0.0, 400.0, 200.0]]
+        np.asarray(fbody.xyxy), [[0.0, 0.0, 100.0, 200.0], [300.0, 0.0, 400.0, 200.0]]
     )
 
 
