@@ -318,7 +318,7 @@ bucket 呼叫。
 | `camera_id` | str | 該影格所屬攝影機的 `<location>_<camera_id>` |
 | `frame_id` | int | **片段內**幀序，跨片段會重複（非全日流水號） |
 | `timestamp` | datetime（`Asia/Taipei`） | 該片段檔名時間 ＋ 片段內幀序 / fps |
-| `track_id` | int | ByteTrack 指派的追蹤編號，跨片段延續 |
+| `track_id` | int | ByteTrack 指派的追蹤編號，跨片段延續。**唯一性只到「同一路之內」**：分片後各追蹤進程各自持有 ByteTrack 的計數器，同一個 id 值會出現在分屬不同片的兩台攝影機（小 bucket 實測 N=1 時 0 個、N=2 時 2442 個 id 跨路重號）。下游 zone／line 都先 `filter(camera_id == ...)` 再 `.over("track_id")`，不受影響；新的消費端要一起帶 `camera_id` |
 | `x1` / `y1` / `x2` / `y2` | float | 追蹤框的像素座標 |
 | `foot_x` / `foot_y` | float | 落腳點（人站在地面的位置）的像素座標；由 head 框推算，配不到頭時沿用該軌跡上次的偏移量，連偏移量都沒有才退回 `((x1+x2)/2, y2)` |
 | `frame_width` / `frame_height` | int | 該路的影像尺寸（`probe_frame_shape` 探測首格所得，整天固定）；逐列重複同一個值 |

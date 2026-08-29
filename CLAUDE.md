@@ -232,6 +232,10 @@ byte 級相同。
   錯誤。
 - **不可用 `frame_id`**（片段內幀序、跨片段重複，同一個值會對到不同片段的畫面），
   **也不可拿 `track_id` 當 key**（重跑就變）。
+- **`track_id` 的唯一範圍只到「同一路之內」**（issue #140 之後）：分片讓各追蹤進程各自
+  持有 ByteTrack 的計數器，同一個 id 值會出現在分屬不同片的兩台攝影機。zone／line 都先
+  依 `camera_id` 過濾再分窗，所以兩包不受影響——但任何 `group_by("track_id")` 沒帶
+  `camera_id` 都會把兩個人併成一個，而輸出檔完全正常。
 - 逐 byte／逐列比對對這份檔案沒有意義，但那不代表它不可重現——是 key 的選法問題。
 - `zone_counts.parquet`／`line_counts.parquet` 經 `time_bucket` 聚合後**比逐格穩定得多**，
   是**交付期／大重構做 golden 回歸比對**時更省事的標的（vfa 日常改動的把關是各包

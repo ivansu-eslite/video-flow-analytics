@@ -113,6 +113,13 @@ description 不屬於 fd，因此只要任一進程還開著它鎖就在。**iss
 ## 後果
 
 - `tracking_results.parquet` 的 schema、路徑、下游三包的讀取契約都不變；**列順序改變**。
+- **`track_id` 的唯一範圍從「當天全域」縮成「同一路之內」**。ultralytics 的 `STrack` 用
+  class-level 計數器發號，分片前九路共用一個進程所以號碼天然跨路唯一，分片後各片各有一個
+  計數器（小 bucket 實測 N=1 時 0 個 id 跨路重號、N=2 時 2442 個）。下游 zone／line 都先
+  `filter(camera_id == ...)` 再 `.over("track_id")`（`zone_map.py`／`line_map.py`），所以
+  兩包都不受影響——但這是**新的隱含約束**：日後任何 `group_by("track_id")` 沒帶 `camera_id`
+  都會把兩個人併成一個，而輸出檔完全正常。逐路的 track 分群本身沒變（同一批素材 N=1 與
+  N=2 的軌跡指紋逐條相同），變的只有號碼。
 - 跑到一半時輸出目錄多一個 `tracking_results.parts/`，正常跑完就不存在。`.tmp` 殘檔的
   形態也跟著從「輸出目錄下的一個大檔」變成「parts 目錄裡的數個檔」。
 - 合併是一段新的序列尾巴（1–2 GB 的讀入再寫出），耗時與列數記進 log。磁碟峰值在合併
