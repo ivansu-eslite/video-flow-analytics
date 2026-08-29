@@ -90,6 +90,13 @@ boolean mask 產生的是新陣列，因此每格的 N×6 與整批那塊 buffer
 代價是引擎 deserialize 從第一批推論提前到 `__init__`。兩者都在推論子進程內，
 `pipeline.py` 的錯誤路徑不變，而提前等於失敗得更早。
 
+> **（issue #147 後取代）`AutoBackend` 也拿掉了。** `AutoBackend.forward` 走
+> `execute_v2`（阻塞到 GPU 算完）、輸出寫在它自己持有的 binding buffer 上，兩件事都讓
+> host 與 GPU 無法重疊。正式路徑改吃 `services/trt_runner.py`（`execute_async_v3`、
+> 輸出寫到呼叫端指定的緩衝），見 ADR-014 Decision 1。本節保留 `AutoBackend` 的理由
+> （「留住它對 backend `fp16` 與多輸出的處理」）在自建 runner 裡由兩道載入期檢查取代：
+> 輸入 binding 的 dtype 必須是 FP32、I/O 張量必須恰好一入一出。
+
 ### 4. 載入期以實跑的輸出形狀驗 end2end
 
 `__init__` 末端跑一次 zeros forward（批次取 `min([model].batch, 引擎的 max batch)`），

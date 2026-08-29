@@ -24,6 +24,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from vfa_observability import StructuredLogger
 
@@ -188,6 +189,35 @@ def build_vfa_metadata(
     }
 
 
+def read_metadata_length(handle: BinaryIO, engine_path: Path) -> int:
+    """讀檔頭最前面的 metadata 長度欄位並檢查它是否荒謬；讀完 `handle` 停在 JSON 開頭。
+
+    **兩個消費端共用這一支**：`read_engine_metadata` 接著讀 JSON 本體，
+    `services/trt_runner.py` 則直接 `seek` 過去拿序列化的引擎。各寫一份的話，哪天檔頭
+    格式或長度上限改了只會改到其中一邊，而另一邊的症狀是把引擎資料的前幾個 byte 解讀
+    成長度。
+
+    Args:
+        handle: 以二進位開啟、位置在檔案開頭的引擎檔。
+        engine_path: 只用於錯誤訊息。
+
+    Returns:
+        metadata JSON 的長度（bytes）。
+
+    Raises:
+        ValueError: 長度欄位不在合理範圍內，代表這顆引擎不帶 ultralytics 的檔頭。
+    """
+    raw_len = handle.read(_META_LEN_BYTES)
+    meta_len = int.from_bytes(raw_len, byteorder="little", signed=True)
+    if not 0 < meta_len <= _META_LEN_MAX:
+        raise ValueError(
+            f"{engine_path} 的檔頭沒有 ultralytics metadata（長度欄位讀到 "
+            f"{meta_len}）。裸的 TensorRT 引擎不帶這段檔頭，請改用 "
+            "tools/build_engine.py 產出的引擎。"
+        )
+    return meta_len
+
+
 def read_engine_metadata(engine_path: Path) -> dict:
     """從引擎檔開頭讀回 ultralytics 寫入的 metadata。
 
@@ -205,14 +235,7 @@ def read_engine_metadata(engine_path: Path) -> dict:
             解不開），代表這顆引擎不是經由本 repo 的建置工具產出的。
     """
     with open(engine_path, "rb") as handle:
-        raw_len = handle.read(_META_LEN_BYTES)
-        meta_len = int.from_bytes(raw_len, byteorder="little", signed=True)
-        if not 0 < meta_len <= _META_LEN_MAX:
-            raise ValueError(
-                f"{engine_path} 的檔頭沒有 ultralytics metadata（長度欄位讀到 "
-                f"{meta_len}）。裸的 TensorRT 引擎不帶這段檔頭，請改用 "
-                "tools/build_engine.py 產出的引擎。"
-            )
+        meta_len = read_metadata_length(handle, engine_path)
         try:
             metadata = json.loads(handle.read(meta_len).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:

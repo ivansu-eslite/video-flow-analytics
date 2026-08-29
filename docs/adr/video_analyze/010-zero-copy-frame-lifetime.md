@@ -83,6 +83,14 @@ PR #103 移除；日後若要加回來，是要重新引入取副本的介面，
 > H2D 也在它回傳前完成（pageable 記憶體的 `.to()` 是同步的），所以「不能更早」的界線
 > 從「`predict` 回來」移到「`preprocess` 回來」，reader 早一整段 forward 拿回空位。
 > 上面第三點的 `results[i].orig_img` 一併作廢——`Results` 已經不在正式推論路徑上。
+>
+> **（issue #147 後更新）歸還點沒有再動，複製的目的地換成常駐的 pinned buffer。**
+> 推論改成兩批深度的流水（ADR-014）之後，`preprocess`／`infer` 換成 `submit`／
+> `collect`，而「像素已經複製走」的那一刻仍是同一個——只是從「每批配一塊新的 CPU 陣列」
+> 變成「寫進 ping-pong 的 pinned buffer 前綴」（`stack_frames`），呼叫端在 `submit`
+> 回來之後歸還。那塊 buffer 的重用由 event 守住（第 k 批寫它之前先等第 k−2 批的 H2D
+> 讀完），**不是**靠「歸還了就沒人再讀」。推論進程任一時刻仍只扣一批 slot，所以
+> Decision 3 的推導與係數不受流水深度影響。
 
 ### 3. `RING_SLOTS` 由 `[model].batch` 推導，不寫死
 

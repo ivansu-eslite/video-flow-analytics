@@ -30,9 +30,9 @@
 | --- | --- |
 | `av` | 影片片段讀取與解碼（PyAV，wheel 自帶 FFmpeg）|
 | `opencv-python` | 影格縮放（在解碼出的 nv12 兩個平面上）、色彩轉換與 letterbox 補邊（`services/letterbox.py`）|
-| `ultralytics` | 引擎載入與 forward（`AutoBackend`）。前處理與後處理是本套件自己的程式碼，`YOLO`／`predictor`／`Results` 都不在正式推論路徑上（ADR-013）|
-| `torch` / `torchvision` | 前處理的張量運算（H2D 之後在 GPU 上做），以及建置與比對工具的 Torch FP32 基準（與 `ultralytics` 一併釘住版本） |
-| `tensorrt-cu12` | 正式推論後端。版本帶 **10.8 ～ 10.16**：下緣是 sm120 的 kernel 支援，上緣是 11.0.0 起 strongly-typed 成為預設、移除 `BuilderFlag.FP16`。帶內取已實測的 `10.13.3.9` |
+| `ultralytics` | ByteTrack（`services/tracker.py`）與建置／比對工具（`tools/`，不隨 wheel 出貨）。**正式推論路徑上已經沒有它**：引擎載入與 forward 是 `services/trt_runner.py`（ADR-014），前處理與後處理是本套件自己的程式碼（ADR-013）|
+| `torch` / `torchvision` | 前處理的張量運算（在 GPU 上做）、流水的 stream 與 event、pinned 與 device 緩衝，以及建置與比對工具的 Torch FP32 基準（與 `ultralytics` 一併釘住版本） |
+| `tensorrt-cu12` | 正式推論後端，本套件直接呼叫（`deserialize_cuda_engine`／`set_input_shape`／`set_tensor_address`／`execute_async_v3`）。版本帶 **10.8 ～ 10.16**：下緣是 sm120 的 kernel 支援，上緣是 11.0.0 起 strongly-typed 成為預設、移除 `BuilderFlag.FP16`。帶內取已實測的 `10.13.3.9` |
 | `lap` | ByteTrack 的線性指派求解 |
 | `numpy` | 影格與追蹤結果的陣列運算 |
 | `polars` / `pyarrow` | 追蹤明細 parquet 寫出 |
@@ -358,13 +358,14 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理／追蹤子進程生命週期） |
 | `services/inference.py` | 推理迴圈（湊批、偵測、把偵測框送往追蹤進程） |
 | `services/track_worker.py` | 追蹤進程（N 個）：偵測框拆分、追蹤、落腳點推算、座標反算、寫自己那支 part；`TRACK_DONE`／`TRACK_FAILED` 訊號與 fan-out |
-| `services/detector.py` | TensorRT 引擎載入與偵測；載入前看 metadata 的檢查、載入末端驗 end2end 的 zeros forward、執行期的張量核對，以及自建的前處理（`preprocess_batch`，GPU）與後處理（`postprocess_batch`，整批一次 D2H 後用 numpy 過濾）|
+| `services/detector.py` | 偵測器與兩批深度的流水（`submit`／`collect`／`in_flight`）：載入前看 metadata 的檢查、ping-pong 緩衝與 stream／event 的定序、自建的前處理（`stack_frames` 在 CPU、`to_infer_tensor` 在 GPU）與後處理（`postprocess_batch`，整批一次 D2H 後用 numpy 過濾）|
+| `services/trt_runner.py` | 引擎的 deserialize、execution context，與「把一批排進指定 stream」（`execute_async_v3`）；載入期驗引擎自己宣告的 I/O，enqueue 前核對張量 |
 | `services/engine_metadata.py` | 引擎自帶 metadata 的注入格式、讀取與環境比對（建置端與載入端共用同一份） |
 | `services/foot_point.py` | `FootPointEstimator`：head 框配對與落腳點推算；自行維護跨幀狀態（每條軌跡上次成功推算的偏移量，共用 head 的那些不存） |
 | `services/tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |
 | `services/tracking_results.py` | 追蹤明細累積與 parquet 寫出 |
 | `services/output_parts.py` | `tracking_results.parts/` 的全部知識：認領（`parts/.lock`）、清殘骸、片檔命名、fps 加權路由、合併 |
-| `services/fps_meter.py` | 處理 FPS 統計 |
+| `services/fps_meter.py` | 處理 FPS 統計。**`detection_fps` 的口徑在 issue #147 換過**：流水化之後它累計的是 `submit` 與 `collect` 兩段 wall time 的合計，也就是「host 為偵測付出的時間」，被 host 工作蓋掉的那段 GPU 時間不算——log 欄位與格式不變，但數字不可與改動前直接相減，跨改動的比較看 `overall_fps` |
 | `services/frame_ring.py` | 共享記憶體環形緩衝 |
 | `services/letterbox.py` | 在 nv12 平面上縮放到推論尺寸與座標反算（正反兩半共用同一組參數） |
 | `services/video_reader.py` | 逐日掃描片段、讀影格、縮到推論尺寸 |
@@ -400,16 +401,25 @@ N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程�
   BGR 的一半，色彩轉換也只需處理縮小後的畫面，實測讀取端 CPU 地端 2.03 → 0.88 核、
   T4 6.093 → 1.343 核。代價是色度在 1/2 解析度上插值，畫面與「先轉 BGR 再縮」不逐位元
   相同。無空 slot
-  時阻塞，形成對推理進程的天然背壓——slot 在**前處理**完成當下就歸還，所以這條背壓只覆蓋
-  到前處理為止，forward 與追蹤那兩段分別由批次本身與 `track_queue` 的容量上限接手。**時間戳 = 該片段檔名時間 ＋ 片段內幀序 / fps**
+  時阻塞，形成對推理進程的天然背壓——slot 在**像素複製進 pinned buffer** 的當下就歸還，
+  所以這條背壓只覆蓋到那一步為止，forward 與追蹤那兩段分別由流水深度與 `track_queue` 的
+  容量上限接手。**時間戳 = 該片段檔名時間 ＋ 片段內幀序 / fps**
   （逐段計算，不能用全日累計幀數推算）。
-- **推理進程**：非阻塞輪詢各路 queue 湊批，維持 GPU 批次效率；每批推論完就把逐格的
-  偵測框丟進 `track_queue`，本身不做追蹤。前處理與後處理都是本套件自己算的
+- **推理進程**：非阻塞輪詢各路 queue 湊批，維持 GPU 批次效率；每批的結果取回來就把逐格
+  的偵測框丟進 `track_queue`，本身不做追蹤。前處理與後處理都是本套件自己算的
   （[ADR-013](../docs/adr/video_analyze/013-self-built-pre-post.md)）：整批 `np.stack`
   ＋一次 H2D 之後在 GPU 上翻通道、換軸、轉 float32 並除以 255；forward 之後整批一次
-  D2H，再用 numpy 逐格過濾（conf → 截斷 → classes，順序不可調動）。影格既然是共享記憶體
-  的 view，**前處理完成就歸還 slot**——像素在 `np.stack` 當下已經複製走，reader 因此不必
-  等整段 forward（生命週期約束見
+  D2H，再用 numpy 逐格過濾（conf → 截斷 → classes，順序不可調動）。
+
+  **這些步驟排成兩批深度的流水**（[ADR-014](../docs/adr/video_analyze/014-inference-pipelining.md)）：
+  `submit` 把一批排進 GPU 就回來，主迴圈接著湊下一批、歸還 slot、送上一批的 payload，
+  `collect` 才取回結果——host 的工作與 GPU 的 forward 因此重疊。引擎由
+  `services/trt_runner.py` 直接以 `execute_async_v3` 驅動（不再經 ultralytics 的
+  `AutoBackend`），每一種緩衝兩份、複製與運算各一條 stream、重用由 event 守住，
+  「哪一批的結果配到哪一批的影格」由批次序號核對。
+
+  影格既然是共享記憶體的 view，**像素複製進 pinned buffer 就歸還 slot**——reader 因此
+  不必等整段 forward（生命週期約束見
   [ADR-010](../docs/adr/video_analyze/010-zero-copy-frame-lifetime.md)）；送 payload 排在
   歸還之後（payload 取的是推論輸出，與 slot 無關）。
 - **追蹤進程**：逐格經 裁切到內容區 → 拆出 fbody／head（只有 fbody 進 tracker）→ 追蹤
@@ -449,25 +459,34 @@ N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程�
 - 其餘片段的開檔 / 讀 FPS 失敗 → 讀取子進程拋錯、以非零 exitcode 結束。
 - **引擎載入前的檢查，任一不過即中止**（`services/detector.py`）：`model_path` 不是
   `.engine`、引擎檔不存在（`model_path` 是 cwd 相對路徑，跑錯目錄就是這個症狀；自己先
-  擋是為了訊息——TensorRT backend 直接 `open()`，例外裡只有一個路徑字串。改用
-  `AutoBackend` 之前這道檢查還擋得住 ultralytics `check_file` 的三種替代來源解析，
-  見 ADR-013）、引擎 metadata 與當下環境不符
+  擋是為了訊息——下一步讀檔頭時拋的例外只有一個路徑字串。經 `YOLO` 載入時這道檢查還
+  擋得住 ultralytics `check_file` 的三種替代來源解析，見 ADR-013）、引擎 metadata 與
+  當下環境不符
   （compute capability／TensorRT 版本／TensorRT wheel 變體／來源權重 hash，四項各自拋錯、
   訊息指出是哪一項；驅動版本與 torch 的 CUDA 建置版本只記 warning——它們不在 TensorRT 對
   引擎的約束裡）、引擎不是 FP16 建的。沒有 CUDA 也是中止而非 fallback CPU。
 - **引擎不是 dynamic 建的 → 拋 `ValueError`**。靜態引擎會通過其餘全部載入檢查，然後在
-  第一個沒湊滿的批次上被 ultralytics 的 assert 擋下（訊息看不出原因）——而湊不滿批是
+  第一個沒湊滿的批次上被 `set_input_shape` 擋下（訊息看不出原因）——而湊不滿批是
   常態：T4 上實測一次跑完出現 16 種不同的批次大小。
-- **引擎不是 end2end（自帶 NMS）→ 拋 `ValueError`**。載入末端跑一次 zeros forward，
-  輸出不是單一張量、或最後一維不是 6 就擋下。判準用實跑的形狀而不是 metadata 的
-  `end2end` 欄位——後者改了不會改變引擎。沒有內建 NMS 的引擎吐 `(B, 4 + nc, num_anchors)`，
-  自建後處理那三行照樣跑得完，只是把類別分數當成 conf 與 cls（見 ADR-013）。
+- **引擎自己宣告的 I/O 不合格 → 拋 `ValueError`**（`services/trt_runner.py`，
+  deserialize 之後）：不是恰好一入一出、輸入 binding 的 dtype 不是 FP32、optimization
+  profile 的 opt 高寬不是 640×384、輸出 binding 的最後一維不是 6（即不是 end2end）。
+  四項一律取引擎自己宣告的值，不讀 JSON metadata 的對應欄位——後者改了不會改變引擎。
+  沒有內建 NMS 的引擎吐 `(B, 4 + nc, num_anchors)`，自建後處理那三行照樣跑得完，只是
+  把類別分數當成 conf 與 cls；opt 高寬不對的引擎則是框都對、只是所有 kernel 都為別的
+  尺寸挑（症狀只有變慢）。見 ADR-014。
 - **實際進入推論的張量形狀不是 640×384 → 拋 `ValueError`**，dtype 不是 float32、不是
-  contiguous、不是 4D 或不在 CUDA 上亦然。驗的是本套件自己組出來、即將交給 `execute_v2`
-  的那個張量。形狀這一項取代了 `_validate_imgsz`：dynamic 引擎不套用 metadata 的 `imgsz`
-  （`predictor.py` 只在 backend 不是 dynamic 時才套用），照抄那個檢查會得到一個看起來
-  有在驗、其實驗不到的檢查（見 ADR-011）。dynamic 引擎的高寬維也是動態的，錯誤的高寬
-  不會被 TensorRT 的 assert 擋下。
+  contiguous、不是 4D 或不在 CUDA 上亦然。驗的是本套件自己組出來、即將交給
+  `execute_async_v3` 的那個張量。形狀這一項取代了 `_validate_imgsz`：dynamic 引擎不套用
+  metadata 的 `imgsz`（`predictor.py` 只在 backend 不是 dynamic 時才套用），照抄那個檢查
+  會得到一個看起來有在驗、其實驗不到的檢查（見 ADR-011）。dynamic 引擎的高寬維也是
+  動態的，錯誤的高寬不會被 TensorRT 擋下。
+- **`enqueue` 收到 default stream，或三個 TensorRT 呼叫任一個回 `False` → 拋
+  `RuntimeError`**。前者讓 TensorRT 插入 `cudaDeviceSynchronize`、流水退化成序列而輸出檔
+  一模一樣；後者裡最危險的是 `set_input_shape`——它只回 `False` 不拋錯，接著
+  `execute_async_v3` 仍回 `True` 並沿用**上一批**的 shape 跑。
+- **`collect` 回傳的批次序號與主迴圈等的那批對不上 → 拋 `RuntimeError`**
+  （`services/inference.py`）。錯配的輸出檔完全正常，只有時間戳配到隔壁批。
 - **單次批次超過引擎綁的最大批次 → 拋 `ValueError`**（`services/inference.py`，在主迴圈的
   try 內，送得出 `TRACK_FAILED`）。
 - **`frame_shapes` 傳成推論尺寸 → `run_track_worker` 拋 `ValueError`**。那代表

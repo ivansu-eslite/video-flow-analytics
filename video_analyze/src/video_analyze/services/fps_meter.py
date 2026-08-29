@@ -33,7 +33,14 @@ class FpsMeter:
         self._frames_per_camera[camera_id] += 1
 
     def add_detection_time(self, seconds: float) -> None:
-        """累計一批 `detector.predict` 的耗時。"""
+        """累計偵測側的耗時。
+
+        呼叫端決定口徑：推論進程傳的是 `detector.submit` 與 `detector.collect` 兩段
+        wall time 的合計（ADR-014）。**這與流水化之前的口徑不同**——`collect` 內等 GPU
+        的時間仍算在內，但被 host 工作蓋掉的那段 GPU 時間不算，所以 `detection_fps`
+        在流水化之後代表「host 為偵測付出的時間」而不是「一批從送出到拿回的時間」，
+        不可與改動前的數字直接相減。端到端的比較看 `overall_fps`。
+        """
         self._total_detect_seconds += seconds
 
     def add_tracking_time(self, seconds: float) -> None:

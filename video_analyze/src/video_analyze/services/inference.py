@@ -1,11 +1,12 @@
 import multiprocessing as mp
 import time
+from collections import deque
 from queue import Empty
 
 from vfa_observability import StructuredLogger
 
 from video_analyze.services.batching import TARGET_BATCH
-from video_analyze.services.detector import YOLODetector
+from video_analyze.services.detector import PIPELINE_DEPTH, YOLODetector
 from video_analyze.services.fps_meter import FpsMeter
 from video_analyze.services.frame_ring import FrameRing
 from video_analyze.services.track_worker import (
@@ -34,6 +35,11 @@ class InferencePipeline:
     追蹤、落腳點推算、座標反算與 parquet 落盤都不在這裡——它們搬到獨立進程了
     （見 `services/track_worker.py`），本類只負責「湊批 → 推論 → 把框丟出去」。
     追蹤進程有 N 個、各自負責一組固定的攝影機，所以「丟出去」多了一步查表。
+
+    偵測那一步是**兩批深度的流水**（ADR-014）：`submit` 把一批排進 GPU 就回來，主迴圈
+    接著去湊下一批、歸還 slot、送上一批的 payload，`collect` 才取回結果。所以本迴圈
+    自己要記「送出去但還沒回來的那幾批分別是哪些影格」——`_pending` 與偵測器的在途
+    佇列同進退，序號由 `submit` 給、`collect` 回傳時核對。
     """
 
     def __init__(
@@ -78,6 +84,8 @@ class InferencePipeline:
         self.route = route
         self.fps_meter = FpsMeter()
         self._target_batch = TARGET_BATCH
+        # 已 submit、還沒 collect 的批次：(序號, 該批影格, 該批各格的 stream_id)
+        self._pending: deque[tuple[int, list[FramePacket], list[int]]] = deque()
 
     def _collect_batch(
         self,
@@ -171,9 +179,9 @@ class InferencePipeline:
         start = time.perf_counter()
         try:
             # 引擎的 batch 維度上限是建置時綁死的（dynamic 引擎的 optimization
-            # profile 取 max batch = 匯出時的 `batch`）。超過的話 ultralytics 的
-            # TensorRT backend 會在 `forward` 的 assert 失敗——那條訊息只講「input
-            # size 不等於 model size」，看不出是批次設定與引擎對不上。在這裡先擋，
+            # profile 取 max batch = 匯出時的 `batch`）。超過的話會炸在
+            # `TrtRunner.enqueue` 的 `set_input_shape`——那條訊息看得出形狀與上限，但
+            # 看不出是 `[model].batch` 與引擎對不上，而這兩者是分別維護的。在這裡先擋，
             # 訊息才指得出要改哪一邊。放在 try 內而非之前：追蹤進程此時已經起來、
             # 等在 queue 上，要送得出 TRACK_FAILED，不必等父進程 SIGTERM。
             #
@@ -194,29 +202,36 @@ class InferencePipeline:
                     data_queues, rings
                 )
                 if not batch_packets:
-                    # 所有 queue 當下都沒有資料，短暫休眠避免忙等待耗盡 CPU
-                    time.sleep(0.001)
+                    # 當下沒有新影格。有在途批就趁這時把它收回來——不收的話那一批的
+                    # payload 要等到下一批湊成才送得出去，而供料本來就是斷續的
+                    if self.detector.in_flight:
+                        self._collect_and_dispatch()
+                    else:
+                        time.sleep(0.001)  # 完全沒事做，休眠避免忙等待耗盡 CPU
                     continue
-                pre_start = time.perf_counter()
-                im = self.detector.preprocess([p.frame for p in batch_packets])
-                # 前處理只量到這裡：中間的歸還是幾個 queue.put，不計入 detection_time
-                # ——它的口徑是「前處理 ＋ forward ＋ 後處理」，改動前後同一把尺
-                preprocess_elapsed = time.perf_counter() - pre_start
-                # `preprocess` 回來時像素已經複製進新的 CPU 陣列（`np.stack`）並上傳
-                # GPU（pageable 記憶體的 `.to()` 是同步的），共享記憶體可以放行了。
-                # 歸還點卡在這裡的兩個方向：
+                if self.detector.in_flight >= PIPELINE_DEPTH:
+                    # 流水滿了才收，收的是最舊那一批。排在湊批**之後**，讓 GPU 在 host
+                    # 湊批的那段時間仍有一批在算
+                    self._collect_and_dispatch()
+                submit_start = time.perf_counter()
+                seq = self.detector.submit([p.frame for p in batch_packets])
+                # `submit` 只量到這裡：中間的歸還是幾個 queue.put，不計入 detection_time
+                # ——它的口徑是「submit 與 collect 的 wall time 合計」，兩邊同一把尺
+                self.fps_meter.add_detection_time(time.perf_counter() - submit_start)
+                # `submit` 回來時像素已經複製進 pinned buffer（`stack_frames`），共享
+                # 記憶體可以放行了。歸還點卡在這裡的兩個方向：
                 # - 不能更早：`np.stack` 還在讀共享記憶體，早還會讓 reader 邊寫邊被讀。
                 # - 不能更晚：歸還越晚 reader 空等越久。它從「整批推論完成」前移到這裡
-                #   （ADR-013），讓 reader 早一整段 forward 的時間拿回空位。
+                #   （ADR-013），讓 reader 早一整段 forward 的時間拿回空位；流水化之後
+                #   那段等待更長，前移的價值也更大（ADR-014）。
                 # 影格參照只剩我們自己持有的 `packet.frame` 要切斷：推論輸出不再攜帶
-                # 影格（`Results` 已經不在正式路徑上），不呼叫 `predict` 也就沒有
-                # `predictor.dataset.im0`／`predictor.batch[1]` 那兩個 ultralytics 內部
-                # 的活別名（ADR-010 Decision 4 記的擋不住的那條，見 ADR-013）。清成
-                # None 讓「日後有人在歸還之後讀影格」從靜默讀到同一路幾格之後的畫面
-                # （內容正常、只是錯格，比對輸出也看不出來）變成當場拋錯；這一步與下面
-                # 的歸還不可對調，中間那段「slot 已歸還、參照還在」正是它要消滅的狀態。
+                # 影格（`Results` 已經不在正式路徑上），也就沒有 ultralytics 內部的活
+                # 別名（ADR-010 Decision 4 記的擋不住的那條，見 ADR-013）。清成 None 讓
+                # 「日後有人在歸還之後讀影格」從靜默讀到同一路幾格之後的畫面（內容正常、
+                # 只是錯格，比對輸出也看不出來）變成當場拋錯；這一步與下面的歸還不可
+                # 對調，中間那段「slot 已歸還、參照還在」正是它要消滅的狀態。
                 #
-                # 刻意不包 try/finally：preprocess／infer 或 READER_FAILED 拋出時
+                # 刻意不包 try/finally：submit／collect 或 READER_FAILED 拋出時
                 # held_slots 不歸還，該路 reader 會卡在 free_queue.get()，但不會 hang
                 # ——推理進程死亡後 pipeline.py 的 _raise_if_abnormal 偵測到非零
                 # exitcode，_terminate_all 會殺掉所有 reader。包起來得讓 held_slots 的
@@ -225,37 +240,11 @@ class InferencePipeline:
                     packet.frame = None
                 for held_stream_id, held_slot in held_slots:
                     free_queues[held_stream_id].put(held_slot)
-                infer_start = time.perf_counter()
-                detections = self.detector.infer(im)
-                # infer 內整批一次 `.cpu()` 已具體化（隱含同步），這段 wall time 已含
-                # GPU 實際耗時，不需額外 cuda.synchronize()
-                self.fps_meter.add_detection_time(
-                    preprocess_elapsed + time.perf_counter() - infer_start
-                )
-                # 送 payload 排在歸還之後：payload 帶的是偵測框（推論輸出，已在 CPU），
-                # 與 slot 無關，歸還之後仍可取。strict 順帶釘住 infer 逐格回傳一個結果
-                for packet, stream_id, boxes in zip(
-                    batch_packets, batch_stream_ids, detections, strict=True
-                ):
-                    # 追蹤、落腳點推算、座標反算與寫 parquet 都在追蹤進程做（實測追蹤
-                    # 每格 1.81 ms、佔本進程 8.4%，而它與下一批的 GPU 推論之間沒有資料
-                    # 相依）。這裡只把該格的全部偵測框丟出去，含 head——拆分也在那邊做。
-                    # 依路由送給該路歸屬的那一片。送錯片不會有任何直接症狀——那片
-                    # 也有全部路的 tracker，會照樣追蹤、照樣寫進自己的 part，只是該路
-                    # 的軌跡被切成兩段而 track_id 分裂；唯一的訊號是追蹤進程入口的
-                    # 歸屬檢查（見 `track_worker.run_track_worker`）
-                    self.track_queues[self.route[stream_id]].put(
-                        to_payload(
-                            stream_id,
-                            boxes,
-                            packet.frame_index,
-                            packet.timestamp,
-                        )
-                    )
-                    # 本進程的口徑是「該路的一格已推論完並送出」，不是「一格已完整處理
-                    # 完」（那件事只有追蹤進程知道，它自己也記一份）。這個計數同時是
-                    # detection_fps 與 overall_fps 的分子，拿掉會讓那兩個數字變成 0
-                    self.fps_meter.record(self.stream_names[stream_id])
+                self._pending.append((seq, batch_packets, batch_stream_ids))
+            # 所有路都讀完了，把還在 GPU 上的那幾批收乾淨——漏掉的話那些格不會有
+            # payload，而 parquet 少幾百格完全看不出來
+            while self.detector.in_flight:
+                self._collect_and_dispatch()
             self._log_fps_summary(time.perf_counter() - start)
             # 落盤改由追蹤進程負責（parquet 的內容都在那邊產生）。這個訊號是它唯一的
             # 正常結束途徑，不送的話那邊會一直等在 queue 上——**每一片都要送到**，漏掉
@@ -272,6 +261,53 @@ class InferencePipeline:
                 self.track_queues, TRACK_FAILED, timeout=TRACK_SIGNAL_PUT_TIMEOUT
             )
             raise
+
+    def _collect_and_dispatch(self) -> None:
+        """取回最舊那一批的偵測結果，核對序號，逐格送往它歸屬的追蹤進程。
+
+        **序號核對是這條流水的主要保護**。`collect` 回傳的是偵測器在途佇列最前面那一
+        批，`_pending` 最前面應該是同一批——兩者一旦錯開，第 k 批的框就會配到第 k+1
+        批的影格，而輸出檔完全正常，只有時間戳對到隔壁批。這種錯法逐值比對也只表現為
+        配對率下降，看不出是錯配還是偵測變了，所以要在當場擋。
+
+        Raises:
+            RuntimeError: 序號與 `_pending` 的最舊一批對不上。
+        """
+        collect_start = time.perf_counter()
+        seq, detections = self.detector.collect()
+        # 口徑是「submit 與 collect 的 wall time 合計」：collect 內等 GPU 的時間算在
+        # 內，被 host 工作蓋掉的那段 GPU 時間不算。流水化之後 detection_fps 因此不可
+        # 與改動前的數字直接相減（見 video_analyze/README.md）
+        self.fps_meter.add_detection_time(time.perf_counter() - collect_start)
+        expected_seq, batch_packets, batch_stream_ids = self._pending.popleft()
+        if seq != expected_seq:
+            raise RuntimeError(
+                f"偵測器回傳第 {seq} 批的結果，但主迴圈等的是第 {expected_seq} 批。"
+                "這代表兩邊的在途佇列已經錯開，框會配到別批的影格——輸出檔會完全"
+                "正常，只有時間戳對到隔壁批。"
+            )
+        # strict 順帶釘住 collect 逐格回傳一個結果
+        for packet, stream_id, boxes in zip(
+            batch_packets, batch_stream_ids, detections, strict=True
+        ):
+            # 追蹤、落腳點推算、座標反算與寫 parquet 都在追蹤進程做（實測追蹤每格
+            # 1.81 ms、佔本進程 8.4%，而它與下一批的 GPU 推論之間沒有資料相依）。這裡
+            # 只把該格的全部偵測框丟出去，含 head——拆分也在那邊做。依路由送給該路歸屬
+            # 的那一片。送錯片不會有任何直接症狀——那片也有全部路的 tracker，會照樣
+            # 追蹤、照樣寫進自己的 part，只是該路的軌跡被切成兩段而 track_id 分裂；
+            # 唯一的訊號是追蹤進程入口的歸屬檢查（見 `track_worker.run_track_worker`）
+            self.track_queues[self.route[stream_id]].put(
+                to_payload(
+                    stream_id,
+                    boxes,
+                    packet.frame_index,
+                    packet.timestamp,
+                )
+            )
+            # 本進程的口徑是「該路的一格已推論完並送出」，不是「一格已完整處理完」
+            # （那件事只有追蹤進程知道，它自己也記一份）。這個計數同時是 detection_fps
+            # 與 overall_fps 的分子，拿掉會讓那兩個數字變成 0
+            self.fps_meter.record(self.stream_names[stream_id])
 
     def _log_fps_summary(self, elapsed_seconds: float) -> None:
         """把處理 FPS 統計逐路、整體、階段各印一行。"""

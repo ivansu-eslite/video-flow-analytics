@@ -4,7 +4,11 @@
 因此本檔的斷言對象是**送進 `track_queue` 的 payload**，而不再是寫出的 parquet。
 軌跡與落腳點那一側的接線由 test_track_worker.py 釘住。
 
-四件事都是「主迴圈接錯線，但被接的函式自己的測試全綠、parquet 也完全正常」：
+偵測改成兩批深度的流水之後（ADR-014），這個迴圈多了一件只有它做得到的事：**記住送出去
+但還沒回來的那幾批分別是哪些影格**。錯配的後果與下面第 2 點同型，但更難察覺——每一格的
+框都是真的，只是配到隔壁批的時間戳。
+
+五件事都是「主迴圈接錯線，但被接的函式自己的測試全綠、parquet 也完全正常」：
 
 1. **payload 帶的是該格的全部偵測框（含 head）**，拆分留給追蹤進程。這裡只送 fbody
    的話，落腳點推算永遠配不到頭、每列靜默退回框底邊中點（ADR-009 的偏移就這樣回來）。
@@ -16,6 +20,8 @@
 4. **payload 進到路由指定的那一片、結束與失敗訊號送到每一片**。送錯片沒有任何直接
    症狀（那片也有全部路的 tracker），唯一的訊號在追蹤進程入口；訊號漏送則會讓那一片
    一直等在 `get()` 上、缺一支 part 檔。
+5. **在途批與 `_pending` 同進退**：序號對不上要當場拋錯，所有路讀完後要把剩下的在途批
+   收乾淨（漏收就是 parquet 少幾百格，而檔案完全正常）。
 
 因此本檔的偵測資料一律以**推論尺度**（640×384）表示——那就是縮放前移之後 YOLO 實際
 輸出的座標系，也是 payload 內座標的尺度（反算在追蹤進程做）。
@@ -26,6 +32,7 @@
 
 import datetime
 import queue
+from collections import deque
 from itertools import accumulate
 from zoneinfo import ZoneInfo
 
@@ -38,6 +45,7 @@ from video_analyze.services.batching import (
     TARGET_BATCH,
     TRACK_QUEUE_SLOTS,
 )
+from video_analyze.services.detector import PIPELINE_DEPTH
 from video_analyze.services.inference import InferencePipeline
 from video_analyze.services.track_worker import TRACK_DONE, TRACK_FAILED
 from video_analyze.services.video_reader import READER_DONE, READER_FAILED
@@ -72,35 +80,49 @@ _EMPTY_DETECTIONS = np.zeros((0, 6), dtype=np.float32)
 
 
 class _ScriptedDetector:
-    """依序吐出預先寫好的每格偵測結果，不載入模型。
+    """依序吐出預先寫好的每格偵測結果，不載入模型；介面是流水的 `submit`／`collect`。
 
-    介面是 `preprocess` ＋ `infer` 兩步（ADR-013），slot 的歸還卡在兩者中間，所以兩處
-    都記下當下 free queue 的長度與該批格數：影格是共享記憶體的 view，早於 `preprocess`
+    結果**刻意延後到 `collect` 才取用**（`submit` 只記下這批有幾格），所以「主迴圈把
+    第 k 批的框配到第 k+1 批的影格」在這個替身上真的做得出來，不是被替身的同步行為
+    蓋掉。
+
+    兩處都記下當下 free queue 的長度與該批格數：影格是共享記憶體的 view，早於 `submit`
     回來的歸還會讓 reader 覆寫正在被讀的畫面（ADR-010），而那件事只在「呼叫的當下」
     看得出來，事後從輸出完全看不出來。
 
-    `preprocess` 原樣回傳收到的清單——正式路徑回傳的是 CUDA 張量，這裡只需要一個「有
-    長度、能交給 `infer`」的替身。
+    `submit` 回傳的序號故意不是「第幾次呼叫」以外的東西——主迴圈唯一該做的就是把它跟
+    `collect` 回傳的那個比對。
     """
 
-    # 引擎綁的最大批次。正式的 `YOLODetector` 從引擎 metadata 讀，這裡照正式設定的
-    # 單次批次給，讓 `start_loop` 開頭的上限檢查在真實條件下跑過
+    # 引擎綁的最大批次。正式的 `YOLODetector` 從引擎的 optimization profile 讀，這裡
+    # 照正式設定的單次批次給，讓 `start_loop` 開頭的上限檢查在真實條件下跑過
     max_batch = TARGET_BATCH
 
     def __init__(self, per_frame: list[np.ndarray], free_queue: queue.Queue):
         self._remaining = iter(per_frame)
         self._free_queue = free_queue
+        self._queued: deque[tuple[int, int]] = deque()  # (序號, 該批格數)
+        self._next_seq = 0
         # 逐批的 (呼叫當下已歸還的 slot 數, 本批格數)
-        self.preprocess_log: list[tuple[int, int]] = []
-        self.infer_log: list[tuple[int, int]] = []
+        self.submit_log: list[tuple[int, int]] = []
+        self.collect_log: list[tuple[int, int]] = []
 
-    def preprocess(self, batch_frames: list[np.ndarray]) -> list[np.ndarray]:
-        self.preprocess_log.append((self._free_queue.qsize(), len(batch_frames)))
-        return batch_frames
+    @property
+    def in_flight(self) -> int:
+        return len(self._queued)
 
-    def infer(self, im: list[np.ndarray]) -> list[np.ndarray]:
-        self.infer_log.append((self._free_queue.qsize(), len(im)))
-        return [next(self._remaining) for _ in im]
+    def submit(self, batch_frames: list[np.ndarray]) -> int:
+        assert len(self._queued) < PIPELINE_DEPTH, "主迴圈沒有先 collect 就又 submit"
+        self.submit_log.append((self._free_queue.qsize(), len(batch_frames)))
+        seq = self._next_seq
+        self._next_seq += 1
+        self._queued.append((seq, len(batch_frames)))
+        return seq
+
+    def collect(self) -> tuple[int, list[np.ndarray]]:
+        seq, num_frames = self._queued.popleft()
+        self.collect_log.append((self._free_queue.qsize(), num_frames))
+        return seq, [next(self._remaining) for _ in range(num_frames)]
 
 
 class _FrameRingStub:
@@ -229,29 +251,31 @@ def test_track_failed_is_sent_when_the_loop_aborts():
     assert TRACK_DONE not in dispatched
 
 
-def test_slots_are_returned_after_preprocess_and_before_inference():
-    """歸還晚於前處理、早於 forward——歸還點前移之後，免複製消費唯一會出錯的地方。
+def test_slots_are_returned_after_submit_and_before_the_result_is_collected():
+    """歸還晚於送出、早於取回結果——歸還點前移之後，免複製消費唯一會出錯的地方。
 
-    `preprocess` 當下已歸還的 slot 數必須恰好等於**先前各批**的格數總和（本批一格都
-    還沒還：`np.stack` 還在讀共享記憶體，早還會讓 reader 邊寫邊被讀）；`infer` 當下則
-    必須已經含本批（像素在 `preprocess` 回來時就複製走了，晚還只是讓 reader 多空等
-    一整段 forward）。餵超過一批的量，讓跨批的順序也被涵蓋（只驗單批的話，第二批之後
-    歸還早一步也看不出來）。末尾再驗全數歸還——漏還的話 reader 會卡在
-    `free_queue.get()`，整條 pipeline 停住。
+    `submit` 當下已歸還的 slot 數必須恰好等於**先前各批**的格數總和（本批一格都還沒
+    還：`np.stack` 還在讀共享記憶體，早還會讓 reader 邊寫邊被讀）；`collect` 當下則必須
+    已經含那一批（像素在 `submit` 回來時就複製進 pinned buffer 了，晚還只是讓 reader
+    多空等一整段 forward）。餵超過兩批的量，讓跨批的順序與「流水滿了才收」都被涵蓋。
+    末尾再驗全數歸還——漏還的話 reader 會卡在 `free_queue.get()`，整條 pipeline 停住。
 
     改動前這支驗的是「歸還晚於 `predict`」並另外斷言 `result.orig_img is None`；
     `Results` 不在正式路徑上之後，推論輸出不再攜帶任何影格參照，那條斷言失去對象
     （ADR-010 Decision 4 的修訂）。
     """
-    num_frames = TARGET_BATCH + 4  # > 一批，確保跑到第二批
+    num_frames = TARGET_BATCH * PIPELINE_DEPTH + 4  # 確保流水填滿後還有一批
     _dispatched, free_queue, detector = _run_loop([_FRAME_0_DETECTIONS] * num_frames)
 
-    assert len(detector.preprocess_log) >= 2, "沒跑到第二批，跨批歸還沒被涵蓋"
-    batch_sizes = [entry[1] for entry in detector.preprocess_log]
-    assert [entry[0] for entry in detector.preprocess_log] == list(
+    assert len(detector.submit_log) > PIPELINE_DEPTH, "流水沒被填滿，跨批歸還沒被涵蓋"
+    batch_sizes = [entry[1] for entry in detector.submit_log]
+    assert [entry[0] for entry in detector.submit_log] == list(
         accumulate([0, *batch_sizes[:-1]])
     )
-    assert [entry[0] for entry in detector.infer_log] == list(accumulate(batch_sizes))
+    # `collect` 回收的是最舊那一批，所以當下已歸還的量至少含它自己那一批
+    collected_through = list(accumulate(batch_sizes))
+    for index, (returned_count, _size) in enumerate(detector.collect_log):
+        assert returned_count >= collected_through[index]
 
     returned = []
     while not free_queue.empty():
@@ -259,6 +283,162 @@ def test_slots_are_returned_after_preprocess_and_before_inference():
 
     # `_run_loop` 每格用一個 slot（slot 索引即 frame_index）
     assert sorted(returned) == list(range(num_frames))
+
+
+def test_every_frame_gets_its_own_payload_across_batches_and_the_final_drain():
+    """跨批與收尾 drain 都不可掉格或錯位：逐格的 `frame_index` 要完整且遞增。
+
+    流水化之後最後那幾批是在所有路都讀完之後才收的（主迴圈的 drain 段）。漏掉 drain
+    的症狀是 parquet 少了最後幾百格——列數少一點，而檔案的欄位、時間範圍全部正常。
+    """
+    num_frames = TARGET_BATCH * PIPELINE_DEPTH + 4
+    dispatched, _free_queue, _detector = _run_loop([_FRAME_0_DETECTIONS] * num_frames)
+
+    payloads = [item for item in dispatched if item != TRACK_DONE]
+    assert [p[2] for p in payloads] == list(range(num_frames))
+    assert [p[3] for p in payloads] == [
+        _BASE + datetime.timedelta(seconds=index) for index in range(num_frames)
+    ]
+
+
+class _SeqShufflingDetector(_ScriptedDetector):
+    """回傳的序號比實際的多 1，模擬兩邊的在途佇列錯開一批。"""
+
+    def collect(self) -> tuple[int, list[np.ndarray]]:
+        seq, boxes = super().collect()
+        return seq + 1, boxes
+
+
+def test_a_batch_whose_sequence_number_does_not_match_aborts_the_loop():
+    """序號對不上要當場拋錯，不能照樣把框送出去。
+
+    錯配的輸出檔**完全正常**：每一格的框都是真的，只是配到隔壁批的 `frame_index` 與
+    時間戳。逐值比對也只表現為配對率下降，看不出是錯配還是偵測變了。
+    """
+    free_queue: queue.Queue = queue.Queue()
+    detector = _SeqShufflingDetector([_FRAME_0_DETECTIONS] * 2, free_queue)
+    track_queue: queue.Queue = queue.Queue()
+    pipeline = InferencePipeline(
+        stream_names=["loc_cam001"],
+        detector=detector,
+        track_queues=[track_queue],
+        route=[0],
+    )
+    data_queue: queue.Queue = queue.Queue()
+    for frame_index in range(2):
+        data_queue.put((frame_index, frame_index, _BASE))
+    data_queue.put(READER_DONE)
+
+    with pytest.raises(RuntimeError, match="批"):
+        pipeline.start_loop([data_queue], [free_queue], [_FrameRingStub()])
+
+    assert _drain(track_queue) == [TRACK_FAILED]
+
+
+class _StateDrivenQueue:
+    """先送完 `items`，之後依偵測器的在途狀態決定給 Empty 還是收尾訊號。
+
+    用「在途批數」而不是「第幾次呼叫」當條件，是因為湊批的等待（`_FILL_MAX_WAIT`）是
+    計時的——用呼叫次數寫死會在慢一點的機器上換一條路徑跑，而那正是這兩支要區分的
+    兩條路徑。
+
+    等待仍設上限：等的那件事沒發生時要收尾讓斷言失敗，不是把測試掛住。
+    """
+
+    _MAX_EMPTY = 200
+
+    def __init__(
+        self,
+        items: list,
+        detector,
+        final_signal: str,
+        *,
+        wait_for_collect: bool = False,
+        probe=None,
+    ):
+        self._items = list(items)
+        self._detector = detector
+        self._final_signal = final_signal
+        self._wait_for_collect = wait_for_collect
+        self._probe = probe
+        self._empties = 0
+        self.probed = None
+
+    def _empty(self):
+        self._empties += 1
+        raise queue.Empty
+
+    def get_nowait(self):
+        if self._items:
+            return self._items.pop(0)
+        if self._empties < self._MAX_EMPTY:
+            if not self._detector.submit_log:
+                # 還沒送出任何一批：讓湊批的等待走完，把手上那一格送進流水
+                self._empty()
+            if self._wait_for_collect and self._detector.in_flight:
+                # 沒有新影格、但有一批在 GPU 上：主迴圈應該趁這時把它收回來
+                self._empty()
+        if self._probe is not None:
+            self.probed = self._probe()
+        return self._final_signal
+
+
+def test_an_in_flight_batch_is_collected_while_no_new_frames_arrive():
+    """沒有新影格時就把在途批收回來，不必等湊出下一批。
+
+    等下一批才收的話，供料斷續時 payload 會一路壓在偵測器裡——輸出檔完全正常，只是
+    追蹤進程整段時間沒事做，而端到端的吞吐看起來就只是「比較慢」。
+    """
+    free_queue: queue.Queue = queue.Queue()
+    detector = _ScriptedDetector([_FRAME_0_DETECTIONS], free_queue)
+    track_queue: queue.Queue = queue.Queue()
+    pipeline = InferencePipeline(
+        stream_names=["loc_cam001"],
+        detector=detector,
+        track_queues=[track_queue],
+        route=[0],
+    )
+    data_queue = _StateDrivenQueue(
+        [(0, 0, _BASE)],
+        detector,
+        READER_DONE,
+        wait_for_collect=True,
+        probe=track_queue.qsize,
+    )
+
+    pipeline.start_loop([data_queue], [free_queue], [_FrameRingStub()])
+
+    # 該路讀完的當下，那一格的 payload 已經送出去了——不是留到迴圈結束的 drain 才送
+    assert data_queue.probed == 1
+
+
+def test_track_failed_reaches_every_shard_when_a_batch_is_still_in_flight():
+    """上游在有批次在途時崩潰，失敗訊號仍要送到每一片。
+
+    在途批的結果就此丟掉是對的（結果不完整，寧可不寫），但訊號不能跟著丟——收不到的
+    那片會等到父進程 SIGTERM，把「上游崩潰」與「被 terminate」混成同一種結束方式。
+    """
+    free_queue: queue.Queue = queue.Queue()
+    detector = _ScriptedDetector([_FRAME_0_DETECTIONS], free_queue)
+    track_queues: list[queue.Queue] = [queue.Queue(), queue.Queue()]
+    pipeline = InferencePipeline(
+        stream_names=["loc_cam001", "loc_cam002"],
+        detector=detector,
+        track_queues=track_queues,
+        route=[0, 1],
+    )
+    live_queue: queue.Queue = queue.Queue()
+    live_queue.put(READER_DONE)
+    failing_queue = _StateDrivenQueue([(0, 0, _BASE)], detector, READER_FAILED)
+
+    with pytest.raises(RuntimeError, match="中途例外"):
+        pipeline.start_loop(
+            [failing_queue, live_queue],
+            [free_queue, free_queue],
+            [_FrameRingStub(), _FrameRingStub()],
+        )
+
+    assert [_drain(q)[-1] for q in track_queues] == [TRACK_FAILED, TRACK_FAILED]
 
 
 def test_a_batch_larger_than_the_engine_ceiling_aborts_with_track_failed():
