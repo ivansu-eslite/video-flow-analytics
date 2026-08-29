@@ -194,6 +194,19 @@ def test_runner_reports_a_failed_deserialize_instead_of_crashing_later(
         _runner(monkeypatch, tmp_path, None)
 
 
+def test_runner_reports_a_context_that_could_not_be_created(monkeypatch, tmp_path):
+    """`create_execution_context()` 同樣是失敗回 None 而不拋錯（多半是顯存不夠）。
+
+    不擋的話症狀是 warmup 期間的 `'NoneType' object has no attribute
+    'set_input_shape'`，指不出真正的原因。
+    """
+    engine = _FakeEngine(_tensors(), _PROFILE)
+    engine.context = None
+
+    with pytest.raises(RuntimeError, match="execution context"):
+        _runner(monkeypatch, tmp_path, engine)
+
+
 def _infer_tensor(**overrides) -> torch.Tensor:
     kwargs = {"dtype": torch.float32}
     kwargs.update(overrides)
@@ -279,7 +292,7 @@ def test_enqueue_rejects_an_output_buffer_of_a_different_batch_size(
     )
     out = torch.zeros((3, 300, END2END_COLUMNS), device="cuda:0")
 
-    with pytest.raises(ValueError, match="輸出緩衝的批次"):
+    with pytest.raises(ValueError, match="輸出緩衝的形狀"):
         runner.enqueue(im, out, torch.cuda.Stream())
 
 

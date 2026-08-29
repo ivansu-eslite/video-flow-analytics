@@ -71,8 +71,8 @@ def _require_engine_file(model_path: Path) -> None:
         raise FileNotFoundError(
             f"找不到引擎檔 {model_path}。`model_path` 是 cwd 相對路徑，四包一律在 "
             "repo 根執行（`uv run` 不改變 cwd）；在別的 cwd 跑就會是這個症狀。"
-            "自己先擋是為了訊息——TensorRT backend 直接 open()，拋出來的例外只有"
-            "一個路徑字串。"
+            "自己先擋是為了訊息——下一步讀檔頭時 open() 拋出來的例外只有一個"
+            "路徑字串。"
         )
 
 
@@ -180,8 +180,13 @@ def _validate_dynamic(metadata: dict) -> None:
     解碼餵不滿批——等於整天的分析跑到一半才失敗。
 
     `TrtRunner` 的形狀檢查幫不上忙——它排在 enqueue **之前**沒錯，但驗的是我們自己
-    組出來的張量形狀，那個形狀本來就是對的；容不下它的是引擎。所以這一項要在載入時、
-    從 metadata 驗。
+    組出來的張量形狀，那個形狀本來就是對的；容不下它的是引擎。
+
+    **這一項是唯一還從 metadata 驗的**（其餘四道已移進 `TrtRunner`、改讀引擎自己宣告的
+    值，見 ADR-014 Decision 1）。引擎端也答得出這件事——profile 的 `min[0] == max[0]`
+    就是「批次綁死」——但那要先 deserialize；留在這裡是為了讓不合格的引擎不必先吃掉
+    數秒與數 GB 顯存。代價是有人手改檔頭的 `args.dynamic` 就繞得過，而那個情境下引擎
+    照樣會在第一個不滿批被 `set_input_shape` 擋下（訊息差一點，不是靜默錯誤）。
 
     Args:
         metadata: `read_engine_metadata` 讀回的 metadata。
@@ -193,9 +198,9 @@ def _validate_dynamic(metadata: dict) -> None:
     if dynamic is not True:
         raise ValueError(
             f"引擎的匯出參數 dynamic={dynamic}，不是 dynamic 引擎。批次大小會隨供料"
-            "變動（湊不滿批是常態），靜態引擎綁死批次，第一個不滿批就會在 ultralytics "
-            "的 forward assert 失敗，而那條訊息看不出原因。請用 "
-            "`tools/build_engine.py` 重建。"
+            "變動（湊不滿批是常態），靜態引擎綁死批次，第一個不滿批就會讓 "
+            "`TrtRunner.enqueue` 的 set_input_shape 失敗，而那條訊息看不出原因"
+            "（整天的分析已經跑到一半）。請用 `tools/build_engine.py` 重建。"
         )
 
 
@@ -346,8 +351,8 @@ class YOLODetector:
         這裡仍然明著擋一次——這是全流水唯一沒有其他訊號的失效方式。
 
         緩衝一律照引擎的 `max_batch` 配置（不是 `[model].batch`）：`submit` 因此接得下
-        引擎容得下的任何批次，而不必跟著設定值走。整批 pinned 記憶體約 24 MB × 2、
-        device 端同量，輸出側每份不到 0.12 MB。
+        引擎容得下的任何批次，而不必跟著設定值走。批次 16 下每份影格緩衝
+        11.8 MB（pinned 兩份、device 兩份，合計約 47 MB），輸出側每份不到 0.12 MB。
 
         **不呼叫 `.to(device)`**：引擎不是 PyTorch module，呼叫就崩；裝置在建構時指定。
         **也沒有 CPU fallback**：引擎綁 GPU，CPU 上不是「比較慢」而是一定失敗。
@@ -439,14 +444,21 @@ class YOLODetector:
         目的地從一塊臨時陣列換成常駐的 pinned buffer，而那塊 buffer 的重用由本函式
         開頭的 `_h2d_done` 守住。
 
-        四段依賴各自明著寫出來，不靠「迴圈順序自然滿足」的傳遞性——漏掉一條不會報錯，
-        只會讓某一批讀到還沒寫完或已被覆寫的記憶體，而輸出檔完全正常：
+        五個同步點分成兩類。**本輪的生產／消費依賴，拿掉就一定錯**（兩條都是跨 stream
+        的，而 `collect` 只同步得到上一輪）：
 
-        1. 寫 `_pinned_in[b]` 前等 `_h2d_done[b]`（上一輪這塊的 H2D 讀完了嗎）。
-        2. H2D 寫 `_dev_u8[b]` 前等 `_fwd_done[b]`（上一輪這塊被前處理讀完了嗎；
+        1. 前處理讀 `_dev_u8[b]` 前等 `_h2d_done[b]`——本輪的 H2D 寫完了嗎。
+        2. D2H 讀 `_dev_out[b]` 前等 `_fwd_done[b]`——本輪的 forward 算完了嗎。
+
+        **上一輪的緩衝重用，現行迴圈下三條都由傳遞性成立**（深度上限逼得第 k 批的
+        `submit` 之前必先 `collect` 第 k−2 批，而那裡 host 同步過 `_d2h_done[b]`，
+        copy stream 又是循序的），仍然明著寫出來——深度、stream 數或收批時機一改，
+        傳遞性就沒了，而漏掉不會報錯，只會讓某一批讀到已被覆寫的記憶體、輸出檔完全正常：
+
+        3. 寫 `_pinned_in[b]` 前等 `_h2d_done[b]`（上一輪這塊的 H2D 讀完了嗎）。
+        4. H2D 寫 `_dev_u8[b]` 前等 `_fwd_done[b]`（上一輪這塊被前處理讀完了嗎；
            forward 排在前處理之後，等它是更保守的同一件事）。
-        3. forward 寫 `_dev_out[b]` 前等 `_d2h_done[b]`（上一輪這塊搬回 host 了嗎）。
-        4. D2H 讀 `_dev_out[b]` 前等 `_fwd_done[b]`（本輪算完了嗎）。
+        5. forward 寫 `_dev_out[b]` 前等 `_d2h_done[b]`（上一輪這塊搬回 host 了嗎）。
 
         每個 `wait_event` 都排在對應的 `record` 之後：`wait_event` 擷取的是**呼叫當下**
         event 的狀態，而未 record 過的 event 是 no-op——順序寫反不會有任何錯誤訊息。

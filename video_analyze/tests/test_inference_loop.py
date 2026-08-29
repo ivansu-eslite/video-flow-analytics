@@ -444,10 +444,9 @@ def test_track_failed_reaches_every_shard_when_a_batch_is_still_in_flight():
 def test_a_batch_larger_than_the_engine_ceiling_aborts_with_track_failed():
     """實際批次超過引擎綁的最大批次要**在跑之前**擋下，並送得出 `TRACK_FAILED`。
 
-    引擎的 batch 維度上限是建置時綁死的。超過的話 ultralytics 的 TensorRT backend 會在
-    `forward` 的 assert 失敗，訊息只講「input size 不等於 model size」——看不出是
-    `[model].batch` 與引擎對不上，而這兩者是分別維護的（一個在 `config.toml`，一個在
-    建引擎時的 `--batch`）。
+    引擎的 batch 維度上限是建置時綁死的。超過的話會炸在 `TrtRunner.enqueue` 的
+    `set_input_shape`，那條訊息看得出形狀與上限——但看不出是 `[model].batch` 與引擎
+    對不上，而這兩者是分別維護的（一個在 `config.toml`，一個在建引擎時的 `--batch`）。
 
     檢查放在 `start_loop` 的 try 內而非之前：追蹤進程此時已經等在 queue 上，
     走 `TRACK_FAILED` 才不必等父進程 SIGTERM（見 `services/pipeline.py`）。

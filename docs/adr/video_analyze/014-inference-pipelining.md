@@ -72,9 +72,15 @@ ultralytics 的 exporter 產出，格式不是我們定的，各寫一份只會�
 最後一列不必等 event：深度上限逼得第 k 批的 `submit` 之前必須先 `collect` 第 k−2 批，
 而 `collect` 讀完就把結果複製成新陣列了（boolean mask 產生新陣列，與 buffer 無別名）。
 
-**前三列有兩條在現行迴圈下是傳遞性可推的**（`collect` 已經同步過 `_d2h_done`，而它排在
-同一條 copy stream 的 H2D 之後），仍然明著寫出來：漏一條不會報錯，只會讓某一批讀到還沒
-寫完或已被覆寫的記憶體，而輸出檔完全正常。深度或 stream 數一改，傳遞性就沒了。
+**前三列（上一輪的緩衝重用）在現行迴圈下三條都是傳遞性可推的**：深度上限逼得第 k 批的
+`submit` 之前必先 `collect` 第 k−2 批，那裡 host 同步過 `_d2h_done`，而 copy stream 是
+循序的。仍然明著寫出來：漏一條不會報錯，只會讓某一批讀到已被覆寫的記憶體，而輸出檔完全
+正常，深度、stream 數或收批時機一改傳遞性就沒了。
+
+**真正 load-bearing 的是另外兩條**——本輪的跨 stream 生產／消費依賴：前處理讀
+`_dev_u8[b]` 前等本輪的 `_h2d_done[b]`、D2H 讀 `_dev_out[b]` 前等本輪的 `_fwd_done[b]`。
+`collect` 只同步得到上一輪，這兩條沒有任何東西可以替代。`submit` 的 docstring 把五個
+同步點分成這兩類列出，日後稽核照那份清單對。
 
 **`np.stack` 改成寫進常駐的 pinned buffer**（`stack_frames(frames, out)`）而不是每批配一塊
 新陣列：pageable 記憶體的 `copy_(non_blocking=True)` 會被 CUDA 悄悄降級成同步複製，流水
@@ -147,8 +153,9 @@ Negative
   正常，只是某些格的框是別批的」。防線是 event、序號核對，與 GPU 上的定序測試（假 runner
   以 `torch.cuda._sleep` 放慢，讓競態可觀察）；CI 沒有 GPU，那支測試在 CI 上是 skip 的。
 - **`detection_fps` 與改動前不可比**（見 Decision 6）。跨改動的比較只剩 `overall_fps`。
-- **常駐緩衝多佔約 50 MB**（pinned 24 MB × 2、device 24 MB × 2，輸出側每份不到 0.12 MB），
-  另有兩份在途的中間 f32 張量各 47 MB。相對於引擎本身的顯存不顯著。
+- **常駐緩衝多佔約 47 MB**（批次 16 下每份影格緩衝 11.8 MB，pinned 兩份、device 兩份；
+  輸出側每份不到 0.12 MB），另有兩份在途的中間 f32 張量各 47 MB。相對於引擎本身的
+  顯存不顯著。
 - **`tools/build_engine.py`／`tools/compare_backend.py` 與正式路徑的距離又遠了一步**：
   它們仍走 ultralytics 的完整 `predict`。ADR-013 已記這件事，本次再加上「連 backend 都
   不是同一個」。要驗自建 runner，看的是 `test_trt_runner.py` 對 `AutoBackend.forward` 的

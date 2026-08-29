@@ -132,7 +132,7 @@ class TrtRunner:
     """
 
     def __init__(self, engine_path: Path):
-        """讀檔頭、deserialize 引擎、建 execution context，並做三道載入期檢查。
+        """讀檔頭、deserialize 引擎、建 execution context，並做四道載入期檢查。
 
         `logger`／`runtime`／`engine`／`context` 四個引用都掛在自己身上：TensorRT 的
         物件不持有建立者的所有權，`runtime` 先被回收的話 `engine` 會在之後的任一次
@@ -146,7 +146,8 @@ class TrtRunner:
             ValueError: 檔頭不是 ultralytics 的 metadata 格式、引擎的 I/O 張量不是
                 恰好一入一出、輸入 dtype 不是 float32、輸入 opt 高寬不是推論尺寸，
                 或輸出的最後一維不是 `END2END_COLUMNS`。
-            RuntimeError: 引擎 deserialize 失敗。
+            RuntimeError: 引擎 deserialize 失敗，或建不出 execution context
+                （兩者都只回 `None` 而不拋錯）。
         """
         import tensorrt as trt
 
@@ -162,7 +163,15 @@ class TrtRunner:
                 "兩者的比對已在載入前做過（見 `engine_metadata.validate_engine_metadata`），"
                 "走到這裡代表引擎檔本身損壞。詳細原因由 TensorRT 的 logger 印在上方。"
             )
+        # 與上面同型：失敗時回 `None` 而不拋錯（配不出 context 的裝置記憶體是最常見的
+        # 原因）。不擋的話症狀是 warmup 期間的 `'NoneType' object has no attribute
+        # 'set_input_shape'`，指不出真正的原因
         self._context = self._engine.create_execution_context()
+        if self._context is None:
+            raise RuntimeError(
+                f"{engine_path} 建不出 execution context。引擎本身已 deserialize 成功，"
+                "走到這裡多半是裝置記憶體不足（context 自帶一份 activation 用的暫存）。"
+            )
 
         names = [
             self._engine.get_tensor_name(i)
@@ -236,8 +245,8 @@ class TrtRunner:
                 直接退化成序列）。
 
         Raises:
-            ValueError: `im` 的 dtype／佈局／維度／高寬不符，或 `out` 的批次大小與
-                `im` 對不上。
+            ValueError: `im` 的 dtype／佈局／維度／高寬不符，或 `out` 的形狀不是這一批
+                應有的 `(B, output_num_det, END2END_COLUMNS)`。
             RuntimeError: `im` 不在 CUDA 上，`stream` 是 default stream，或三個
                 TensorRT 呼叫任一個回 `False`。
         """
@@ -251,11 +260,12 @@ class TrtRunner:
             )
         _check_infer_tensor(im)
         self._check_infer_shape(im)
-        if out.shape[0] != im.shape[0]:
+        expected_out = (im.shape[0], self.output_num_det, END2END_COLUMNS)
+        if tuple(out.shape) != expected_out:
             raise ValueError(
-                f"輸出緩衝的批次是 {out.shape[0]}，輸入是 {im.shape[0]}。兩者對不上"
-                "時引擎照樣寫得完（輸出 binding 只是一個位址），只是這一批的結果會"
-                "溢出到緩衝的下一段或只填了一部分，而後處理讀到的列數完全正常。"
+                f"輸出緩衝的形狀是 {tuple(out.shape)}，這一批應該是 {expected_out}。"
+                "對不上時引擎照樣寫得完（輸出 binding 只是一個位址），只是這一批的"
+                "結果會溢出到緩衝的下一段或只填了一部分，而後處理讀到的列數完全正常。"
             )
         if not self._context.set_input_shape(self._input_name, tuple(im.shape)):
             raise RuntimeError(

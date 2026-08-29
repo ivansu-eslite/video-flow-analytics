@@ -217,10 +217,10 @@ def test_validate_dynamic_accepts_a_dynamic_engine():
 def test_validate_dynamic_rejects_a_static_engine():
     """靜態引擎要在載入時擋下，不能留給推論當下的 assert。
 
-    它會通過其餘全部載入檢查，然後在第一個沒湊滿的批次上被 ultralytics 的
-    `assert im.shape == s` 擋下——訊息只講「input size 不等於 max model size」，看不出
+    它會通過其餘全部載入檢查（warmup 那一批剛好是滿批），然後在第一個沒湊滿的批次上
+    被 `TrtRunner.enqueue` 的 `set_input_shape` 擋下——訊息看得出形狀與上限，看不出
     原因是引擎綁死了批次。而湊不滿批是常態而非例外：T4（n1-standard-8）上實測一次跑完
-    出現 16 種不同的批次大小，1 到 16 全都有。
+    出現 16 種不同的批次大小，1 到 16 全都有，等於整天的分析跑到一半才失敗。
 
     `TrtRunner` 的形狀檢查幫不上忙——它驗的是我們自己組出來的張量形狀，那個形狀本來
     就是對的；容不下它的是引擎。
@@ -503,7 +503,14 @@ def test_pipelined_batches_keep_their_own_data_across_buffer_reuse(monkeypatch):
     monkeypatch.setattr(settings.model, "classes", [FBODY_CLASS_ID])
     runner = _CountingRunner()
     detector = _detector_with_runner(runner)
-    batches = [_frames(list(range(1, size + 1))) for size in (5, 2, 7, 3, 6)]
+    # 各批的值域**不可重疊**：每批都從 1 開始的話，「第 k 批的緩衝被第 k±2 批覆寫」
+    # 在數值上是恆等的（前綴逐值相同，只有尾巴幾格會少），斷言就退化成「列數對不對」
+    # 而列數是 Python 這側記帳決定的，與 event 無關——實測那種測資下把 `wait_event`
+    # 全部拿掉仍然全綠
+    batches = [
+        _frames(list(range(start, start + size)))
+        for start, size in ((1, 5), (40, 2), (80, 7), (120, 3), (160, 6))
+    ]
 
     results: dict[int, list[np.ndarray]] = {}
     pending: list[int] = []
