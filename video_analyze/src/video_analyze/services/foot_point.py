@@ -259,6 +259,13 @@ class FootPointEstimator:
 
         Returns:
             `[N, 2]` 的落腳點，逐列對應 `tracks`；每列都有值，不會是空值。
+
+        Note:
+            **同一格內 `track_id` 唯一是前提**。快取的寫入整格一次做完、才輪到配不到頭
+            的列去讀，所以同一格出現兩列相同 `track_id` 時，配不到頭的那列會讀到同格
+            另一列剛寫進去的偏移量（逐列版讀不到，會退回框底邊中點）。ByteTrack 的
+            `joint_stracks` 依 `track_id` 去重，`_format_output` 不會輸出重複 id，故
+            產線走不到；換掉 tracker 時要重新確認這件事。
         """
         tracks = np.asarray(tracks, dtype=float)
         if tracks.size == 0:
@@ -290,12 +297,7 @@ class FootPointEstimator:
         # 分不出是哪一邊。這種推算結果只用在這一格、不進快取，錯配才不會被沿用成最多
         # 60 格的持續偏移。
         used, counts = np.unique(matched[found], return_counts=True)
-        shared_heads = used[counts > 1]
-        shared = (
-            np.isin(matched, shared_heads)
-            if shared_heads.size
-            else np.zeros(len(matched), dtype=bool)
-        )
+        shared = np.isin(matched, used[counts > 1])
 
         # 整格算好偏移量，只有「配到頭且沒被共用」的列寫進快取。配不到頭的列此刻
         # points 仍等於 bottom，算出來是 0、不會被寫進去
