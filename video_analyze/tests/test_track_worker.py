@@ -78,9 +78,9 @@ def _to_source(x: float, y: float) -> tuple[float, float]:
     return (x - _PAD_X) / _SCALE, (y - _PAD_Y) / _SCALE
 
 
-def _boxes(rows: list[tuple[float, float, float, float, float, int]]) -> Boxes:
-    """`rows` 為 `(x1, y1, x2, y2, conf, cls)`，與 ultralytics 的 data 佈局一致。"""
-    return Boxes(torch.tensor(rows, dtype=torch.float32), _INFER_SHAPE)
+def _boxes(rows: list[tuple[float, float, float, float, float, int]]) -> np.ndarray:
+    """`rows` 為 `(x1, y1, x2, y2, conf, cls)`，與 payload 內每格的佈局一致。"""
+    return np.array(rows, dtype=np.float32)
 
 
 # 兩格偵測：各兩個 fbody，配上罩得住的 head，第二格另有一顆配不到人的孤兒 head。
@@ -153,7 +153,7 @@ def _part_path(tmp_path) -> Path:
 def _run_worker(
     tmp_path,
     monkeypatch,
-    per_frame: list[Boxes],
+    per_frame: list[np.ndarray],
     last_signal: str = TRACK_DONE,
     frame_shapes: list[FrameShape] | None = None,
 ) -> tuple[list[_RecordingTracker], Path]:
@@ -162,9 +162,9 @@ def _run_worker(
     `track_queue` 用 `queue.Queue` 取代 `mp.Queue`（介面相同），不拉起任何子進程。
     `last_signal` 換成 `TRACK_FAILED` 就能驗推論進程崩潰時的失效路徑。
 
-    餵進去的 `Boxes` 先 `clone()` 一份：`to_payload` 對已在 CPU 的 tensor 回傳的是**共享
-    記憶體的 numpy view**，而正式執行時 `mp.Queue` 會 pickle（等於複製），這裡用
-    `queue.Queue` 就沒有那道複製。不 clone 的話 `_track_one` 的 `clip_to_content_inplace`
+    餵進去的陣列先 `copy()` 一份：`to_payload` 原樣帶著傳進來的那個陣列（推論端自建
+    後處理之後它本來就是 CPU numpy），而正式執行時 `mp.Queue` 會 pickle（等於複製），
+    這裡用 `queue.Queue` 就沒有那道複製。不複製的話 `_track_one` 的 `clip_to_content_inplace`
     會就地改掉模組層級的偵測資料，污染同檔後續測試——目前所有框都在內容區以內、裁切是
     no-op 所以打不到，但只要有人加一個落在填充帶的框（正是 clip 要測的情境）就會踩到。
     """
@@ -175,7 +175,7 @@ def _run_worker(
         track_queue.put(
             to_payload(
                 0,
-                Boxes(boxes.data.clone(), boxes.orig_shape),
+                boxes.copy(),
                 frame_index,
                 _BASE + datetime.timedelta(seconds=frame_index),
             )
@@ -281,7 +281,7 @@ def test_frames_without_detections_still_reach_the_tracker(tmp_path, monkeypatch
     的列數、`track_id` 與 bbox 完全正常。`FootPointEstimator` 的偏移量 TTL 同理——它
     按「有軌跡的幀」計 tick，那個早退要由 `estimate` 自己做，不能由呼叫端代勞。
     """
-    empty = Boxes(torch.zeros((0, 6), dtype=torch.float32), _INFER_SHAPE)
+    empty = np.zeros((0, 6), dtype=np.float32)
     trackers, path = _run_worker(
         tmp_path, monkeypatch, [_FRAME_0_DETECTIONS, empty, _FRAME_1_DETECTIONS]
     )
@@ -336,7 +336,7 @@ def test_a_payload_for_another_shard_is_rejected(tmp_path, monkeypatch):
     part_path = _part_path(tmp_path)
     track_queue: queue.Queue = queue.Queue()
     track_queue.put(
-        to_payload(1, Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE), 0, _BASE)
+        to_payload(1, _FRAME_0_DETECTIONS.copy(), 0, _BASE)
     )
 
     with pytest.raises(RuntimeError, match="不屬於自己的 stream_id"):
@@ -390,15 +390,15 @@ def test_a_failing_shard_only_discards_its_own_part(tmp_path, monkeypatch):
 
 def test_to_payload_returns_none_for_frames_without_detections():
     """空框送 None，省下每格一次空陣列的 pickle。"""
-    empty = Boxes(torch.zeros((0, 6), dtype=torch.float32), _INFER_SHAPE)
+    empty = np.zeros((0, 6), dtype=np.float32)
 
     assert to_payload(3, empty, 7, _BASE) == (3, None, 7, _BASE)
     assert to_payload(3, None, 7, _BASE) == (3, None, 7, _BASE)
 
 
 def test_to_payload_hands_over_plain_cpu_numpy():
-    """轉成 CPU numpy 而不是直接傳 `Boxes`：後者內含 tensor、可能還在 GPU 上，
-    pickle 過去會連帶把 CUDA 狀態拖進來。"""
+    """跨進程傳的是純 CPU numpy，`Boxes` 不出現在這個介面上：後者內含 tensor、可能還在
+    GPU 上，pickle 過去會連帶把 CUDA 狀態拖進來。"""
     stream_id, box_data, frame_index, timestamp = to_payload(
         3, _FRAME_0_DETECTIONS, 7, _BASE
     )
@@ -419,13 +419,9 @@ def test_payload_round_trip_preserves_confidence_and_class():
     )
     restored = Boxes(torch.from_numpy(box_data), _INFER_SHAPE)
 
-    np.testing.assert_allclose(
-        restored.conf.numpy(), _FRAME_0_DETECTIONS.conf.numpy()
-    )
-    np.testing.assert_allclose(restored.cls.numpy(), _FRAME_0_DETECTIONS.cls.numpy())
-    np.testing.assert_allclose(
-        restored.xyxy.numpy(), _FRAME_0_DETECTIONS.xyxy.numpy()
-    )
+    np.testing.assert_allclose(restored.conf.numpy(), _FRAME_0_DETECTIONS[:, 4])
+    np.testing.assert_allclose(restored.cls.numpy(), _FRAME_0_DETECTIONS[:, 5])
+    np.testing.assert_allclose(restored.xyxy.numpy(), _FRAME_0_DETECTIONS[:, :4])
     assert restored.orig_shape == _INFER_SHAPE
 
 
@@ -445,17 +441,17 @@ def test_track_queue_capacity_is_a_few_batches_of_slack():
 
 
 def test_payload_shares_memory_with_the_source_boxes():
-    """`to_payload` 回的是共享記憶體的 view，不是副本——正式路徑靠 `mp.Queue` 的 pickle
-    複製，測試用 `queue.Queue` 時就得自己 clone（見 `_run_worker`）。
+    """`to_payload` 原樣帶著傳進來的陣列，不是副本——正式路徑靠 `mp.Queue` 的 pickle
+    複製，測試用 `queue.Queue` 時就得自己複製（見 `_run_worker`）。
 
     這支測試的用途是讓「哪一邊負責複製」這件事有訊號：日後若 `to_payload` 改成回副本
-    （例如加上 `.copy()`），這裡會失敗，提醒同時檢查 `_run_worker` 的 clone 還需不需要。
+    （例如加上 `.copy()`），這裡會失敗，提醒同時檢查 `_run_worker` 的複製還需不需要。
     """
     _stream_id, box_data, _frame_index, _timestamp = to_payload(
         0, _FRAME_0_DETECTIONS, 0, _BASE
     )
 
-    assert np.shares_memory(box_data, _FRAME_0_DETECTIONS.data.numpy())
+    assert np.shares_memory(box_data, _FRAME_0_DETECTIONS)
 
 
 class _SigtermAfterGets(queue.Queue):
@@ -509,7 +505,7 @@ def test_sigterm_discards_the_partial_output(tmp_path, monkeypatch):
         track_queue.put(
             to_payload(
                 0,
-                Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE),
+                _FRAME_0_DETECTIONS.copy(),
                 frame_index,
                 _BASE + datetime.timedelta(seconds=frame_index),
             )
@@ -607,7 +603,7 @@ def test_sigterm_interrupts_a_blocking_queue_get(tmp_path, monkeypatch):
 
     track_queue: mp.Queue = mp.Queue()
     track_queue.put(
-        to_payload(0, Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE), 0, _BASE)
+        to_payload(0, _FRAME_0_DETECTIONS.copy(), 0, _BASE)
     )
     previous = signal.signal(signal.SIGTERM, _fallback)
     killer = threading.Thread(target=_signal_once_it_blocks, daemon=True)
@@ -660,7 +656,7 @@ def test_sigterm_during_cleanup_does_not_interrupt_it(tmp_path, monkeypatch):
     )
     track_queue: queue.Queue = queue.Queue()
     track_queue.put(
-        to_payload(0, Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE), 0, _BASE)
+        to_payload(0, _FRAME_0_DETECTIONS.copy(), 0, _BASE)
     )
     track_queue.put(TRACK_FAILED)  # 先以另一條路徑進入清理
 
@@ -704,7 +700,7 @@ def test_a_second_ctrl_c_during_cleanup_does_not_interrupt_it(tmp_path, monkeypa
     )
     track_queue: queue.Queue = queue.Queue()
     track_queue.put(
-        to_payload(0, Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE), 0, _BASE)
+        to_payload(0, _FRAME_0_DETECTIONS.copy(), 0, _BASE)
     )
     track_queue.put(TRACK_FAILED)
 

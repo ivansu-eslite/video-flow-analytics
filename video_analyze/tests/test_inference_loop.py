@@ -10,8 +10,9 @@
    的話，落腳點推算永遠配不到頭、每列靜默退回框底邊中點（ADR-009 的偏移就這樣回來）。
 2. **`frame_index` 與 `timestamp` 逐格對得上**。payload 是 parquet 那兩欄的唯一來源，
    錯開後每一列的時間戳都配到別格，而列數與 `track_id` 全部正常。
-3. **歸還 slot 晚於推論、且早於送 payload**。影格是共享記憶體的 view，任何早於推論
-   完成的歸還都會讓 reader 覆寫正在推論的畫面（ADR-010）。
+3. **歸還 slot 晚於前處理、且早於 forward**。影格是共享記憶體的 view，任何早於
+   `preprocess` 回來的歸還都會讓 reader 覆寫正在被讀的畫面；而前處理一回來像素就已經
+   複製走了，晚還只是讓 reader 多空等一整段 forward（ADR-010、ADR-013）。
 4. **payload 進到路由指定的那一片、結束與失敗訊號送到每一片**。送錯片沒有任何直接
    症狀（那片也有全部路的 tracker），唯一的訊號在追蹤進程入口；訊號漏送則會讓那一片
    一直等在 `get()` 上、缺一支 part 檔。
@@ -30,8 +31,6 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pytest
-import torch
-from ultralytics.engine.results import Boxes, Results
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
 from video_analyze.services.batching import (
@@ -40,20 +39,14 @@ from video_analyze.services.batching import (
     TRACK_QUEUE_SLOTS,
 )
 from video_analyze.services.inference import InferencePipeline
-from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
 from video_analyze.services.track_worker import TRACK_DONE, TRACK_FAILED
 from video_analyze.services.video_reader import READER_DONE, READER_FAILED
 
 _TAIPEI = ZoneInfo("Asia/Taipei")
 _BASE = datetime.datetime(2026, 5, 1, 9, 0, tzinfo=_TAIPEI)
-# 偵測結果的座標系：影格在讀取端就縮好了，ultralytics 的 `orig_shape` 也是這個尺寸
-_INFER_SHAPE = (INFER_HEIGHT, INFER_WIDTH)
-_CLASS_NAMES = {HEAD_CLASS_ID: "head", FBODY_CLASS_ID: "fbody"}
-
-
-def _boxes(rows: list[tuple[float, float, float, float, float, int]]) -> Boxes:
-    """`rows` 為 `(x1, y1, x2, y2, conf, cls)`，與 ultralytics 的 data 佈局一致。"""
-    return Boxes(torch.tensor(rows, dtype=torch.float32), _INFER_SHAPE)
+def _boxes(rows: list[tuple[float, float, float, float, float, int]]) -> np.ndarray:
+    """`rows` 為 `(x1, y1, x2, y2, conf, cls)`，與 `YOLODetector.infer` 的每格佈局一致。"""
+    return np.array(rows, dtype=np.float32)
 
 
 # 兩格偵測：各兩個 fbody，配上罩得住的 head，第二格另有一顆配不到人的孤兒 head。
@@ -74,48 +67,40 @@ _FRAME_1_DETECTIONS = _boxes(
         (500.0, 300.0, 514.0, 317.0, 0.5, HEAD_CLASS_ID),
     ]
 )
-# 空格：`torch.tensor([])` 是 1D、`Boxes` 會判成 0 欄，要明確給 (0, 6)
-_EMPTY_DETECTIONS = Boxes(torch.zeros((0, 6), dtype=torch.float32), _INFER_SHAPE)
+# 空格：欄數仍是 6，只是一列都沒有
+_EMPTY_DETECTIONS = np.zeros((0, 6), dtype=np.float32)
 
 
 class _ScriptedDetector:
     """依序吐出預先寫好的每格偵測結果，不載入模型。
 
-    回傳**真正的 `Results`**（而非只帶 `boxes` 的替身）：主迴圈在歸還 slot 前會把
-    `result.orig_img` 清成 `None`，那道保護只有對真實物件才驗得到——替身是普通
-    dataclass，`orig_img` 賦值必定成功，日後 ultralytics 把該欄位改成唯讀或加上
-    `__slots__` 時，production 每批都拋錯而測試全綠。
+    介面是 `preprocess` ＋ `infer` 兩步（ADR-013），slot 的歸還卡在兩者中間，所以兩處
+    都記下當下 free queue 的長度與該批格數：影格是共享記憶體的 view，早於 `preprocess`
+    回來的歸還會讓 reader 覆寫正在被讀的畫面（ADR-010），而那件事只在「呼叫的當下」
+    看得出來，事後從輸出完全看不出來。
 
-    另記下每次 predict 當下 free queue 的長度與該批格數：影格是共享記憶體的 view，
-    任何早於推論完成的歸還都會讓 reader 覆寫正在推論的畫面（見 ADR-010），而那件事
-    只在「呼叫的當下」看得出來，事後從輸出完全看不出來。
+    `preprocess` 原樣回傳收到的清單——正式路徑回傳的是 CUDA 張量，這裡只需要一個「有
+    長度、能交給 `infer`」的替身。
     """
 
     # 引擎綁的最大批次。正式的 `YOLODetector` 從引擎 metadata 讀，這裡照正式設定的
     # 單次批次給，讓 `start_loop` 開頭的上限檢查在真實條件下跑過
     max_batch = TARGET_BATCH
 
-    def __init__(self, per_frame: list[Boxes], free_queue: queue.Queue):
+    def __init__(self, per_frame: list[np.ndarray], free_queue: queue.Queue):
         self._remaining = iter(per_frame)
         self._free_queue = free_queue
-        # 逐次 predict 的 (呼叫當下已歸還的 slot 數, 本批格數)
-        self.predict_log: list[tuple[int, int]] = []
-        # 交出去的 Results，供呼叫端檢查歸還前是否已切斷對共享記憶體的參照
-        self.returned_results: list[Results] = []
+        # 逐批的 (呼叫當下已歸還的 slot 數, 本批格數)
+        self.preprocess_log: list[tuple[int, int]] = []
+        self.infer_log: list[tuple[int, int]] = []
 
-    def predict(self, batch_frames: list[np.ndarray]) -> list[Results]:
-        self.predict_log.append((self._free_queue.qsize(), len(batch_frames)))
-        results = [
-            Results(
-                orig_img=frame,
-                path="scripted.mkv",
-                names=_CLASS_NAMES,
-                boxes=next(self._remaining).data,
-            )
-            for frame in batch_frames
-        ]
-        self.returned_results.extend(results)
-        return results
+    def preprocess(self, batch_frames: list[np.ndarray]) -> list[np.ndarray]:
+        self.preprocess_log.append((self._free_queue.qsize(), len(batch_frames)))
+        return batch_frames
+
+    def infer(self, im: list[np.ndarray]) -> list[np.ndarray]:
+        self.infer_log.append((self._free_queue.qsize(), len(im)))
+        return [next(self._remaining) for _ in im]
 
 
 class _FrameRingStub:
@@ -132,7 +117,7 @@ class _FrameRingStub:
 
 
 def _run_loop(
-    per_frame: list[Boxes], last_signal: str = READER_DONE
+    per_frame: list[np.ndarray], last_signal: str = READER_DONE
 ) -> tuple[list, queue.Queue, _ScriptedDetector]:
     """跑一次單路的推理主迴圈。
 
@@ -189,9 +174,9 @@ def test_payload_carries_every_detected_class_including_heads():
         payloads, [_FRAME_0_DETECTIONS, _FRAME_1_DETECTIONS], strict=True
     ):
         _stream_id, box_data, _frame_index, _timestamp = payload
-        np.testing.assert_allclose(box_data, source.data.numpy())
+        np.testing.assert_allclose(box_data, source)
         assert sorted(int(c) for c in box_data[:, -1]) == sorted(
-            int(c) for c in source.cls.tolist()
+            int(c) for c in source[:, -1]
         )
 
 
@@ -244,21 +229,29 @@ def test_track_failed_is_sent_when_the_loop_aborts():
     assert TRACK_DONE not in dispatched
 
 
-def test_slots_are_returned_after_inference_and_before_dispatch():
-    """歸還晚於推論、且整批推論完就歸還——免複製消費唯一會出錯的地方。
+def test_slots_are_returned_after_preprocess_and_before_inference():
+    """歸還晚於前處理、早於 forward——歸還點前移之後，免複製消費唯一會出錯的地方。
 
-    每次 predict 當下已歸還的 slot 數，必須恰好等於**先前各批**的格數總和：多一格
-    就代表本批的 slot 在推論中被放行，reader 可以覆寫正在推論的畫面。餵超過一批的
-    量，讓跨批的歸還順序也被涵蓋（只驗單批的話，第二批之後歸還早一步也看不出來）。
-    末尾再驗全數歸還——漏還的話 reader 會卡在 `free_queue.get()`，整條 pipeline 停住。
+    `preprocess` 當下已歸還的 slot 數必須恰好等於**先前各批**的格數總和（本批一格都
+    還沒還：`np.stack` 還在讀共享記憶體，早還會讓 reader 邊寫邊被讀）；`infer` 當下則
+    必須已經含本批（像素在 `preprocess` 回來時就複製走了，晚還只是讓 reader 多空等
+    一整段 forward）。餵超過一批的量，讓跨批的順序也被涵蓋（只驗單批的話，第二批之後
+    歸還早一步也看不出來）。末尾再驗全數歸還——漏還的話 reader 會卡在
+    `free_queue.get()`，整條 pipeline 停住。
+
+    改動前這支驗的是「歸還晚於 `predict`」並另外斷言 `result.orig_img is None`；
+    `Results` 不在正式路徑上之後，推論輸出不再攜帶任何影格參照，那條斷言失去對象
+    （ADR-010 Decision 4 的修訂）。
     """
     num_frames = TARGET_BATCH + 4  # > 一批，確保跑到第二批
     _dispatched, free_queue, detector = _run_loop([_FRAME_0_DETECTIONS] * num_frames)
 
-    assert len(detector.predict_log) >= 2, "沒跑到第二批，跨批歸還沒被涵蓋"
-    returned_before = [entry[0] for entry in detector.predict_log]
-    batch_sizes = [entry[1] for entry in detector.predict_log]
-    assert returned_before == list(accumulate([0, *batch_sizes[:-1]]))
+    assert len(detector.preprocess_log) >= 2, "沒跑到第二批，跨批歸還沒被涵蓋"
+    batch_sizes = [entry[1] for entry in detector.preprocess_log]
+    assert [entry[0] for entry in detector.preprocess_log] == list(
+        accumulate([0, *batch_sizes[:-1]])
+    )
+    assert [entry[0] for entry in detector.infer_log] == list(accumulate(batch_sizes))
 
     returned = []
     while not free_queue.empty():
@@ -266,8 +259,6 @@ def test_slots_are_returned_after_inference_and_before_dispatch():
 
     # `_run_loop` 每格用一個 slot（slot 索引即 frame_index）
     assert sorted(returned) == list(range(num_frames))
-    # 歸還前先切斷對共享記憶體的參照：`orig_img` 是該 slot 的活別名（ADR-010）
-    assert all(result.orig_img is None for result in detector.returned_results)
 
 
 def test_a_batch_larger_than_the_engine_ceiling_aborts_with_track_failed():
