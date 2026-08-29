@@ -138,9 +138,9 @@ _TRACK_WORKER_MESSAGE = "追蹤進程結束"
 class TrackWorkerReading:
     """追蹤進程**一片**結束時印的那行（`shards` 有幾片就有幾行）。
 
-    `shard_id` 是那片的編號，分片之前（issue #143 以前）的舊產物沒有這個欄位，為
-    `None`；`tracking_fps`／`frames`／`cameras` 同理，缺欄位就是 `None` 或空 tuple，
-    不猜也不補。
+    `shard_id` 是那片的編號，分片（issue #141）之前的舊產物沒有這個欄位，為 `None`；
+    `cameras` 是 issue #143 才加印的，更早的產物即使有 `shard_id` 也拿不到。
+    `tracking_fps`／`frames` 同理，缺欄位就是 `None` 或空 tuple，不猜也不補。
     """
 
     shard_id: int | None
@@ -182,7 +182,11 @@ class FpsReading:
 
     @property
     def shard_count(self) -> int:
-        """log 裡有幾行追蹤結束，即實際跑了幾片。"""
+        """印出結束行的片數。
+
+        崩在半路的片走不到那行，這個數字因此可能少於 `[tracker].shards`。不在這裡擋：
+        少一片時該輪的 `exit_status` 必然非 0，報表上已經有訊號。
+        """
         return len(self.track_workers)
 
     @property
@@ -280,7 +284,12 @@ def _format_track_summary(reading: FpsReading) -> str:
     """把逐片追蹤讀數縮成摘要列的一段：最慢那片的吞吐、片數與最小餘裕。
 
     取最小不取平均：整條 pipeline 的瓶頸是最慢的那片，平均會把它蓋掉，而平均值看起來
-    完全合理。片數一起印，是因為「只有一片」與「多片中最慢的一片」是不同的數字。
+    完全合理。片數一起印，是因為「只有一片」與「多片中最慢的一片」是不同的數字；最慢那片
+    負責的攝影機也印出來——分片分組是執行當下依路數與 `shards` 算出來的，不印就得回頭翻
+    log 才知道是哪幾路擠在一起。
+
+    分片之前的舊 log 沒有 `shard_id`（連帶沒有 `owned_cameras`）、更舊的沒有
+    `tracking_fps`，缺哪個就少印哪一段，不以 `None` 硬套格式。
     """
     if not reading.track_workers:
         return "追蹤（最小）－"
@@ -290,7 +299,14 @@ def _format_track_summary(reading: FpsReading) -> str:
         parts.append(f"最慢 shard {slowest.shard_id}")
     headroom = reading.min_track_worker_headroom
     parts.append(f"最小餘裕 {headroom:.2f}×" if headroom is not None else "餘裕缺值")
-    return f"追蹤（最小）{slowest.overall_fps:.2f} 張/秒（{'、'.join(parts)}）"
+    # 攝影機清單擺在最後、與前面的段落用分號隔開：它本身也用頓號分隔，混在同一串裡
+    # 會讀不出哪裡是一段的邊界
+    cameras = (
+        f"；shard {slowest.shard_id}＝{'、'.join(slowest.cameras)}"
+        if slowest.shard_id is not None and slowest.cameras
+        else ""
+    )
+    return f"追蹤（最小）{slowest.overall_fps:.2f} 張/秒（{'、'.join(parts)}{cameras}）"
 
 # --------------------------------------------------------------------------------------
 # 產物解析

@@ -6,6 +6,7 @@
 能 import `bench_e2e` 是靠 `conftest.py` 把 `tools/` 插進 `sys.path`（見該檔）。
 """
 
+import argparse
 import datetime
 import json
 
@@ -19,6 +20,7 @@ from bench_e2e import (
     TrackWorkerReading,
     _count_segments,
     _engine_path,
+    _format_track_summary,
     _host_cpu,
     _model_classes,
     artifact_paths,
@@ -27,6 +29,7 @@ from bench_e2e import (
     check_name_component,
     check_runs_dir_disjoint,
     clear_artifacts,
+    command_report,
     expand_matrix,
     extra_settings_env,
     format_meta,
@@ -224,6 +227,65 @@ def test_parse_fps_log_skips_non_json_lines():
     )
 
     assert parse_fps_log(noisy).inference_fps == 506.46
+
+
+def test_format_track_summary_names_the_slowest_shard_and_its_cameras():
+    """`run` 的摘要列要指出是哪一片最慢、那片扛著哪幾路。
+
+    分片分組是執行當下依路數與 `shards` 算出來的，摘要列不印就得回頭翻 log。
+    """
+    slow = _track_worker_line(
+        1, overall_fps=500.0, tracking_fps=800.0, cameras=("cam02", "cam03")
+    )
+    log = f"{_track_worker_line(0, overall_fps=520.0, tracking_fps=1040.0)}\n{slow}\n"
+
+    summary = _format_track_summary(parse_fps_log(log))
+
+    assert "500.00 張/秒" in summary
+    assert "2 片" in summary
+    assert "最慢 shard 1" in summary
+    assert "最小餘裕 1.60×" in summary
+    assert summary.endswith("；shard 1＝cam02、cam03）")
+
+
+def test_format_track_summary_without_any_track_line():
+    """推論崩在追蹤結束之前，log 一行追蹤結束都沒有。
+
+    這條壞掉的樣子是摘要列對著空 tuple 取 `min()` 而拋 `ValueError`——那一輪本來只是
+    沒跑完，卻讓整個矩陣停在印摘要這一步。
+    """
+    summary = _format_track_summary(parse_fps_log(f"{_INFERENCE_LINE}\n"))
+
+    assert summary == "追蹤（最小）－"
+
+
+def test_format_track_summary_omits_shard_label_for_pre_sharding_logs():
+    """分片之前的舊 log 沒有 `shard_id`，摘要列就不提片編號，也不印攝影機。
+
+    照樣格式化的話會印出「最慢 shard None」；那是把缺值印成一個看起來像編號的東西。
+    """
+    summary = _format_track_summary(parse_fps_log(f"{_track_worker_line(None)}\n"))
+
+    assert summary.startswith("追蹤（最小）514.34 張/秒")
+    assert "shard" not in summary
+    assert "cam" not in summary
+
+
+def test_format_track_summary_marks_missing_headroom():
+    """任一片缺 `tracking_fps` 時餘裕是 `None`，摘要列要說「缺值」而不是套 `:.2f`。
+
+    對 `None` 套格式會 `TypeError`，而這只在跑完一輪印摘要時才會踩到——地端實跑走的是
+    有 `tracking_fps` 的路徑，測不到就等著在別人的舊產物上炸。
+    """
+    log = (
+        f"{_track_worker_line(0, overall_fps=520.0, tracking_fps=1040.0)}\n"
+        f"{_track_worker_line(1, overall_fps=500.0, tracking_fps=None)}\n"
+    )
+
+    summary = _format_track_summary(parse_fps_log(log))
+
+    assert "500.00 張/秒" in summary
+    assert "餘裕缺值" in summary
 
 
 def test_group_runs_averages_inference_values_only():
@@ -517,6 +579,53 @@ def test_load_run_records_isolates_a_broken_artifact(tmp_path):
     assert [record.name for record in records] == ["good"]
     assert len(broken) == 1
     assert broken[0].startswith("bad：")
+
+
+def _write_run(runs_dir, name: str, log_body: str) -> None:
+    """一輪產物：meta 只填 `report` 表格會用到的欄位。"""
+    (runs_dir / f"{name}.meta").write_text(
+        "bucket=bucket_20260801_perf40\nmodel_batch=16\n"
+        "foot_point_method=head\nexit_status=0\n",
+        encoding="utf-8",
+    )
+    (runs_dir / f"{name}.log").write_text(log_body, encoding="utf-8")
+
+
+def test_command_report_prints_dashes_for_missing_track_fields(tmp_path, capsys):
+    """追蹤側三欄缺值時印 `-`，不對 `None` 套 `:.2f`。
+
+    這三欄各有一種缺法：舊產物沒有 `tracking_fps`（算不出餘裕）、崩在追蹤結束之前的輪次
+    連一行追蹤結束都沒有。格式化寫錯不會在解析階段有訊號，要到 `report` 印表才炸，而那
+    時整份報表一列都印不出來——包含跑得好好的那幾輪。
+    """
+    _write_run(
+        tmp_path,
+        "a_sharded",
+        f"{_INFERENCE_LINE}\n"
+        f"{_track_worker_line(0, overall_fps=520.0, tracking_fps=1040.0)}\n"
+        f"{_track_worker_line(1, overall_fps=500.0, tracking_fps=800.0)}\n",
+    )
+    _write_run(
+        tmp_path,
+        "b_no_tracking_fps",
+        f"{_INFERENCE_LINE}\n{_track_worker_line(0, tracking_fps=None)}\n",
+    )
+    _write_run(tmp_path, "c_no_track_line", f"{_INFERENCE_LINE}\n")
+
+    exit_code = command_report(
+        argparse.Namespace(runs_dir=tmp_path, exclude_prefixes="smoke")
+    )
+
+    assert exit_code == 0
+    rows = {
+        line.split()[0]: line.split()
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith(("a_", "b_", "c_"))
+    }
+    # 欄序：run bucket b foot infer_fps trk_min shd hdrm …
+    assert rows["a_sharded"][4:8] == ["506.46", "500.00", "2", "1.60"]
+    assert rows["b_no_tracking_fps"][4:8] == ["506.46", "514.34", "1", "-"]
+    assert rows["c_no_track_line"][4:8] == ["506.46", "-", "-", "-"]
 
 
 @pytest.mark.parametrize(
