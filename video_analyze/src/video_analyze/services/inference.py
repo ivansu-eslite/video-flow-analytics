@@ -11,6 +11,8 @@ from video_analyze.services.frame_ring import FrameRing
 from video_analyze.services.track_worker import (
     TRACK_DONE,
     TRACK_FAILED,
+    TRACK_SIGNAL_PUT_TIMEOUT,
+    fanout_track_signal,
     to_payload,
 )
 from video_analyze.services.video_reader import (
@@ -27,33 +29,53 @@ _FILL_POLL = 0.0005
 
 
 class InferencePipeline:
-    """推理進程主迴圈：非阻塞湊批 → YOLO 偵測 → 把偵測框送往追蹤進程。
+    """推理進程主迴圈：非阻塞湊批 → YOLO 偵測 → 把偵測框送往它歸屬的追蹤進程。
 
     追蹤、落腳點推算、座標反算與 parquet 落盤都不在這裡——它們搬到獨立進程了
     （見 `services/track_worker.py`），本類只負責「湊批 → 推論 → 把框丟出去」。
+    追蹤進程有 N 個、各自負責一組固定的攝影機，所以「丟出去」多了一步查表。
     """
 
     def __init__(
         self,
         stream_names: list[str],
         detector: YOLODetector,
-        track_queue: mp.Queue,
+        track_queues: list[mp.Queue],
+        route: list[int],
     ):
-        """組裝推理迴圈所需的各個子系統（偵測、湊批、送往追蹤進程）。
+        """組裝推理迴圈所需的各個子系統（偵測、湊批、送往各片追蹤進程）。
 
         Args:
             stream_names: 各路攝影機的 `stream_dirname`，索引即 stream_id。
             detector: 已載入模型的 YOLO 偵測器（跨批次重用）。
-            track_queue: 送往追蹤進程的佇列，元素格式見 `track_worker.to_payload`。
+            track_queues: 各片追蹤進程的佇列，索引即片編號；元素格式見
+                `track_worker.to_payload`。
+            route: 各路歸屬的片編號，索引即 stream_id（`output_parts.plan_routes`
+                在主進程算好後傳進來，整天不變）。
+
+        Raises:
+            ValueError: `route` 的長度與路數不符，或指到不存在的片——兩者都會在跑起來
+                之後才以 `IndexError` 炸在每格都會走到的路徑上。
         """
         self.stream_names = stream_names
         self.num_streams = len(stream_names)
+        if len(route) != self.num_streams:
+            raise ValueError(
+                f"route 有 {len(route)} 筆，與路數 {self.num_streams} 不符。"
+            )
+        out_of_range = [k for k in route if not 0 <= k < len(track_queues)]
+        if out_of_range:
+            raise ValueError(
+                f"route 指到不存在的片 {sorted(set(out_of_range))}，"
+                f"目前只有 {len(track_queues)} 片。"
+            )
         self.finished_streams = set()
         # 記住上一次湊批的起點，下一批從下一路開始繞一圈，避免固定從 0 起跑讓單一路
         # 供得上時就一路取到滿批、其餘路永遠輪不到（issue #100）
         self._next_stream_start = 0
         self.detector = detector
-        self.track_queue = track_queue
+        self.track_queues = track_queues
+        self.route = route
         self.fps_meter = FpsMeter()
         self._target_batch = TARGET_BATCH
 
@@ -226,7 +248,11 @@ class InferencePipeline:
                     # 追蹤、落腳點推算、座標反算與寫 parquet 都在追蹤進程做（實測追蹤
                     # 每格 1.81 ms、佔本進程 8.4%，而它與下一批的 GPU 推論之間沒有資料
                     # 相依）。這裡只把該格的全部偵測框丟出去，含 head——拆分也在那邊做。
-                    self.track_queue.put(
+                    # 依路由送給該路歸屬的那一片。送錯片不會有任何直接症狀——那片
+                    # 也有全部路的 tracker，會照樣追蹤、照樣寫進自己的 part，只是該路
+                    # 的軌跡被切成兩段而 track_id 分裂；唯一的訊號是追蹤進程入口的
+                    # 歸屬檢查（見 `track_worker.run_track_worker`）
+                    self.track_queues[self.route[stream_id]].put(
                         to_payload(
                             stream_id,
                             results[idx].boxes,
@@ -240,14 +266,19 @@ class InferencePipeline:
                     self.fps_meter.record(self.stream_names[stream_id])
             self._log_fps_summary(time.perf_counter() - start)
             # 落盤改由追蹤進程負責（parquet 的內容都在那邊產生）。這個訊號是它唯一的
-            # 正常結束途徑，不送的話那邊會一直等在 queue 上
-            self.track_queue.put(TRACK_DONE)
+            # 正常結束途徑，不送的話那邊會一直等在 queue 上——**每一片都要送到**，漏掉
+            # 哪一片就會缺一支 part 檔而讓主進程的合併 fail loud
+            fanout_track_signal(self.track_queues, TRACK_DONE)
         except BaseException:
-            # 本進程已經沒有 collector 可以 discard 了，改用訊號請追蹤進程代為清理：
-            # 不送的話它會一直等在 queue.get() 上，直到被父進程 terminate 才收尾——那條
-            # 路徑也會清掉 `.tmp`（追蹤進程攔了 SIGTERM，見 `services/track_worker.py`），
-            # 但要多等父進程的偵測延遲，中間再被 SIGKILL 就得留到下一次執行才清
-            self.track_queue.put(TRACK_FAILED)
+            # 本進程已經沒有 collector 可以 discard 了，改用訊號請各片代為清理：
+            # 不送的話它們會一直等在 queue.get() 上，直到被父進程 terminate 才收尾——
+            # 那條路徑也會清掉 `.tmp`（追蹤進程攔了 SIGTERM，見
+            # `services/track_worker.py`），但要多等父進程的偵測延遲，中間再被 SIGKILL
+            # 就得留到下一次執行才清。這裡帶 timeout：已經死掉的那片若 queue 是滿的，
+            # 阻塞的 put 會讓**後面的片一個都收不到**
+            fanout_track_signal(
+                self.track_queues, TRACK_FAILED, timeout=TRACK_SIGNAL_PUT_TIMEOUT
+            )
             raise
 
     def _log_fps_summary(self, elapsed_seconds: float) -> None:

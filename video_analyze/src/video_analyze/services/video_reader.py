@@ -150,6 +150,61 @@ def probe_frame_shape(segment: SegmentInfo) -> FrameShape:
         container.close()
 
 
+def _stream_fps(stream, path: Path) -> float:
+    """讀出視訊串流的 fps，讀不到就帶檔名 fail loud。
+
+    `average_rate` 是容器標的 `avg_frame_rate`，某些檔案為 0／None；cv2 的
+    `CAP_PROP_FPS` 這時會退回 `r_frame_rate`，`guessed_rate` 是同一個值，不接的話
+    這路整天會以「無法讀取影片 FPS」中止。
+
+    回傳 `float` 而非 `Fraction`：兩個消費端都吃不了 `Fraction`——`_read_segment` 拿它
+    算 `timedelta`（會拋 `TypeError`），路由拿它當權重。
+
+    `_read_segment` 與 `probe_stream_fps` 共用這一份：兩邊各寫一次的話，「fps 讀不到
+    要怎麼辦」會分兩處漂移，而其中一處放寬（例如預設 30）會讓時間戳靜默算錯。
+
+    Raises:
+        ValueError: fps 缺值或非正數。
+    """
+    fps = stream.average_rate or stream.guessed_rate
+    if not fps or fps <= 0:
+        raise ValueError(f"無法讀取影片 FPS: {path}")
+    return float(fps)
+
+
+def probe_stream_fps(segment: SegmentInfo) -> float:
+    """讀出片段標的 fps，**不解碼任何影格**（每次數十毫秒）。
+
+    主進程用它算追蹤進程的路由權重（`services/output_parts.py` 的 `plan_routes`）：
+    registry 沒有 fps 欄位，而各路的工作量與 fps 成正比。假設單一攝影機整天 fps 固定，
+    故只探測第一支片段。
+
+    **刻意不與 `probe_frame_shape` 合併**：後者回傳的 `FrameShape` 被 reader、
+    collector、letterbox 三處消費，為了多帶一個 fps 去改它的形狀不划算。
+
+    這裡不掛 `hwaccel`：只讀容器標頭，沒有影格要解。
+
+    Args:
+        segment: 要探測的片段（通常是當天第一支片段）。
+
+    Returns:
+        該路的 fps。
+
+    Raises:
+        ValueError: 片段無法開啟、不含視訊串流，或讀不到 fps。
+    """
+    try:
+        container = av.open(str(segment.path))
+    except av.FFmpegError as exc:
+        raise ValueError(f"無法開啟影片片段: {segment.path}") from exc
+    try:
+        if not container.streams.video:
+            raise ValueError(f"片段不含視訊串流: {segment.path}")
+        return _stream_fps(container.streams.video[0], segment.path)
+    finally:
+        container.close()
+
+
 def discover_segments(
     bucket_dir: Path, stream_dirname: str, day: date, file_ext: str
 ) -> list[SegmentInfo]:
@@ -244,16 +299,7 @@ class DailyStreamVideoReader:
                 # 同 `probe_frame_shape`：沒有視訊串流時要帶檔名擋下，不要讓
                 # `streams.video[0]` 拋出不帶檔名的 `IndexError`。
                 raise ValueError(f"片段不含視訊串流: {segment.path}")
-            stream = container.streams.video[0]
-            # `average_rate` 是容器標的 `avg_frame_rate`，某些檔案為 0／None；cv2 的
-            # `CAP_PROP_FPS` 這時會退回 `r_frame_rate`，`guessed_rate` 是同一個值，
-            # 不接的話這路整天會以「無法讀取影片 FPS」中止。
-            fps = stream.average_rate or stream.guessed_rate
-            if not fps or fps <= 0:
-                raise ValueError(f"無法讀取影片 FPS: {segment.path}")
-            # `average_rate`／`guessed_rate` 是 `Fraction`，而下游用它算 `timedelta`
-            # （`Fraction` 會讓 `timedelta(seconds=...)` 拋 `TypeError`）。
-            fps = float(fps)
+            fps = _stream_fps(container.streams.video[0], segment.path)
             frame_index = 0
             for av_frame in container.decode(video=0):
                 # 「整天解析度固定」的 fail-loud 檢查要在這裡做：縮放前移之前，這件事

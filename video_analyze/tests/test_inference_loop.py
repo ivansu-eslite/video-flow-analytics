@@ -4,7 +4,7 @@
 因此本檔的斷言對象是**送進 `track_queue` 的 payload**，而不再是寫出的 parquet。
 軌跡與落腳點那一側的接線由 test_track_worker.py 釘住。
 
-三件事都是「主迴圈接錯線，但被接的函式自己的測試全綠、parquet 也完全正常」：
+四件事都是「主迴圈接錯線，但被接的函式自己的測試全綠、parquet 也完全正常」：
 
 1. **payload 帶的是該格的全部偵測框（含 head）**，拆分留給追蹤進程。這裡只送 fbody
    的話，落腳點推算永遠配不到頭、每列靜默退回框底邊中點（ADR-009 的偏移就這樣回來）。
@@ -12,6 +12,9 @@
    錯開後每一列的時間戳都配到別格，而列數與 `track_id` 全部正常。
 3. **歸還 slot 晚於推論、且早於送 payload**。影格是共享記憶體的 view，任何早於推論
    完成的歸還都會讓 reader 覆寫正在推論的畫面（ADR-010）。
+4. **payload 進到路由指定的那一片、結束與失敗訊號送到每一片**。送錯片沒有任何直接
+   症狀（那片也有全部路的 tracker），唯一的訊號在追蹤進程入口；訊號漏送則會讓那一片
+   一直等在 `get()` 上、缺一支 part 檔。
 
 因此本檔的偵測資料一律以**推論尺度**（640×384）表示——那就是縮放前移之後 YOLO 實際
 輸出的座標系，也是 payload 內座標的尺度（反算在追蹤進程做）。
@@ -31,7 +34,11 @@ import torch
 from ultralytics.engine.results import Boxes, Results
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
-from video_analyze.services.batching import RING_SLOTS, TARGET_BATCH
+from video_analyze.services.batching import (
+    RING_SLOTS,
+    TARGET_BATCH,
+    TRACK_QUEUE_SLOTS,
+)
 from video_analyze.services.inference import InferencePipeline
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
 from video_analyze.services.track_worker import TRACK_DONE, TRACK_FAILED
@@ -138,7 +145,8 @@ def _run_loop(
     pipeline = InferencePipeline(
         stream_names=["loc_cam001"],
         detector=detector,
-        track_queue=track_queue,
+        track_queues=[track_queue],
+        route=[0],
     )
 
     data_queue: queue.Queue = queue.Queue()
@@ -280,10 +288,131 @@ def test_a_batch_larger_than_the_engine_ceiling_aborts_with_track_failed():
     pipeline = InferencePipeline(
         stream_names=["loc_cam001"],
         detector=detector,
-        track_queue=track_queue,
+        track_queues=[track_queue],
+        route=[0],
     )
 
     with pytest.raises(ValueError, match="最大批次"):
         pipeline.start_loop([queue.Queue()], [free_queue], [_FrameRingStub()])
 
     assert track_queue.get_nowait() == TRACK_FAILED
+
+
+def _run_two_stream_loop(
+    route: list[int], num_shards: int, last_signal: str = READER_DONE
+) -> list[queue.Queue]:
+    """兩路各送一格，跑完回傳各片 queue 收到的東西。
+
+    偵測內容與這幾支無關（要驗的是「哪一格進了哪一條 queue」），故兩格都給同一份。
+    """
+    free_queue: queue.Queue = queue.Queue()
+    detector = _ScriptedDetector([_FRAME_0_DETECTIONS] * 2, free_queue)
+    track_queues: list[queue.Queue] = [
+        queue.Queue(maxsize=TRACK_QUEUE_SLOTS) for _ in range(num_shards)
+    ]
+    pipeline = InferencePipeline(
+        stream_names=["loc_cam001", "loc_cam002"],
+        detector=detector,
+        track_queues=track_queues,
+        route=route,
+    )
+    data_queues: list[queue.Queue] = [queue.Queue(), queue.Queue()]
+    for stream_id, data_queue in enumerate(data_queues):
+        data_queue.put((stream_id, 0, _BASE))
+        data_queue.put(last_signal)
+
+    rings = [_FrameRingStub(), _FrameRingStub()]
+    if last_signal == READER_FAILED:
+        with pytest.raises(RuntimeError):
+            pipeline.start_loop(data_queues, [free_queue, free_queue], rings)
+    else:
+        pipeline.start_loop(data_queues, [free_queue, free_queue], rings)
+    return track_queues
+
+
+def _drain(track_queue: queue.Queue) -> list:
+    items = []
+    while not track_queue.empty():
+        items.append(track_queue.get_nowait())
+    return items
+
+
+def test_each_payload_goes_to_the_shard_that_owns_its_stream():
+    """payload 只進它歸屬的那一條 queue。
+
+    送錯片不會有任何直接症狀：那片也有全部路的 tracker，會照樣追蹤、照樣寫進自己的
+    part，只是該路的軌跡被切成兩段而 `track_id` 分裂，合併後的檔案完全正常。唯一的
+    訊號在追蹤進程入口的歸屬檢查，而那要等到跑起來才會炸。
+    """
+    shard0, shard1 = _run_two_stream_loop(route=[1, 0], num_shards=2)
+
+    assert [item[0] for item in _drain(shard0) if item != TRACK_DONE] == [1]
+    assert [item[0] for item in _drain(shard1) if item != TRACK_DONE] == [0]
+
+
+def test_track_done_reaches_every_shard():
+    """結束訊號要送到每一片：漏掉哪一片，那一片不會 `save()`，合併就缺一支 part。"""
+    track_queues = _run_two_stream_loop(route=[0, 1], num_shards=2)
+
+    assert [_drain(q)[-1] for q in track_queues] == [TRACK_DONE, TRACK_DONE]
+
+
+def test_track_failed_reaches_every_shard():
+    """失敗訊號同理：漏掉的那片會一直等在 `get()` 上，直到父進程 terminate。"""
+    track_queues = _run_two_stream_loop(
+        route=[0, 1], num_shards=2, last_signal=READER_FAILED
+    )
+
+    assert [_drain(q)[-1] for q in track_queues] == [TRACK_FAILED, TRACK_FAILED]
+
+
+def test_track_failed_still_reaches_the_later_shards_when_one_queue_is_full():
+    """前一片死了、它的 queue 又滿了的時候，後面的片仍要收得到 `TRACK_FAILED`。
+
+    fan-out 是序列的 `put`：不帶 timeout 的話會永久阻塞在那條滿的 queue 上，**後面的
+    片一個都收不到**，只能等父進程的 SIGTERM——那條路徑清得掉 part 檔，但會把「上游
+    崩潰」與「被 terminate」混成同一種結束方式，正是這個 in-band 訊號要分開的東西。
+    """
+    free_queue: queue.Queue = queue.Queue()
+    detector = _ScriptedDetector([], free_queue)
+    dead_shard: queue.Queue = queue.Queue(maxsize=1)
+    dead_shard.put("塞住這條 queue 的舊 payload")  # 該片已經死了，沒有人在消化
+    live_shard: queue.Queue = queue.Queue(maxsize=TRACK_QUEUE_SLOTS)
+    pipeline = InferencePipeline(
+        stream_names=["loc_cam001", "loc_cam002"],
+        detector=detector,
+        track_queues=[dead_shard, live_shard],
+        route=[0, 1],
+    )
+    data_queues: list[queue.Queue] = [queue.Queue(), queue.Queue()]
+    data_queues[0].put(READER_FAILED)
+    data_queues[1].put(READER_DONE)
+
+    with pytest.raises(RuntimeError):
+        pipeline.start_loop(
+            data_queues, [free_queue, free_queue], [_FrameRingStub(), _FrameRingStub()]
+        )
+
+    assert _drain(live_shard) == [TRACK_FAILED]
+
+
+def test_a_route_that_does_not_cover_every_stream_is_rejected():
+    """路由長度與路數對不上要在組裝時擋下，不能等跑起來才 `IndexError`。"""
+    with pytest.raises(ValueError, match="與路數"):
+        InferencePipeline(
+            stream_names=["loc_cam001", "loc_cam002"],
+            detector=None,
+            track_queues=[queue.Queue()],
+            route=[0],
+        )
+
+
+def test_a_route_pointing_at_a_missing_shard_is_rejected():
+    """指到不存在的片同理——那會在每格都走到的路徑上炸。"""
+    with pytest.raises(ValueError, match="不存在的片"):
+        InferencePipeline(
+            stream_names=["loc_cam001"],
+            detector=None,
+            track_queues=[queue.Queue()],
+            route=[1],
+        )

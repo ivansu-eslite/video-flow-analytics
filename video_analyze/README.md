@@ -305,6 +305,11 @@ bucket 呼叫。
 | 路徑 | 內容 |
 | --- | --- |
 | `outputs/{bucket_name}/{date}/tracking_results.parquet` | 追蹤明細 |
+| `outputs/{bucket_name}/{date}/tracking_results.parts/` | **只在跑到一半時存在**：各追蹤進程的 part 檔（`shard<k>.parquet`）與那一天的鎖檔（`.lock`）。跑完由主進程合併成上一列那個檔並整個刪掉；中途崩掉留下的由下一次執行認領時清掉 |
+
+`tracking_results.parquet` 的**列順序是「逐片相接、片內才交錯」**，改
+`[tracker].shards` 就會變。下游 zone／line 都走 `group_by` 向量化、不依賴列順序；比對
+兩份輸出也一律先用 `(camera_id, timestamp)` 對齊同一格再逐值比。
 
 `tracking_results.parquet` 的欄位：
 
@@ -313,7 +318,7 @@ bucket 呼叫。
 | `camera_id` | str | 該影格所屬攝影機的 `<location>_<camera_id>` |
 | `frame_id` | int | **片段內**幀序，跨片段會重複（非全日流水號） |
 | `timestamp` | datetime（`Asia/Taipei`） | 該片段檔名時間 ＋ 片段內幀序 / fps |
-| `track_id` | int | ByteTrack 指派的追蹤編號，跨片段延續 |
+| `track_id` | int | ByteTrack 指派的追蹤編號，跨片段延續。**唯一性只到「同一路之內」**：分片後各追蹤進程各自持有 ByteTrack 的計數器，同一個 id 值會出現在分屬不同片的兩台攝影機（小 bucket 實測 N=1 時 0 個、N=2 時 2442 個 id 跨路重號）。下游 zone／line 都先 `filter(camera_id == ...)` 再 `.over("track_id")`，不受影響；新的消費端要一起帶 `camera_id` |
 | `x1` / `y1` / `x2` / `y2` | float | 追蹤框的像素座標 |
 | `foot_x` / `foot_y` | float | 落腳點（人站在地面的位置）的像素座標；由 head 框推算，配不到頭時沿用該軌跡上次的偏移量，連偏移量都沒有才退回 `((x1+x2)/2, y2)` |
 | `frame_width` / `frame_height` | int | 該路的影像尺寸（`probe_frame_shape` 探測首格所得，整天固定）；逐列重複同一個值 |
@@ -346,16 +351,17 @@ tracker，同一個人會多出一條頭部軌跡），因此只能在本套件�
 | --- | --- |
 | `main.py` | 薄 CLI 外殼：進入點 `main`，讀 `settings` 組參數後呼叫 `analyze_daily` |
 | `models/config.py` | Pydantic-settings 設定模型（`config.toml`＋環境變數）與全域 `settings` 單例 |
-| `config/constants.py` | 非 Pydantic 靜態常數（`OUTPUT_ROOT`、輸出檔名與 parquet schema、CrowdHuman 類別 id `HEAD_CLASS_ID`／`FBODY_CLASS_ID`） |
+| `config/constants.py` | 非 Pydantic 靜態常數（`OUTPUT_ROOT`、輸出檔名、parts 目錄與鎖檔名、parquet schema、CrowdHuman 類別 id `HEAD_CLASS_ID`／`FBODY_CLASS_ID`） |
 | `services/batching.py` | 單次推理批次 `TARGET_BATCH`，與由它推導的 `RING_SLOTS`／`TRACK_QUEUE_SLOTS` |
 | `services/pipeline.py` | `analyze_daily` 與多進程編排（讀取／推理／追蹤子進程生命週期） |
 | `services/inference.py` | 推理迴圈（湊批、偵測、把偵測框送往追蹤進程） |
-| `services/track_worker.py` | 追蹤進程：偵測框拆分、追蹤、落腳點推算、座標反算、落盤；`TRACK_DONE`／`TRACK_FAILED` 訊號 |
+| `services/track_worker.py` | 追蹤進程（N 個）：偵測框拆分、追蹤、落腳點推算、座標反算、寫自己那支 part；`TRACK_DONE`／`TRACK_FAILED` 訊號與 fan-out |
 | `services/detector.py` | TensorRT 引擎載入與偵測；載入前的四道檢查與執行期的形狀核對 |
 | `services/engine_metadata.py` | 引擎自帶 metadata 的注入格式、讀取與環境比對（建置端與載入端共用同一份） |
 | `services/foot_point.py` | `FootPointEstimator`：head 框配對與落腳點推算；自行維護跨幀狀態（每條軌跡上次成功推算的偏移量，共用 head 的那些不存） |
 | `services/tracker.py` | 多路追蹤，每路各自獨立的 `BYTETracker` 實例 |
 | `services/tracking_results.py` | 追蹤明細累積與 parquet 寫出 |
+| `services/output_parts.py` | `tracking_results.parts/` 的全部知識：認領（`parts/.lock`）、清殘骸、片檔命名、fps 加權路由、合併 |
 | `services/fps_meter.py` | 處理 FPS 統計 |
 | `services/frame_ring.py` | 共享記憶體環形緩衝 |
 | `services/letterbox.py` | 在 nv12 平面上縮放到推論尺寸與座標反算（正反兩半共用同一組參數） |
@@ -373,7 +379,9 @@ zone 與 line 幾何都不會被驗證。
 ### 多進程 pipeline
 
 `analyze_daily` 在主進程先 `discover_segments` 掃出當天片段、`probe_frame_shape` 讀首格
-解析度，再以多進程拆成 N 個讀取進程 ＋ 1 個推理進程 ＋ 1 個追蹤進程：
+解析度、`probe_stream_fps` 讀各路 fps（路由權重，只讀容器標頭不解碼），接著**認領這一天**
+（`output_parts.claim_parts_dir`，鎖是 `tracking_results.parts/.lock`），再以多進程拆成
+N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程：
 
 - **影格走共享記憶體、不走 pickle**（`frame_ring.py`）：每路一塊固定格數的環形緩衝
   （`mp.RawArray`），queue 只傳 slot 索引，避免每格影格逐格 pickle 的高成本。推理進程
@@ -404,6 +412,16 @@ zone 與 line 幾何都不會被驗證。
   **跨進程傳的是偵測框而不是影格**：每格幾十個框、幾 KB，而影格在推論完成後已無用途。
   空格（該格沒有任何偵測）照樣送 payload、照樣呼叫 `tracker.update`——`BYTETracker` 的
   `frame_id` 與軌跡老化都靠每格呼叫推進。
+- **追蹤進程有 N 個**（`[tracker].shards`，預設 2），各自負責一組固定的攝影機：各路的
+  tracker 與落腳點推算器狀態獨立、路與路之間不共享，所以追蹤天然可切。路由在啟動時依
+  各路 fps 加權貪婪分配（tie-break 用 stream_id，讓同組態的兩輪量測分到一樣的組合），
+  整天不變，並記一行 log。**stream_id 維持全域編號**（每片都收完整的 `stream_names`／
+  `frame_shapes`），送錯片的唯一訊號是各片入口的歸屬檢查——那片也有全部路的 tracker，
+  照樣追蹤、照樣寫進自己的 part，只是該路的軌跡被切成兩段而合併後的檔案完全正常。
+  切不開的是輸出（`pq.ParquetWriter` 是行程內的 handle），故每片寫自己的
+  `tracking_results.parts/shard<k>.parquet`，主進程在各片都收尾後合併成正式檔名再刪掉
+  整個 parts 目錄（見 [ADR-012](../docs/adr/video_analyze/012-track-worker-sharding.md)）。
+  **分片不改變任何一格的結果**，只改列順序。
 
 **縮放前移的代價**：ultralytics 只知道自己收到 640×384，`orig_shape` 也是那個尺寸，
 輸出的框就停在推論尺度上，反算因此變成本包的責任（`letterbox.py` 的
@@ -452,9 +470,13 @@ zone 與 line 幾何都不會被驗證。
   比例與反算用的 `letterbox_params` 分岔，每個座標靜默偏掉而輸出完全正常。
 - `analyze_daily` 以 0.5 秒輪詢所有子進程；任一非零結束 → 先終止所有子進程再拋
   `RuntimeError`；`KeyboardInterrupt` → 終止後以 exit code 130 收斂。
-- 追蹤明細 parquet 先寫 `.tmp`、收到 `TRACK_DONE` 才 `rename` 成正式檔名（`rename` 具
-  原子性）。推論進程中途例外時送 `TRACK_FAILED`，追蹤進程收到就刪除 `.tmp` 並以非零
-  exitcode 結束，正式檔名下不會出現不完整的 parquet。這條路徑**依賴 `track_queue` 的
+- 每片的 part 檔先寫 `.tmp`、收到 `TRACK_DONE` 才 `rename` 成 `shard<k>.parquet`
+  （`rename` 具原子性），主進程等各片都到齊才合併成正式檔名。推論進程中途例外時把
+  `TRACK_FAILED` **送到每一片**，各片收到就刪除自己的 `.tmp` 並以非零 exitcode 結束，
+  正式檔名下不會出現不完整的 parquet。fan-out 給 `TRACK_FAILED` 帶 1 秒上限、逾時記
+  warning 續下一片：它是序列的 `put`，前一片若已經死了、它的 queue 又是滿的，無 timeout
+  的 `put` 會永久阻塞而**後面的片一個都收不到**；`TRACK_DONE` 反過來不帶上限——走到那裡
+  各片都在正常消化，而這個訊號掉了就缺一支 part、合併會 fail loud。這條路徑**依賴 `track_queue` 的
   容量上限**（`services/batching.py` 的 `TRACK_QUEUE_SLOTS`）：訊號是排在同一條佇列尾端的 in-band
   訊號，backlog 無上限的話它會晚於父進程的 terminate 抵達而靜默失效。這是「backlog
   有界」的推論而非時序保證——上限隨 `MODEL__BATCH` 線性成長，父進程的偵測延遲不隨它
@@ -473,14 +495,23 @@ zone 與 line 幾何都不會被驗證。
   整天的暫存檔，落在 `save()` 的關檔與改名之間則會讓 `discard()` 刪掉一份**已經完整**的
   parquet。這是把窗口**縮到**「例外拋出到設定 `SIG_IGN` 之間」，不是關掉；用訊號就到這裡
   為止，再被 SIGKILL 就靠下面那條收。
-- **整機重啟／追蹤進程本身被 SIGKILL** 沒有任何 in-process 的機制擋得住，改由**下一次寫
-  同一條路徑的執行**在啟動時清掉（`tracking_results.claim_tmp_slot`）。判準是「還有沒有
-  進程持有這個暫存檔的 `flock`」而不是檔名或 mtime：拿得到鎖代表持有者已經不在，殘檔就地
-  `ftruncate` 清空（不 `unlink`，否則鎖會留在沒有檔名的 inode 上而守不住）；拿不到鎖代表
-  另一個執行正在寫同一條路徑，**當場 fail loud，一個 byte 都不動**。因此同一個 bucket 的
-  同一天不能有兩個執行並行（那本來就會兩邊交錯寫進同一個暫存檔），要並行請分開 bucket
-  或分開日期。收尾時刪檔與改名都認 inode 而不認路徑：暫存檔若已被換成別份，`discard()`
-  留著不動、`save()` 直接 fail loud（那時本次結果已隨原本的檔案一起遺失）。
+- **整機重啟／追蹤進程本身被 SIGKILL** 沒有任何 in-process 的機制擋得住，改由**下一次跑
+  同一天的執行**在啟動時清掉（`output_parts.claim_parts_dir`）。判準是「還有沒有進程持有
+  `tracking_results.parts/.lock` 的 `flock`」而不是檔名或 mtime：拿得到鎖代表持有者已經
+  不在，parts 目錄裡除了鎖檔以外的東西全部清掉；拿不到鎖代表另一個執行正在跑同一天，
+  **當場 fail loud，一個 byte 都不動**。因此同一個 bucket 的同一天不能有兩個執行並行，
+  要並行請分開 bucket 或分開日期。三個容易踩到的細節：
+  - **鎖由主進程持有**，子進程靠 `fork` 繼承同一個 open file description。主進程被
+    SIGKILL 之後孤兒子進程仍守著鎖，另一個執行照樣擋得下——改成 spawn 會靜默失去這道
+    保護。錯誤訊息叫人 `pgrep -af video_analyze` 找出來收掉再重跑。
+  - **清殘骸不刪 `.lock` 自己**。`rmtree` 會把它一起帶走，鎖就留在一個沒有檔名的 inode
+    上，另一個執行馬上能在新建的 inode 上取得鎖，兩邊都以為自己獨佔而輸出都完全正常。
+  - **改版前的 `tracking_results.parquet.tmp` 殘檔不再有人清**，認領時只記一行 warning
+    指出路徑：它可能仍被舊版的孤兒追蹤進程持有著 flock，而新版已經不看那把鎖。確認沒有
+    舊版進程還在跑之後手動刪即可；合併的暫存檔也因此改放在 parts 目錄裡，不寫那條路徑。
+
+  收尾時刪檔與改名都認 inode 而不認路徑：part 的暫存檔若已被換成別份，`discard()` 留著
+  不動、`save()` 直接 fail loud（那時本次結果已隨原本的檔案一起遺失）。
 
 ## 開發
 

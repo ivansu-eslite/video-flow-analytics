@@ -1,5 +1,6 @@
 import datetime
 import multiprocessing as mp
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from vfa_observability import StructuredLogger
 from vfa_registry import load_registry
 
 from video_analyze.config.constants import OUTPUT_ROOT, TRACKING_RESULTS_FILENAME
+from video_analyze.models.config import settings
 from video_analyze.services.batching import (
     RING_SLOTS,
     TARGET_BATCH,
@@ -16,12 +18,25 @@ from video_analyze.services.detector import YOLODetector
 from video_analyze.services.frame_ring import FrameRing, create_ring_buffers
 from video_analyze.services.inference import InferencePipeline
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
-from video_analyze.services.track_worker import TRACK_FAILED, run_track_worker
+from video_analyze.services.output_parts import (
+    claim_parts_dir,
+    merge_parts,
+    parts_dir_for,
+    plan_routes,
+    shard_part_path,
+)
+from video_analyze.services.track_worker import (
+    TRACK_FAILED,
+    TRACK_SIGNAL_PUT_TIMEOUT,
+    fanout_track_signal,
+    run_track_worker,
+)
 from video_analyze.services.video_reader import (
     FrameShape,
     SegmentInfo,
     discover_segments,
     probe_frame_shape,
+    probe_stream_fps,
     run_video_reader,
 )
 
@@ -51,7 +66,8 @@ def run_inference_pipeline(
     free_queues: list[mp.Queue],
     ring_buffers: list,
     stream_names: list[str],
-    track_queue: mp.Queue,
+    track_queues: list[mp.Queue],
+    route: list[int],
 ) -> None:
     """推理子進程的進入點：建構偵測器與環形緩衝後啟動推理主迴圈。
 
@@ -68,14 +84,16 @@ def run_inference_pipeline(
     永遠不會全部關閉，`get()` 收不到 EOF。改吃 TensorRT 引擎之後，「載入失敗」從罕見
     變成常見的一類（引擎檔不在、SM 對不上、TensorRT 版本與映像檔不一致），而它們全部
     發生在 `start_loop` 之前——那裡的 `except` 涵蓋不到。沒有這一段的話，追蹤進程會一直
-    等到父進程 `_terminate_all` 的 SIGTERM。
+    等到父進程 `_terminate_all` 的 SIGTERM。**要送到每一片**，與 `start_loop` 內的
+    `except` 共用同一支 fan-out helper。
 
     Args:
         data_queues: 各路讀取進程送出的資料佇列，索引為 stream_id。
         free_queues: 各路歸還環形緩衝 slot 用的佇列，索引為 stream_id。
         ring_buffers: 各路 `create_ring_buffers` 建立的共享記憶體。
         stream_names: 各路攝影機的 `stream_dirname`。
-        track_queue: 送往追蹤進程的佇列。
+        track_queues: 各片追蹤進程的佇列，索引即片編號。
+        route: 各路歸屬的片編號，索引為 stream_id。
     """
     try:
         detector = YOLODetector()
@@ -88,12 +106,15 @@ def run_inference_pipeline(
         pipeline = InferencePipeline(
             stream_names=stream_names,
             detector=detector,
-            track_queue=track_queue,
+            track_queues=track_queues,
+            route=route,
         )
     except BaseException:
         # 只包組裝這一段：`start_loop` 自己的 except 已經會送一次，包進來會在同一次
         # 失敗送出兩個訊號
-        track_queue.put(TRACK_FAILED)
+        fanout_track_signal(
+            track_queues, TRACK_FAILED, timeout=TRACK_SIGNAL_PUT_TIMEOUT
+        )
         raise
     pipeline.start_loop(data_queues, free_queues, rings)
 
@@ -119,8 +140,13 @@ def analyze_daily(
     """以「一天」為單位執行多路 YOLO 偵測 + ByteTrack 追蹤分析。
 
     以參數傳入 `bucket_dir`（而非讀全域 `settings`），讓本函式可重複以不同
-    bucket 呼叫。內部會拆成 N 個讀取子進程 + 1 個推理子進程 + 1 個追蹤子進程，
-    逐段掃描指定日期的影片、輸出追蹤明細 parquet。
+    bucket 呼叫。內部會拆成「一路一個讀取子進程 + 1 個推理子進程 + `[tracker].shards`
+    個追蹤子進程」，逐段掃描指定日期的影片、輸出追蹤明細 parquet。
+
+    **本進程（主進程）認領這一天並持鎖到合併完成**（`output_parts.claim_parts_dir`）：
+    各追蹤進程只寫自己的 part 檔，正式檔名由這裡合併產生，所以認領、跑、合併三段要被
+    同一把鎖蓋住，而只有主進程橫跨全程。子進程靠 `fork` 繼承那個 fd，主進程被 SIGKILL
+    之後鎖仍在孤兒子進程手上（見該模組 docstring）。
 
     Args:
         date: 要分析的日期。
@@ -151,6 +177,7 @@ def analyze_daily(
     stream_names: list[str] = []
     segments_per_stream: list[list[SegmentInfo]] = []
     frame_shapes: list[FrameShape] = []
+    stream_fps: list[float] = []
     for cam in cameras:
         segments = discover_segments(
             bucket_path, cam.stream_dirname, date, registry.storage.file_ext
@@ -162,6 +189,8 @@ def analyze_daily(
         # 探測首格取該路的原始解析度（假設整天固定）：供 parquet 的尺寸欄位與追蹤
         # 進程的座標反算用，**不是**用來配置環形緩衝（緩衝照推論尺寸配）
         frame_shapes.append(probe_frame_shape(segments[0]))
+        # 追蹤進程的路由權重（registry 沒有 fps 欄位）。只讀容器標頭、不解碼影格
+        stream_fps.append(probe_stream_fps(segments[0]))
 
     results_path = output_root / date.isoformat() / TRACKING_RESULTS_FILENAME
 
@@ -175,85 +204,130 @@ def analyze_daily(
         ring_slots=RING_SLOTS,
         track_queue_slots=TRACK_QUEUE_SLOTS,
     )
-    # 影格走共享記憶體環形緩衝，queue 只傳輕量索引，避免每格 6MB 走 pickle + pipe
-    data_queues = [mp.Queue() for _ in range(num_streams)]
-    free_queues = [mp.Queue() for _ in range(num_streams)]
-    # 讀取端已把影格縮成推論尺寸，緩衝只需存 640×384（4K 每格 23.73 MiB → 0.70 MiB）。
-    # frame_shapes 仍然要留著、且必須是原始解析度：它要寫進 parquet，也是追蹤進程
-    # 反算座標的依據（見 `services/letterbox.py`）。合計裝不進 /dev/shm 的組態由
-    # `create_ring_buffers` 在配置第一塊之前擋下（見 frame_ring.require_shm_capacity）
-    ring_buffers = create_ring_buffers(
-        len(frame_shapes), RING_SLOTS, INFER_HEIGHT, INFER_WIDTH
-    )
-    processes: list[mp.Process] = []
+    # 啟動時決定、整天不變。分片數改變不改變任何一格的結果，只影響列順序與吞吐
+    route = plan_routes(stream_fps, settings.tracker.shards)
+    num_shards = max(route) + 1
+    for shard_id in range(num_shards):
+        owned = [sid for sid in range(num_streams) if route[sid] == shard_id]
+        # 記下來才比得了兩輪量測：分配不同時餘裕本來就不同，而輸出檔看不出差別
+        logger.info(
+            "追蹤分片的路由",
+            shard_id=shard_id,
+            cameras=[stream_names[sid] for sid in owned],
+            fps_sum=round(sum(stream_fps[sid] for sid in owned), 2),
+        )
 
-    def _raise_if_abnormal(procs: list[mp.Process]) -> None:
-        abnormal = [p for p in procs if not p.is_alive() and p.exitcode]
-        if abnormal:
-            detail = ", ".join(f"pid={p.pid} exitcode={p.exitcode}" for p in abnormal)
-            raise RuntimeError(f"子進程異常結束（{detail}），分析已中止。")
-
-    # 追蹤進程與推論進程之間只走這一條 queue，傳的是偵測框（每格幾十個框、幾 KB）
-    # 而非影格——影格在推論完成後就沒有用途（slot 當下就歸還了，見 ADR-010）。
-    # **上限不可省**：影格側的背壓只覆蓋到推論為止，沒有這個上限，追蹤一落後 payload 就
-    # 無上限堆在推論進程，而 TRACK_FAILED 也會晚到父進程 terminate 之後（見
-    # `services/batching.py` 的 `TRACK_QUEUE_SLOTS`）
-    track_queue: mp.Queue = mp.Queue(maxsize=TRACK_QUEUE_SLOTS)
-
+    # 認領要在配置共享記憶體與起任何子進程**之前**：這一天已經有人在跑的話，此刻中止
+    # 什麼都還沒建立。fd 一路持到合併完成——子進程繼承的就是它
+    lock_fd = claim_parts_dir(results_path)
+    parts_dir = parts_dir_for(results_path)
+    part_paths = [shard_part_path(parts_dir, shard_id) for shard_id in range(num_shards)]
     try:
-        track_proc = mp.Process(
-            target=run_track_worker,
-            args=(track_queue, stream_names, frame_shapes, results_path),
+        # 影格走共享記憶體環形緩衝，queue 只傳輕量索引，避免每格 6MB 走 pickle + pipe
+        data_queues = [mp.Queue() for _ in range(num_streams)]
+        free_queues = [mp.Queue() for _ in range(num_streams)]
+        # 讀取端已把影格縮成推論尺寸，緩衝只需存 640×384（4K 每格 23.73 MiB → 0.70 MiB）。
+        # frame_shapes 仍然要留著、且必須是原始解析度：它要寫進 parquet，也是追蹤進程
+        # 反算座標的依據（見 `services/letterbox.py`）。合計裝不進 /dev/shm 的組態由
+        # `create_ring_buffers` 在配置第一塊之前擋下（見 frame_ring.require_shm_capacity）
+        ring_buffers = create_ring_buffers(
+            len(frame_shapes), RING_SLOTS, INFER_HEIGHT, INFER_WIDTH
         )
-        track_proc.start()
-        processes.append(track_proc)
+        processes: list[mp.Process] = []
 
-        infer_proc = mp.Process(
-            target=run_inference_pipeline,
-            args=(
-                data_queues,
-                free_queues,
-                ring_buffers,
-                stream_names,
-                track_queue,
-            ),
-        )
-        infer_proc.start()
-        processes.append(infer_proc)
+        def _raise_if_abnormal(procs: list[mp.Process]) -> None:
+            abnormal = [p for p in procs if not p.is_alive() and p.exitcode]
+            if abnormal:
+                detail = ", ".join(
+                    f"pid={p.pid} exitcode={p.exitcode}" for p in abnormal
+                )
+                raise RuntimeError(f"子進程異常結束（{detail}），分析已中止。")
 
-        for i, segments in enumerate(segments_per_stream):
-            reader_proc = mp.Process(
-                target=run_video_reader,
+        # 一片一條 queue，傳的是偵測框（每格幾十個框、幾 KB）而非影格——影格在推論完成
+        # 後就沒有用途（slot 當下就歸還了，見 ADR-010）。
+        # **上限不可省**：影格側的背壓只覆蓋到推論為止，沒有這個上限，追蹤一落後 payload
+        # 就無上限堆在推論進程，而 TRACK_FAILED 也會晚到父進程 terminate 之後（見
+        # `services/batching.py` 的 `TRACK_QUEUE_SLOTS`）。**上限不除以 N**：它擋的兩件
+        # 事都是每條 queue 各自的性質，除以 N 反而讓正常抖動更容易變成兩個進程互等
+        track_queues: list[mp.Queue] = [
+            mp.Queue(maxsize=TRACK_QUEUE_SLOTS) for _ in range(num_shards)
+        ]
+
+        try:
+            for shard_id in range(num_shards):
+                track_proc = mp.Process(
+                    target=run_track_worker,
+                    args=(
+                        track_queues[shard_id],
+                        stream_names,
+                        frame_shapes,
+                        part_paths[shard_id],
+                        shard_id,
+                        # 收到不屬於自己的 stream_id 就拋錯：路由送錯片是靜默的
+                        # （見 `services/track_worker.py`）
+                        frozenset(
+                            sid for sid in range(num_streams) if route[sid] == shard_id
+                        ),
+                    ),
+                )
+                track_proc.start()
+                processes.append(track_proc)
+
+            infer_proc = mp.Process(
+                target=run_inference_pipeline,
                 args=(
-                    i,
-                    segments,
-                    data_queues[i],
-                    free_queues[i],
-                    ring_buffers[i],
-                    RING_SLOTS,
-                    # 不是緩衝尺寸（緩衝照推論尺寸配），是讀取端逐格核對「整天解析度
-                    # 固定」用的探測值——letterbox 會把任何尺寸抹平，write_slot 的
-                    # 形狀檢查不再擋得住中途換解析度
-                    frame_shapes[i],
+                    data_queues,
+                    free_queues,
+                    ring_buffers,
+                    stream_names,
+                    track_queues,
+                    route,
                 ),
             )
-            reader_proc.start()
-            processes.append(reader_proc)
+            infer_proc.start()
+            processes.append(infer_proc)
 
-        while any(p.is_alive() for p in processes):
-            for p in processes:
-                p.join(timeout=0.5)
+            for i, segments in enumerate(segments_per_stream):
+                reader_proc = mp.Process(
+                    target=run_video_reader,
+                    args=(
+                        i,
+                        segments,
+                        data_queues[i],
+                        free_queues[i],
+                        ring_buffers[i],
+                        RING_SLOTS,
+                        # 不是緩衝尺寸（緩衝照推論尺寸配），是讀取端逐格核對「整天解析度
+                        # 固定」用的探測值——letterbox 會把任何尺寸抹平，write_slot 的
+                        # 形狀檢查不再擋得住中途換解析度
+                        frame_shapes[i],
+                    ),
+                )
+                reader_proc.start()
+                processes.append(reader_proc)
+
+            while any(p.is_alive() for p in processes):
+                for p in processes:
+                    p.join(timeout=0.5)
+                _raise_if_abnormal(processes)
+
+            # 補一次檢查：避免最後一個進程恰好在上一輪之後才異常結束而被誤判為成功
             _raise_if_abnormal(processes)
+        except KeyboardInterrupt:
+            logger.warning("收到中斷訊號（Ctrl+C），正在優雅關閉所有子進程...")
+            _terminate_all(processes)
+            raise
+        except Exception:
+            _terminate_all(processes)
+            raise
 
-        # 補一次檢查：避免最後一個進程恰好在上一輪之後才異常結束而被誤判為成功
-        _raise_if_abnormal(processes)
-    except KeyboardInterrupt:
-        logger.warning("收到中斷訊號（Ctrl+C），正在優雅關閉所有子進程...")
-        _terminate_all(processes)
-        raise
-    except Exception:
-        _terminate_all(processes)
-        raise
+        # 各片都正常收尾了（否則上面的檢查會擋下），這裡才把 part 合併成正式檔名。
+        # 合併失敗不留下正式檔，parts 目錄則由下一次執行認領時清掉
+        merge_parts(results_path, part_paths)
+    finally:
+        # 鎖的存續期到合併完成為止。正式執行時進程接著就結束了，kernel 也會做同一件事；
+        # 明寫是為了讓 in-process 呼叫（測試、批次跑多天）不把 fd 一路累積下去
+        os.close(lock_fd)
 
     return AnalysisResult(
         date=date,

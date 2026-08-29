@@ -44,7 +44,7 @@ uv run --package line_counting line_counting       # 計數線進出人數統計
 uv run --package flow_report   flow_report         # 報表彙總 → report.xlsx
 
 uv run --directory <pkg> ruff check .              # lint；<pkg> = video_analyze / zone_mapping / line_counting / flow_report
-uv run --directory <pkg> pytest                    # 測試（四包各 15／3／3／3 支測試檔）
+uv run --directory <pkg> pytest                    # 測試（四包各 16／3／3／3 支測試檔）
 
 uv run --directory libs/vfa_registry pytest        # 共用 lib 的測試（4 支）自成一套，不在四包底下
 uv run --directory libs/vfa_registry ruff check .
@@ -232,6 +232,10 @@ byte 級相同。
   錯誤。
 - **不可用 `frame_id`**（片段內幀序、跨片段重複，同一個值會對到不同片段的畫面），
   **也不可拿 `track_id` 當 key**（重跑就變）。
+- **`track_id` 的唯一範圍只到「同一路之內」**（issue #140 之後）：分片讓各追蹤進程各自
+  持有 ByteTrack 的計數器，同一個 id 值會出現在分屬不同片的兩台攝影機。zone／line 都先
+  依 `camera_id` 過濾再分窗，所以兩包不受影響——但任何 `group_by("track_id")` 沒帶
+  `camera_id` 都會把兩個人併成一個，而輸出檔完全正常。
 - 逐 byte／逐列比對對這份檔案沒有意義，但那不代表它不可重現——是 key 的選法問題。
 - `zone_counts.parquet`／`line_counts.parquet` 經 `time_bucket` 聚合後**比逐格穩定得多**，
   是**交付期／大重構做 golden 回歸比對**時更省事的標的（vfa 日常改動的把關是各包
@@ -240,6 +244,20 @@ byte 級相同。
   `.over("track_id")` 分窗，仍吃 track 的分群結果，[ADR-006](docs/adr/zone_mapping/006-zone-boundary-band.md)
   就記過同設定重跑訪客數 55→57 的案例。2026-08-28 那批的下游輸出確實 byte 級相同，
   但那是該批的實測值，不能當成通則。
+
+**列順序不在契約內，跑到一半時輸出目錄會多一個 `tracking_results.parts/`。** 追蹤進程
+依攝影機分片之後（`[tracker].shards`，預設 2，見 ADR-012），各片先寫自己的
+`tracking_results.parts/shard<k>.parquet`，主進程在全部到齊後合併成正式檔名；正常跑完
+那個目錄就不存在。因此：
+
+- **列順序是「逐片相接、片內才交錯」**，改分片數就會變。下游 zone／line 都走 `group_by`
+  向量化、不依賴列順序，比對兩份輸出也一律先用 `(camera_id, timestamp)` 對齊同一格
+  （見上一段），所以這不影響任何判準——但拿列順序當穩定性訊號會誤判。
+- **那一天的鎖在 `tracking_results.parts/.lock`**，由**主進程**持有、子進程靠 `fork`
+  繼承（改成 spawn 會靜默失去「孤兒進程仍守著鎖」那道保護）。同一個 bucket 的同一天
+  被兩個執行同時跑會在認領時擋下。
+- 中途崩掉留下的 parts 目錄由**下一次執行認領時清掉**，不必人工處理；改版前的
+  `tracking_results.parquet.tmp` 殘檔則不再有人清，認領時只記一行 warning。
 
 **改動會改變送進模型的畫面時（換解碼器、改縮放或色彩轉換路徑），判準用「相當於多大的
 輸入擾動」，不要用「不大於控制組自身重跑」。** 後者曾經是本檔寫的判準，但既然自身重跑

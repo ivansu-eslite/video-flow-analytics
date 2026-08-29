@@ -18,9 +18,13 @@
 推進），以及**`TRACK_FAILED` 要清掉暫存檔**（推論進程的 `collector.discard()` 隨
 collector 一起搬走了，那條路徑改由訊號覆蓋）。
 
-issue #113 再補兩條收尾路徑：推論進程被 SIGKILL 時 `TRACK_FAILED` 送不出來，本進程等到的
-是父進程 terminate 的 **SIGTERM**，要攔下來走既有的清理；以及**啟動時認領輸出位置**，
-別的執行正在寫同一條路徑時要當場擋下，而不是把它的暫存檔清掉。
+issue #113 再補一條收尾路徑：推論進程被 SIGKILL 時 `TRACK_FAILED` 送不出來，本進程等到的
+是父進程 terminate 的 **SIGTERM**，要攔下來走既有的清理。認領輸出位置那一條已經不在本
+進程（分片之後由主進程認領 `parts/.lock`），那批測試在 `test_output_parts.py`。
+
+分片之後多一條：**收到不屬於自己的 stream_id 要拋錯**。那是路由送錯片時唯一的訊號——
+每片都建滿了全部路的 tracker，送錯的 payload 會被正常追蹤、正常寫進這一片的 part，
+只是該路的軌跡被切成兩段而 `track_id` 分裂，合併後的檔案完全正常。
 
 因此本檔的偵測資料一律以**推論尺度**（640×384）表示——那就是 payload 內座標的尺度。
 真正的 `MultiStreamByteTracker` 會做 Kalman 平滑而算不出可斷言的期望值，故以每個輸入
@@ -28,7 +32,6 @@ issue #113 再補兩條收尾路徑：推論進程被 SIGKILL 時 `TRACK_FAILED`
 """
 
 import datetime
-import fcntl
 import multiprocessing as mp
 import os
 import queue
@@ -142,6 +145,11 @@ def _install_recording_tracker(monkeypatch) -> list[_RecordingTracker]:
     return created
 
 
+def _part_path(tmp_path) -> Path:
+    """這一片的 part 檔。分片之後 worker 寫的是它，正式檔名由主進程合併產生。"""
+    return Path(tmp_path) / "tracking_results.parts" / "shard0.parquet"
+
+
 def _run_worker(
     tmp_path,
     monkeypatch,
@@ -149,7 +157,7 @@ def _run_worker(
     last_signal: str = TRACK_DONE,
     frame_shapes: list[FrameShape] | None = None,
 ) -> tuple[list[_RecordingTracker], Path]:
-    """把 `per_frame` 逐格轉成 payload 餵給追蹤進程主體，跑完回傳追蹤器與輸出路徑。
+    """把 `per_frame` 逐格轉成 payload 餵給追蹤進程主體，跑完回傳追蹤器與 part 檔路徑。
 
     `track_queue` 用 `queue.Queue` 取代 `mp.Queue`（介面相同），不拉起任何子進程。
     `last_signal` 換成 `TRACK_FAILED` 就能驗推論進程崩潰時的失效路徑。
@@ -161,7 +169,7 @@ def _run_worker(
     no-op 所以打不到，但只要有人加一個落在填充帶的框（正是 clip 要測的情境）就會踩到。
     """
     trackers = _install_recording_tracker(monkeypatch)
-    results_path = Path(tmp_path) / "tracking_results.parquet"
+    part_path = _part_path(tmp_path)
     track_queue: queue.Queue = queue.Queue()
     for frame_index, boxes in enumerate(per_frame):
         track_queue.put(
@@ -178,9 +186,11 @@ def _run_worker(
         track_queue=track_queue,
         stream_names=["loc_cam001"],
         frame_shapes=frame_shapes or [_SHAPE],
-        results_path=results_path,
+        part_path=part_path,
+        shard_id=0,
+        owned_stream_ids=frozenset({0}),
     )
-    return trackers, results_path
+    return trackers, part_path
 
 
 def test_only_fbody_is_handed_to_the_tracker(tmp_path, monkeypatch):
@@ -302,16 +312,80 @@ def test_track_failed_discards_the_partial_output(tmp_path, monkeypatch):
     否則幾格資料還在記憶體緩衝裡，測試會在什麼都沒發生的情況下通過。
     """
     monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
-    results_path = Path(tmp_path) / "tracking_results.parquet"
-    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    part_path = _part_path(tmp_path)
+    tmp_file = part_path.with_name(part_path.name + ".tmp")
 
     with pytest.raises(RuntimeError, match="推論進程中途例外"):
         _run_worker(
             tmp_path, monkeypatch, [_FRAME_0_DETECTIONS], last_signal=TRACK_FAILED
         )
 
-    assert not results_path.exists()
+    assert not part_path.exists()
     assert not tmp_file.exists()
+
+
+def test_a_payload_for_another_shard_is_rejected(tmp_path, monkeypatch):
+    """收到不屬於自己的 stream_id 要當場拋錯，這是路由送錯片唯一的訊號。
+
+    每片都建滿了全部路的 tracker（讓 stream_id 維持全域編號、payload 不必轉換），
+    所以 `MultiStreamByteTracker.update` 對未知 stream_id 回空陣列那條靜默路徑在這裡
+    根本走不到：送錯片的 payload 會被正常追蹤、正常寫進這一片的 part，只是該路的軌跡
+    被切成兩段而 `track_id` 分裂，而合併後的檔案完全正常、列數也不變。
+    """
+    _install_recording_tracker(monkeypatch)
+    part_path = _part_path(tmp_path)
+    track_queue: queue.Queue = queue.Queue()
+    track_queue.put(
+        to_payload(1, Boxes(_FRAME_0_DETECTIONS.data.clone(), _INFER_SHAPE), 0, _BASE)
+    )
+
+    with pytest.raises(RuntimeError, match="不屬於自己的 stream_id"):
+        run_track_worker(
+            track_queue=track_queue,
+            stream_names=["loc_cam001", "loc_cam002"],
+            frame_shapes=[_SHAPE, _SHAPE],
+            part_path=part_path,
+            shard_id=0,
+            owned_stream_ids=frozenset({0}),  # cam002 是另一片的
+        )
+
+    assert not part_path.exists()
+
+
+def test_a_shard_only_writes_its_own_part(tmp_path, monkeypatch):
+    """`TRACK_DONE` 只收尾自己那一份：別片的 part 檔一個 byte 都不能動。
+
+    各片是獨立進程、寫的是同一個目錄底下的不同檔案，收尾若依目錄（而不是依傳進來的
+    那條路徑）動作，就會把還在寫的鄰居收掉，而兩邊的 log 都寫著「已寫入」。
+    """
+    part_path = _part_path(tmp_path)
+    neighbour = part_path.with_name("shard1.parquet")
+    neighbour.parent.mkdir(parents=True, exist_ok=True)
+    neighbour.write_bytes(b"y" * 4096)
+
+    _trackers, written = _run_worker(tmp_path, monkeypatch, [_FRAME_0_DETECTIONS])
+
+    assert written == part_path
+    assert part_path.exists()
+    assert neighbour.read_bytes() == b"y" * 4096
+
+
+def test_a_failing_shard_only_discards_its_own_part(tmp_path, monkeypatch):
+    """例外時同樣只清自己那一份，鄰居正在寫的暫存檔不能被波及。"""
+    monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
+    part_path = _part_path(tmp_path)
+    neighbour_tmp = part_path.with_name("shard1.parquet.tmp")
+    neighbour_tmp.parent.mkdir(parents=True, exist_ok=True)
+    neighbour_tmp.write_bytes(b"y" * 4096)
+
+    with pytest.raises(RuntimeError, match="推論進程中途例外"):
+        _run_worker(
+            tmp_path, monkeypatch, [_FRAME_0_DETECTIONS], last_signal=TRACK_FAILED
+        )
+
+    assert not part_path.exists()
+    assert not part_path.with_name(part_path.name + ".tmp").exists()
+    assert neighbour_tmp.read_bytes() == b"y" * 4096
 
 
 def test_to_payload_returns_none_for_frames_without_detections():
@@ -419,8 +493,8 @@ def test_sigterm_discards_the_partial_output(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
     _install_recording_tracker(monkeypatch)
-    results_path = Path(tmp_path) / "tracking_results.parquet"
-    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    part_path = _part_path(tmp_path)
+    tmp_file = part_path.with_name(part_path.name + ".tmp")
     saw_tmp: list[bool] = []
 
     def _fallback(signum, frame):
@@ -448,7 +522,9 @@ def test_sigterm_discards_the_partial_output(tmp_path, monkeypatch):
                 track_queue=track_queue,
                 stream_names=["loc_cam001"],
                 frame_shapes=[_SHAPE],
-                results_path=results_path,
+                part_path=part_path,
+                shard_id=0,
+                owned_stream_ids=frozenset({0}),
             )
         assert excinfo.value.code == 143  # 128 + SIGTERM
         # 離開時要還原成呼叫前的 handler：本函式在測試中是 in-process 呼叫的
@@ -458,78 +534,20 @@ def test_sigterm_discards_the_partial_output(tmp_path, monkeypatch):
 
     assert saw_tmp == [True], "訊號抵達時還沒有暫存檔，這支測試沒驗到東西"
     assert not tmp_file.exists()
-    assert not results_path.exists()
+    assert not part_path.exists()
 
 
-def test_a_run_on_a_path_another_process_is_writing_is_refused(tmp_path, monkeypatch):
-    """同一條輸出路徑已有執行中的進程在寫 → 當場擋下，且不准動它的暫存檔。
+def test_a_failure_before_the_loop_leaves_no_residue(tmp_path, monkeypatch):
+    """建 collector 之後、進主迴圈之前的建構步驟若拋錯，也不能留下暫存檔。
 
-    認領失敗必須發生在主迴圈的 `try` **之外**：掉進 `except` 的話
-    `collector.discard()` 會把別人寫到一半的整天明細刪掉，而那個執行到最後才會在
-    `rename` 時發現檔案不見了。
+    `[foot_point].method` 填錯就是這條路徑的真實觸發方式，留下的殘檔要等同一個 bucket
+    的同一天再跑一次才清得掉——正是 issue #113 要消除的東西。
+
+    同一個窗口的另一半：SIGTERM 的 handler 必須在 collector 建起來**之前**就註冊好，
+    否則這段期間收到父進程的 terminate 走的仍是預設處置。`handler_ready` 釘住這個順序。
     """
-    results_path = Path(tmp_path) / "tracking_results.parquet"
-    in_flight = results_path.with_name(results_path.name + ".tmp")
-    in_flight.write_bytes(b"x" * 4096)
-    holder = os.open(in_flight, os.O_RDWR)
-    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-    try:
-        with pytest.raises(RuntimeError, match="正被另一個進程持有"):
-            _run_worker(tmp_path, monkeypatch, [_FRAME_0_DETECTIONS])
-        assert in_flight.stat().st_size == 4096
-        assert not results_path.exists()
-    finally:
-        os.close(holder)
-
-
-def test_startup_clears_the_residue_of_a_killed_run(tmp_path, monkeypatch):
-    """上一次執行被 SIGKILL 留下的殘檔，在本次啟動、任何寫入之前就清掉。
-
-    整機重啟那種「兩個進程都沒機會執行清理」的情境沒有 in-process 的機制擋得住，只能
-    由下一次寫同一條路徑的執行順手收拾。
-
-    觀測點取在**建立 tracker 的當下**（認領之後、第一次 flush 之前）：只看跑完後
-    `.tmp` 在不在的話，正常收尾的 rename 本來就會把它帶走，這支測試會在認領根本沒發生
-    的情況下通過。
-    """
-    results_path = Path(tmp_path) / "tracking_results.parquet"
-    residue = results_path.with_name(results_path.name + ".tmp")
-    residue.write_bytes(b"x" * 4096)
-    size_at_startup: list[int] = []
-
-    def factory(num_streams: int) -> _RecordingTracker:
-        size_at_startup.append(residue.stat().st_size)
-        return _RecordingTracker(num_streams)
-
-    monkeypatch.setattr(tw, "MultiStreamByteTracker", factory)
-    track_queue: queue.Queue = queue.Queue()
-    track_queue.put(TRACK_DONE)
-
-    run_track_worker(
-        track_queue=track_queue,
-        stream_names=["loc_cam001"],
-        frame_shapes=[_SHAPE],
-        results_path=results_path,
-    )
-
-    assert size_at_startup == [0], "殘檔在寫入開始之前就該被清空"
-    assert not residue.exists()
-    assert results_path.exists()
-
-
-def test_a_failure_between_claim_and_the_loop_leaves_no_residue(tmp_path, monkeypatch):
-    """認領之後、進主迴圈之前的建構步驟若拋錯，也不能留下暫存檔。
-
-    `claim_tmp_slot` 一建立 `.tmp` 就進入「有東西要收」的狀態，因此那之後的每一步都要
-    在清理範圍內。`[foot_point].method` 填錯就是這條路徑的真實觸發方式，留下的殘檔要等
-    同一個 bucket 的同一天再跑一次才清得掉——正是這個 issue 要消除的東西。
-
-    同一個窗口的另一半：SIGTERM 的 handler 必須在**認領之前**就註冊好，否則這段期間
-    收到父進程的 terminate 走的仍是預設處置。`handler_ready` 釘住這個順序。
-    """
-    results_path = Path(tmp_path) / "tracking_results.parquet"
-    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    part_path = _part_path(tmp_path)
+    tmp_file = part_path.with_name(part_path.name + ".tmp")
     handler_ready: list[bool] = []
 
     def _exploding_estimator(method: str):
@@ -546,12 +564,14 @@ def test_a_failure_between_claim_and_the_loop_leaves_no_residue(tmp_path, monkey
             track_queue=track_queue,
             stream_names=["loc_cam001"],
             frame_shapes=[_SHAPE],
-            results_path=results_path,
+            part_path=part_path,
+            shard_id=0,
+            owned_stream_ids=frozenset({0}),
         )
 
-    assert handler_ready == [True], "SIGTERM handler 比認領還晚註冊"
+    assert handler_ready == [True], "SIGTERM handler 比 collector 還晚註冊"
     assert not tmp_file.exists()
-    assert not results_path.exists()
+    assert not part_path.exists()
 
 
 def test_sigterm_interrupts_a_blocking_queue_get(tmp_path, monkeypatch):
@@ -572,8 +592,8 @@ def test_sigterm_interrupts_a_blocking_queue_get(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
     _install_recording_tracker(monkeypatch)
-    results_path = Path(tmp_path) / "tracking_results.parquet"
-    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    part_path = _part_path(tmp_path)
+    tmp_file = part_path.with_name(part_path.name + ".tmp")
 
     def _fallback(signum, frame):
         raise AssertionError("run_track_worker 沒有裝上 SIGTERM handler")
@@ -598,7 +618,9 @@ def test_sigterm_interrupts_a_blocking_queue_get(tmp_path, monkeypatch):
                 track_queue=track_queue,
                 stream_names=["loc_cam001"],
                 frame_shapes=[_SHAPE],
-                results_path=results_path,
+                part_path=part_path,
+                shard_id=0,
+                owned_stream_ids=frozenset({0}),
             )
     finally:
         signal.signal(signal.SIGTERM, previous)
@@ -611,7 +633,7 @@ def test_sigterm_interrupts_a_blocking_queue_get(tmp_path, monkeypatch):
         "例外不是從阻塞中的 mp.Queue.get() 內部傳出來的"
     )
     assert not tmp_file.exists()
-    assert not results_path.exists()
+    assert not part_path.exists()
 
 
 def test_sigterm_during_cleanup_does_not_interrupt_it(tmp_path, monkeypatch):
@@ -624,8 +646,8 @@ def test_sigterm_during_cleanup_does_not_interrupt_it(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
     _install_recording_tracker(monkeypatch)
-    results_path = Path(tmp_path) / "tracking_results.parquet"
-    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    part_path = _part_path(tmp_path)
+    tmp_file = part_path.with_name(part_path.name + ".tmp")
     real_discard = tr.TrackingResultCollector.discard
 
     def _discard_interrupted_by_sigterm(self) -> None:
@@ -649,13 +671,15 @@ def test_sigterm_during_cleanup_does_not_interrupt_it(tmp_path, monkeypatch):
                 track_queue=track_queue,
                 stream_names=["loc_cam001"],
                 frame_shapes=[_SHAPE],
-                results_path=results_path,
+                part_path=part_path,
+                shard_id=0,
+                owned_stream_ids=frozenset({0}),
             )
     finally:
         signal.signal(signal.SIGTERM, previous)
 
     assert not tmp_file.exists(), "清理被 SIGTERM 打斷，暫存檔留下來了"
-    assert not results_path.exists()
+    assert not part_path.exists()
 
 
 def test_a_second_ctrl_c_during_cleanup_does_not_interrupt_it(tmp_path, monkeypatch):
@@ -667,8 +691,8 @@ def test_a_second_ctrl_c_during_cleanup_does_not_interrupt_it(tmp_path, monkeypa
     """
     monkeypatch.setattr(tr, "_FLUSH_EVERY_ROWS", 1)
     _install_recording_tracker(monkeypatch)
-    results_path = Path(tmp_path) / "tracking_results.parquet"
-    tmp_file = results_path.with_name(results_path.name + ".tmp")
+    part_path = _part_path(tmp_path)
+    tmp_file = part_path.with_name(part_path.name + ".tmp")
     real_discard = tr.TrackingResultCollector.discard
 
     def _discard_interrupted_by_sigint(self) -> None:
@@ -690,7 +714,9 @@ def test_a_second_ctrl_c_during_cleanup_does_not_interrupt_it(tmp_path, monkeypa
                 track_queue=track_queue,
                 stream_names=["loc_cam001"],
                 frame_shapes=[_SHAPE],
-                results_path=results_path,
+                part_path=part_path,
+                shard_id=0,
+                owned_stream_ids=frozenset({0}),
             )
     except KeyboardInterrupt:
         # 沒擋 SIGINT 的話它會一路逸出到測試外，而 pytest 把 KeyboardInterrupt 當成
@@ -700,4 +726,4 @@ def test_a_second_ctrl_c_during_cleanup_does_not_interrupt_it(tmp_path, monkeypa
     # 離開時 SIGINT 的處置要還原，否則之後整個進程都不再理 Ctrl+C
     assert signal.getsignal(signal.SIGINT) is not signal.SIG_IGN
     assert not tmp_file.exists(), "清理被第二次 Ctrl+C 打斷，暫存檔留下來了"
-    assert not results_path.exists()
+    assert not part_path.exists()

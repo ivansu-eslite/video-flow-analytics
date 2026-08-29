@@ -80,6 +80,36 @@ def test_tracker_config_defaults_unaffected():
     assert TrackerConfig().track_buffer == 30
 
 
+def test_tracker_shards_defaults_to_two():
+    """追蹤進程的預設片數。改這個值不改變任何一格的結果，只影響列順序與吞吐。"""
+    assert TrackerConfig().shards == 2
+
+
+def test_tracker_shards_rejects_zero():
+    """0 片等於沒有人追蹤，而那條組態跑起來只會安靜地什麼都不產出。"""
+    with pytest.raises(ValidationError):
+        TrackerConfig(shards=0)
+
+
+def test_tracker_config_field_names_stay_out_of_bytetracker_namespace():
+    """`TrackerConfig` 的實例被直接當成 `BYTETracker(args=...)` 傳進 ultralytics。
+
+    新增欄位對它無害（它只讀自己認得的屬性），但**撞名就會靜默改掉追蹤行為**：
+    ultralytics 讀到的會是我們的值，而輸出檔完全正常。這支釘住目前新增的 `shards`
+    不在那組名字裡，日後再加欄位時也會逼人先看一眼那邊的命名。
+    """
+    bytetrack_arg_names = {
+        "track_high_thresh",
+        "track_low_thresh",
+        "new_track_thresh",
+        "track_buffer",
+        "match_thresh",
+        "fuse_score",
+    }
+
+    assert set(TrackerConfig.model_fields) - bytetrack_arg_names == {"shards"}
+
+
 def test_config_sections_match_shared_contract():
     """釘住本包宣告了哪些頂層區塊、`input` 來自共用 lib（見 ADR-008）。
 

@@ -257,6 +257,7 @@ cameras:
 | [009](docs/adr/shared/009-head-based-foot-point.md) | shared | 落腳點由 head 框推算並上移成 `tracking_results.parquet` 的欄位，記錄多候選 head 的選法（規劃時的直覺判準被實測推翻）、為何 head 不能進 tracker、ADR-001／003／004／006 的判定輸入點定義隨之改變，以及**計數會大幅上升**（本機重跑 zone entries 最多 74 → 264） |
 | [010](docs/adr/video_analyze/010-zero-copy-frame-lifetime.md) | `video_analyze` | 推理主迴圈免複製消費共享記憶體的畫面、slot 延後到整批推論後才歸還，記錄這條生命週期約束、`Results.orig_img` 是共享記憶體活別名的依賴（ultralytics 不保證，測試擋不住），以及環形緩衝格數為何改由 `model.batch` 推導 |
 | [011](docs/adr/video_analyze/011-single-inference-backend.md) | `video_analyze` | 正式推論路徑收斂為 TensorRT FP16 單一實作、Torch FP32 只作為套件外的驗證工具，記錄為何否決「可切換的後端」、`dynamic=True` 是兩個硬條件逼出來的（批次會變動、靜態引擎會讓形狀退回 640×640）、精度為何驗 metadata 而非 backend 屬性，以及 `_validate_imgsz` 為何不可照抄（引擎路徑下語義失效） |
+| [012](docs/adr/video_analyze/012-track-worker-sharding.md) | `video_analyze` | 追蹤進程依攝影機分片（`[tracker].shards`）、輸出改走 part 檔＋主進程合併，記錄為何分片不改變任何一格的結果（只改列順序）、鎖為何從追蹤進程移到主進程並依賴 `fork` 繼承、三處只會靜默出錯的地方（路由送錯片、`TRACK_FAILED` 卡在已死的那片、清殘骸誤刪 `.lock`），以及為何否決「第五個進程集中落盤」 |
 
 
 **取號規則**：編號是全域流水號，與子目錄無關；新增 ADR 一律取上表的下一號，不在各子目錄

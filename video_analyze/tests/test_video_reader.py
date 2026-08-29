@@ -338,3 +338,82 @@ def test_probe_frame_shape_rejects_a_segment_without_a_video_stream(monkeypatch)
 
     with pytest.raises(ValueError, match="視訊串流"):
         video_reader.probe_frame_shape(_segment())
+
+
+def _probe_over(monkeypatch, container: _FakeContainer) -> dict:
+    """讓 `probe_stream_fps` 開到這個替身容器，並記下 `av.open` 收到的參數。"""
+    captured: dict = {}
+
+    def fake_open(_path, **kwargs):
+        captured.update(kwargs)
+        return container
+
+    monkeypatch.setattr(video_reader.av, "open", fake_open)
+    return captured
+
+
+def test_probe_stream_fps_reads_the_container_rate(monkeypatch):
+    """路由的權重就是這個值：讀不對只會讓兩片分配失衡，輸出完全正常。"""
+    _probe_over(monkeypatch, _FakeContainer([], average_rate=Fraction(20, 1)))
+
+    assert video_reader.probe_stream_fps(_segment()) == 20.0
+
+
+def test_probe_stream_fps_returns_a_plain_float(monkeypatch):
+    """`Fraction` 不能外流：`_read_segment` 拿它算 `timedelta` 會拋 `TypeError`。"""
+    _probe_over(
+        monkeypatch, _FakeContainer([], average_rate=Fraction(30000, 1001))
+    )
+
+    fps = video_reader.probe_stream_fps(_segment())
+
+    assert isinstance(fps, float)
+
+
+def test_probe_stream_fps_falls_back_to_the_guessed_rate(monkeypatch):
+    """與 `_read_segment` 共用同一份讀法，fallback 不能只有其中一邊有。"""
+    _probe_over(
+        monkeypatch,
+        _FakeContainer([], average_rate=None, guessed_rate=Fraction(15, 1)),
+    )
+
+    assert video_reader.probe_stream_fps(_segment()) == 15.0
+
+
+def test_probe_stream_fps_rejects_a_segment_whose_frame_rate_is_unknown(monkeypatch):
+    """讀不到就帶檔名 fail loud——猜一個值只會讓路由靜默失衡。"""
+    _probe_over(
+        monkeypatch,
+        _FakeContainer([], average_rate=Fraction(0, 1), guessed_rate=None),
+    )
+
+    with pytest.raises(ValueError, match="FPS"):
+        video_reader.probe_stream_fps(_segment())
+
+
+def test_probe_stream_fps_rejects_a_segment_without_a_video_stream(monkeypatch):
+    """同 `probe_frame_shape`：這一步在主進程跑，訊息沒有檔名就查不出是哪一支。"""
+    _probe_over(monkeypatch, _FakeContainer([], has_video=False))
+
+    with pytest.raises(ValueError, match="視訊串流"):
+        video_reader.probe_stream_fps(_segment())
+
+
+def test_probe_stream_fps_decodes_nothing(monkeypatch):
+    """只讀容器標頭。解一格要數十毫秒到數百毫秒，而這一步是九路各跑一次的啟動成本。"""
+
+    class _CountingContainer(_FakeContainer):
+        def __init__(self):
+            super().__init__([], average_rate=Fraction(20, 1))
+            self.decode_calls = 0
+
+        def decode(self, video=0):
+            self.decode_calls += 1
+            yield from ()
+
+    container = _CountingContainer()
+    _probe_over(monkeypatch, container)
+
+    video_reader.probe_stream_fps(_segment())
+
+    assert container.decode_calls == 0
