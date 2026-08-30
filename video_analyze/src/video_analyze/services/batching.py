@@ -11,16 +11,15 @@
 
 from video_analyze.models.config import settings
 
-# 單次推理批次，即一次 `detector.predict` 送進去的影格數（`InferencePipeline._target_batch`）。
-# ultralytics 對 in-memory list source 一次 forward 整個 list（`batch=` kwarg 只對檔案來源的
-# `LoadImagesAndVideos` 有效，對 list 是 no-op），所以設定值就是實際的 forward 批次，中間
-# 不再有換算；`tools/build_engine.py --batch` 綁的引擎最大批次要容得下這個值，兩者同尺度。
+# 單次推理批次，即一次 `detector.submit` 送進去的影格數（`InferencePipeline._target_batch`）。
+# 設定值就是實際的 forward 批次，中間不再有換算；`tools/build_engine.py --batch` 綁的引擎
+# 最大批次要容得下這個值，兩者同尺度。
 TARGET_BATCH = settings.model.batch
 
 # 每路環形緩衝的 slot 數，即 reader 能領先推理進程的影格數上限（等同背壓深度）。
-# 由批次大小推導而非寫死：推理進程改成整批推論完才歸還 slot（見 `frame_ring.view_slot`）
-# 之後，格數的約束來自批次大小，只調 batch 而沒同步調格數時 reader 會在整個推論期間拿不到
-# 空位而停擺，且沒有任何錯誤訊息。
+# 由批次大小推導而非寫死：推理進程整批取用、整批歸還（見 `frame_ring.view_slot`），格數的
+# 約束因此來自批次大小，只調 batch 而沒同步調格數時 reader 會在整批取用期間拿不到空位而
+# 停擺，且沒有任何錯誤訊息。
 #
 # 係數 2：扣住一批之外要再留同量空位給 reader 備下一批。「2 × 一批」正是「單一路供批時
 # reader 完全不因缺 slot 而停」的最小值——issue #100 只改湊批的輪替起點，內層 `while` 仍會
@@ -41,7 +40,8 @@ RING_SLOTS = TARGET_BATCH * 2
 # **這個上限是背壓，不是調校參數**——它擋的兩件事都沒有其他機制在擋：
 #
 # - **backlog 無上限成長**。影格側的背壓是「reader 拿不到空 slot 就阻塞」，而 slot 在
-#   predict 完成當下就歸還（ADR-010），所以那條保護只覆蓋到推論為止。追蹤搬出去之後，
+#   整批影格複製進 pinned buffer 的當下就歸還（ADR-010、ADR-013），所以那條保護只覆蓋到
+#   「像素離開共享記憶體」為止。追蹤搬出去之後，
 #   追蹤只要比推論慢，payload 就會以 Python 物件的形式堆在推論進程裡（OS pipe 只緩衝
 #   約 64 KB，其餘都在 feeder thread 的緩衝），整天數百萬格可以堆到 GB 級而全程沒有訊號。
 #   給上限之後 `put` 會阻塞推論迴圈 → 推論不再消費 slot → reader 跟著阻塞，整條 pipeline

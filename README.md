@@ -259,6 +259,7 @@ cameras:
 | [011](docs/adr/video_analyze/011-single-inference-backend.md) | `video_analyze` | 正式推論路徑收斂為 TensorRT FP16 單一實作、Torch FP32 只作為套件外的驗證工具，記錄為何否決「可切換的後端」、`dynamic=True` 是兩個硬條件逼出來的（批次會變動、靜態引擎會讓形狀退回 640×640）、精度為何驗 metadata 而非 backend 屬性，以及 `_validate_imgsz` 為何不可照抄（引擎路徑下語義失效） |
 | [012](docs/adr/video_analyze/012-track-worker-sharding.md) | `video_analyze` | 追蹤進程依攝影機分片（`[tracker].shards`）、輸出改走 part 檔＋主進程合併，記錄為何分片不改變任何一格的結果（只改列順序）、鎖為何從追蹤進程移到主進程並依賴 `fork` 繼承、三處只會靜默出錯的地方（路由送錯片、`TRACK_FAILED` 卡在已死的那片、清殘骸誤刪 `.lock`），以及為何否決「第五個進程集中落盤」 |
 | [013](docs/adr/video_analyze/013-self-built-pre-post.md) | `video_analyze` | 推論進程自建前處理與後處理、ultralytics 只留 `AutoBackend` 的 forward，記錄前處理為何必須是 `.float()` 且 `permute` 要排在通道索引之前（否則張量不 contiguous 而 TensorRT 只看 `data_ptr`）、後處理的 conf → 截斷 → classes 順序不可調動、載入期為何以實跑的輸出形狀驗 end2end 而非讀 metadata、slot 歸還點為何得以前移到前處理之後（修訂 ADR-010 的 Decision 2／4／6），以及驗收判準為何是逐值相同 |
+| [014](docs/adr/video_analyze/014-inference-pipelining.md) | `video_analyze` | 推論進程改成兩批深度的流水（ping-pong 緩衝、複製與運算各一條 stream、以 event 定序）、正式路徑改吃本套件自建的 TensorRT runner（`execute_async_v3`），記錄 `AutoBackend.forward` 為何擋住重疊（阻塞的 `execute_v2` ＋ 會被下一次 forward 覆寫的 binding buffer）、四道載入期檢查為何一律取引擎自己宣告的值、`set_input_shape` 回 `False` 之後會沿用上一批 shape 的靜默錯批路徑、批次序號為何要核對而不靠 FIFO 默契，以及 `detection_fps` 的口徑為何從此不可與改動前相減（取代 ADR-013 的 Decision 3／4，並再次修訂 ADR-010 的 Decision 2） |
 
 
 **取號規則**：編號是全域流水號，與子目錄無關；新增 ADR 一律取上表的下一號，不在各子目錄

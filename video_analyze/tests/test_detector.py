@@ -25,26 +25,29 @@ from ultralytics.utils.ops import scale_boxes
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
 from video_analyze.models.config import settings
+from video_analyze.services.batching import TARGET_BATCH
 from video_analyze.services.detector import (
     CONF_THRESHOLD,
-    END2END_COLUMNS,
     MAX_DET,
+    PIPELINE_DEPTH,
     YOLODetector,
-    _check_infer_shape_of,
-    _check_infer_tensor,
     _log_engine_metadata,
     _require_engine_file,
     _validate_classes,
     _validate_dynamic,
     _validate_precision,
     postprocess_batch,
-    preprocess_batch,
+    stack_frames,
+    to_infer_tensor,
 )
 from video_analyze.services.engine_metadata import (
     VFA_METADATA_KEY,
     VFA_METADATA_SCHEMA,
 )
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
+from video_analyze.services.trt_runner import END2END_COLUMNS
+
+_NO_GPU = not torch.cuda.is_available()
 
 
 def _metadata(**overrides) -> dict:
@@ -97,10 +100,10 @@ def test_require_engine_file_rejects_a_torch_weight(tmp_path):
 def test_require_engine_file_rejects_a_missing_engine_naming_the_real_reason(tmp_path):
     """檔案不存在要在載入之前擋下，且訊息要指得出真正的原因。
 
-    改用 `AutoBackend` 之後（ADR-013）拿掉這道檢查不會再讓 ultralytics 去找替代來源
-    ——`_model_type` 只看副檔名——但 TensorRT backend 直接 `open()`，拋出來的
-    `FileNotFoundError` 只有一個路徑字串，看不出「`model_path` 是 cwd 相對路徑、跑錯
-    目錄了」這個實際上最常見的原因。
+    不經 `YOLO` 載入之後（ADR-013、ADR-014）拿掉這道檢查不會再讓 ultralytics 去找替代
+    來源，但下一步 `read_engine_metadata` 直接 `open()`，拋出來的 `FileNotFoundError`
+    只有一個路徑字串，看不出「`model_path` 是 cwd 相對路徑、跑錯目錄了」這個實際上最
+    常見的原因。
 
     斷言訊息內容而不只是例外型別：`open()` 自己也拋 `FileNotFoundError`，只驗型別的話
     這道檢查被拿掉仍然全綠。
@@ -154,11 +157,11 @@ def test_validate_precision_accepts_an_fp16_engine():
 
 
 def test_validate_precision_rejects_an_fp32_engine():
-    """精度驗的是 `metadata["args"]["half"]`，不是 backend 的 `fp16` 屬性。
+    """精度驗的是 `metadata["args"]["half"]`，不是 I/O binding 的 dtype。
 
-    FP16 引擎的 I/O binding 仍是 FP32，`AutoBackend` 對 FP16 引擎永遠回報
-    `fp16 = False`——拿那個值當判準會**永遠**判定「不是 FP16」，於是這道檢查只能被
-    拿掉或永遠失敗，兩種都等於沒有在驗精度。
+    FP16 引擎的 I/O binding 仍是 FP32（`TrtRunner` 那道 dtype 檢查驗的就是這件事）——
+    拿 binding 的 dtype 當判準會**永遠**判定「不是 FP16」，於是這道檢查只能被拿掉或
+    永遠失敗，兩種都等於沒有在驗精度。
     """
     with pytest.raises(ValueError, match="half"):
         _validate_precision(_metadata(args={"half": False, "dynamic": True}))
@@ -207,30 +210,6 @@ def test_log_engine_metadata_survives_an_engine_without_the_injected_block(capsy
     assert "fbody" in capsys.readouterr().out
 
 
-def test_infer_shape_check_accepts_the_reader_side_shape(capsys):
-    """640×384 進、640×384 出：影格在讀取端就縮好了，前處理不該再加填充。"""
-    _check_infer_shape_of((16, 3, INFER_HEIGHT, INFER_WIDTH))
-
-    assert str(INFER_HEIGHT) in capsys.readouterr().out
-
-
-def test_infer_shape_check_rejects_a_padded_square_shape():
-    """被填成 640×640 要當場擋下。
-
-    dynamic 引擎不套用 metadata 的 `imgsz`（`predictor.py` 只在 backend **不是**
-    dynamic 時才把它抄進 `args.imgsz`），所以 `args.imgsz` 停在預設的 640，實際形狀
-    由 `pre_transform` 的 `auto` letterbox 決定。`auto` 要
-    `same_shapes and args.rect and (format == "pt" or dynamic)` 三者同時成立才保住
-    640×384；任何一項日後翻掉，LetterBox 就會填到 640×640，像素量 1.67 倍。
-    **症狀只有「變慢」**，座標、欄位、列數全部正常——正是 issue #108 消掉的成本靜悄悄
-    回來的方式。
-
-    這一項取代了 `_validate_imgsz`：那個檢查在 dynamic 引擎下驗的值不決定實際形狀。
-    """
-    with pytest.raises(ValueError, match="640"):
-        _check_infer_shape_of((16, 3, 640, 640))
-
-
 def test_validate_dynamic_accepts_a_dynamic_engine():
     _validate_dynamic(_metadata())
 
@@ -238,13 +217,13 @@ def test_validate_dynamic_accepts_a_dynamic_engine():
 def test_validate_dynamic_rejects_a_static_engine():
     """靜態引擎要在載入時擋下，不能留給推論當下的 assert。
 
-    它會通過其餘全部載入檢查，然後在第一個沒湊滿的批次上被 ultralytics 的
-    `assert im.shape == s` 擋下——訊息只講「input size 不等於 max model size」，看不出
+    它會通過其餘全部載入檢查（warmup 那一批剛好是滿批），然後在第一個沒湊滿的批次上
+    被 `TrtRunner.enqueue` 的 `set_input_shape` 擋下——訊息看得出形狀與上限，看不出
     原因是引擎綁死了批次。而湊不滿批是常態而非例外：T4（n1-standard-8）上實測一次跑完
-    出現 16 種不同的批次大小，1 到 16 全都有。
+    出現 16 種不同的批次大小，1 到 16 全都有，等於整天的分析跑到一半才失敗。
 
-    接手這件事的 `_check_infer_shape` 幫不上忙——它排在 `predict` **之後**，靜態引擎
-    在 predict 裡就先崩了。
+    `TrtRunner` 的形狀檢查幫不上忙——它驗的是我們自己組出來的張量形狀，那個形狀本來
+    就是對的；容不下它的是引擎。
     """
     with pytest.raises(ValueError, match="dynamic"):
         _validate_dynamic(_metadata(args={"half": True, "dynamic": False}))
@@ -272,6 +251,16 @@ def _synthetic_frames(count: int) -> list[np.ndarray]:
     ]
 
 
+def _preprocess(frames: list[np.ndarray]) -> torch.Tensor:
+    """在 CPU 上把兩段自建前處理接起來，等同正式路徑的「`stack_frames` ＋ H2D ＋
+    `to_infer_tensor`」——中間那段搬動不改變任何一個位元組。"""
+    buffer = np.empty(
+        (len(frames) + 2, INFER_HEIGHT, INFER_WIDTH, 3), dtype=np.uint8
+    )
+    stack_frames(frames, buffer)
+    return to_infer_tensor(torch.from_numpy(buffer[: len(frames)]))
+
+
 def test_preprocess_matches_the_ultralytics_reference_element_for_element():
     """自建前處理與 ultralytics 的路徑**逐值相同**，不是「差異不大」。
 
@@ -281,7 +270,7 @@ def test_preprocess_matches_the_ultralytics_reference_element_for_element():
     """
     frames = _synthetic_frames(3)
 
-    got = preprocess_batch(frames, torch.device("cpu"))
+    got = _preprocess(frames)
 
     assert torch.equal(got, _ultralytics_preprocess_reference(frames))
 
@@ -295,13 +284,32 @@ def test_preprocess_hands_over_a_contiguous_float32_nchw_tensor():
     """
     frames = _synthetic_frames(2)
 
-    got = preprocess_batch(frames, torch.device("cpu"))
+    got = _preprocess(frames)
 
     assert got.dtype == torch.float32
     assert got.is_contiguous()
     assert tuple(got.shape) == (2, 3, INFER_HEIGHT, INFER_WIDTH)
     # 通道真的翻過：RGB 的第 0 個通道要等於 BGR 影格的第 2 個通道
     np.testing.assert_allclose(got[0, 0].numpy(), frames[0][:, :, 2] / 255)
+
+
+def test_stack_frames_only_writes_the_prefix_of_the_buffer():
+    """`stack_frames` 只寫前 B 格，其餘位置不動。
+
+    緩衝一律照引擎的 `max_batch` 配置，而湊不滿批是常態。寫超過或整塊覆寫都會讓上一
+    批殘留的影格被當成本批的資料送進引擎——多出來的那幾格框看起來完全正常。
+    """
+    buffer = np.full((4, INFER_HEIGHT, INFER_WIDTH, 3), 7, dtype=np.uint8)
+    frames = [
+        np.full((INFER_HEIGHT, INFER_WIDTH, 3), value, dtype=np.uint8)
+        for value in (1, 2)
+    ]
+
+    stack_frames(frames, buffer)
+
+    assert buffer[0, 0, 0, 0] == 1
+    assert buffer[1, 0, 0, 0] == 2
+    assert (buffer[2:] == 7).all()
 
 
 def _raw_batch(rows: list[list[tuple[float, ...]]]) -> np.ndarray:
@@ -411,84 +419,139 @@ def test_class_filter_runs_after_the_max_det_truncation():
     )
     np.testing.assert_array_equal(got[0], expected[0])
 
+class _CountingRunner:
+    """假 runner：在指定 stream 上把每一格的第一個像素寫進輸出的 conf 欄。
 
-def _infer_tensor(**overrides) -> torch.Tensor:
-    kwargs = {"dtype": torch.float32}
-    kwargs.update(overrides)
-    return torch.zeros((2, 3, INFER_HEIGHT, INFER_WIDTH), **kwargs)
-
-
-def test_infer_tensor_check_rejects_a_half_precision_tensor():
-    """FP16 引擎的 I/O binding 仍是 FP32：送 float16 進去只是把位元組重新解讀。"""
-    with pytest.raises(ValueError, match="float32"):
-        _check_infer_tensor(_infer_tensor(dtype=torch.float16))
-
-
-def test_infer_tensor_check_rejects_a_non_contiguous_tensor():
-    """TensorRT 取的是 `data_ptr()`、不看 stride——非連續張量會被當成連續的讀進去。
-
-    `[..., [2, 1, 0]]` 再 `permute` 正好產出這種張量：逐值與正確版相同，佈局不同。
+    - **conf 由輸入算出來**，所以「第 k 批的結果配到第 k+1 批的影格」在斷言上看得見。
+    - **刻意用 `torch.cuda._sleep` 拖慢**：緩衝重用的錯誤（上一批還沒讀完就被覆寫）
+      只有在 GPU 落後 host 時才顯現，跑得太快的假 runner 會讓那種錯誤剛好不發生。
+    - 其餘 299 列留 0，`postprocess_batch` 的 conf 過濾會把它們濾掉，所以每一格恰好
+      回一列——列數本身就是一道檢查。
     """
-    non_contiguous = _infer_tensor().permute(0, 1, 3, 2)
 
-    with pytest.raises(ValueError, match="contiguous"):
-        _check_infer_tensor(non_contiguous)
+    max_batch = TARGET_BATCH
+    output_num_det = 8
 
+    def __init__(self, sleep_cycles: int = 40_000_000):
+        self._sleep_cycles = sleep_cycles
 
-def test_infer_tensor_check_rejects_a_tensor_that_is_not_four_dimensional():
-    with pytest.raises(ValueError, match="4 維"):
-        _check_infer_tensor(torch.zeros((3, INFER_HEIGHT, INFER_WIDTH)))
-
-
-def test_infer_tensor_check_rejects_a_cpu_tensor():
-    """把 CPU 位址交給 `execute_v2` 是未定義行為。
-
-    這一項排在最後，前三項才能在沒有 GPU 的機器上也測得到。
-    """
-    with pytest.raises(RuntimeError, match="CUDA"):
-        _check_infer_tensor(_infer_tensor())
+    def enqueue(self, im, out, stream) -> None:
+        assert stream.cuda_stream != 0, "假 runner 也不該收到 default stream"
+        torch.cuda._sleep(self._sleep_cycles)
+        out.zero_()
+        # 第 0 通道是 RGB 的 R，即 BGR 影格的第 2 個通道；合成影格三通道同值
+        out[:, 0, 4] = 0.26 + im[:, 0, 0, 0] * 0.1
+        out[:, 0, 5] = float(FBODY_CLASS_ID)
 
 
-class _FakeBackend:
-    """只回傳預先給好的 forward 輸出，用來驗載入期的 end2end 檢查。"""
+def _detector_with_runner(runner) -> YOLODetector:
+    """繞過 `__init__` 的引擎載入，只把流水那一半組起來。
 
-    def __init__(self, output):
-        self.output = output
-
-    def forward(self, im: torch.Tensor):
-        return self.output
-
-
-def _detector_with_backend(output) -> YOLODetector:
-    """繞過 `__init__` 組一個只有 warmup 需要的欄位的偵測器。
-
-    走完整的 `__init__` 需要一顆真的引擎與一張 GPU，而這裡要驗的是**收到不是
-    end2end 的輸出時會不會擋下**——那與引擎怎麼載入無關。
+    走完整的 `__init__` 需要一顆真的引擎；這裡要驗的是 `_init_pipeline` 配出來的緩衝、
+    stream 與 event 怎麼被 `submit`／`collect` 用，與引擎無關。
     """
     detector = YOLODetector.__new__(YOLODetector)
-    detector.max_batch = 2
-    detector.device = torch.device("cpu")
-    detector.model = _FakeBackend(output)
+    detector.device = torch.device("cuda:0")
+    detector.runner = runner
+    detector.max_batch = runner.max_batch
+    detector._init_pipeline()
     return detector
 
 
-def test_warmup_rejects_an_engine_without_builtin_nms():
-    """引擎不是 end2end 要在載入期擋下，不能留給第一批推論。
+def _expected_conf(runner, frames: list[np.ndarray]) -> list[float]:
+    """同步參照：同一顆假 runner、一批一次、每批之間完全同步。"""
+    device = torch.device("cuda:0")
+    im = (
+        torch.from_numpy(np.stack(frames))
+        .to(device)
+        .permute(0, 3, 1, 2)[:, [2, 1, 0]]
+        .float()
+        .div_(255)
+    )
+    out = torch.empty(
+        (len(frames), runner.output_num_det, END2END_COLUMNS), device=device
+    )
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        runner.enqueue(im, out, stream)
+    stream.synchronize()
+    boxes = postprocess_batch(
+        out.cpu().numpy(), CONF_THRESHOLD, [FBODY_CLASS_ID], MAX_DET
+    )
+    return [float(one[0][4]) for one in boxes]
 
-    沒有內建 NMS 的引擎吐的是 `(B, 4 + nc, num_anchors)` 的原始張量，而
-    `postprocess_batch` 那三行只讀第 4、5 欄——照樣跑得完，只是把某個類別分數當成
-    conf、另一個當成 cls，得到一堆座標是 xywh 的框，而列數、欄位、格式全部正常。
 
-    判準用實際跑出來的輸出形狀而不是 metadata 的 `end2end` 欄位：後者改了不會改變
-    引擎，而這裡要驗的正是引擎本身。
+def _frames(values: list[int]) -> list[np.ndarray]:
+    return [
+        np.full((INFER_HEIGHT, INFER_WIDTH, 3), value, dtype=np.uint8)
+        for value in values
+    ]
+
+
+@pytest.mark.skipif(_NO_GPU, reason="需要 CUDA 裝置")
+def test_pipelined_batches_keep_their_own_data_across_buffer_reuse(monkeypatch):
+    """連續 `submit`／`collect` 混不同批次大小，每一批拿回的仍是自己的資料。
+
+    這支釘的是 event 定序與 ping-pong 緩衝的重用。深度 2 代表第 k 批與第 k−2 批共用
+    同一組緩衝，任何一條依賴漏掉（例如 `_pinned_in` 在上一輪 H2D 還沒讀完就被
+    `stack_frames` 覆寫、或 `_dev_out` 在 D2H 還沒搬完就被下一次 forward 覆寫）都會
+    讓某一批拿到別批的內容，而列數、欄位、格式全部正常。
+
+    參照組是同一顆假 runner 一批一次、每批之間完全同步跑出來的，所以兩邊的差只可能
+    來自流水本身。
     """
-    detector = _detector_with_backend(torch.zeros((2, 7, 5040)))
+    monkeypatch.setattr(settings.model, "classes", [FBODY_CLASS_ID])
+    runner = _CountingRunner()
+    detector = _detector_with_runner(runner)
+    # 各批的值域**不可重疊**：每批都從 1 開始的話，「第 k 批的緩衝被第 k±2 批覆寫」
+    # 在數值上是恆等的（前綴逐值相同，只有尾巴幾格會少），斷言就退化成「列數對不對」
+    # 而列數是 Python 這側記帳決定的，與 event 無關——實測那種測資下把 `wait_event`
+    # 全部拿掉仍然全綠
+    batches = [
+        _frames(list(range(start, start + size)))
+        for start, size in ((1, 5), (40, 2), (80, 7), (120, 3), (160, 6))
+    ]
 
-    with pytest.raises(ValueError, match="end2end"):
-        detector._warmup_and_require_end2end()
+    results: dict[int, list[np.ndarray]] = {}
+    pending: list[int] = []
+    for frames in batches:
+        if len(pending) >= PIPELINE_DEPTH:
+            seq, boxes = detector.collect()
+            assert seq == pending.pop(0)
+            results[seq] = boxes
+        pending.append(detector.submit(frames))
+    while pending:
+        seq, boxes = detector.collect()
+        assert seq == pending.pop(0)
+        results[seq] = boxes
+
+    for index, frames in enumerate(batches):
+        got = [float(one[0][4]) for one in results[index]]
+        assert got == _expected_conf(runner, frames), f"第 {index} 批拿到別批的資料"
 
 
-def test_warmup_accepts_an_end2end_engine():
-    detector = _detector_with_backend(torch.zeros((2, MAX_DET, END2END_COLUMNS)))
+@pytest.mark.skipif(_NO_GPU, reason="需要 CUDA 裝置")
+def test_submitting_beyond_the_pipeline_depth_is_rejected(monkeypatch):
+    """深度滿了還 submit 要當場擋下——再送一批會覆寫還沒被取回的那批的輸入緩衝。"""
+    monkeypatch.setattr(settings.model, "classes", [FBODY_CLASS_ID])
+    detector = _detector_with_runner(_CountingRunner(sleep_cycles=0))
+    for _ in range(PIPELINE_DEPTH):
+        detector.submit(_frames([1]))
 
-    detector._warmup_and_require_end2end()  # 不應拋例外
+    with pytest.raises(RuntimeError, match="在途批次"):
+        detector.submit(_frames([1]))
+
+
+@pytest.mark.skipif(_NO_GPU, reason="需要 CUDA 裝置")
+def test_warmup_runs_one_real_batch_through_the_pipeline(monkeypatch):
+    """warmup 走的是正式的 `submit`／`collect`，跑完不留在途批。
+
+    留下在途批的話，第一批真影格會直接撞上深度上限；而 warmup 若改成繞過流水自己跑
+    一次 forward，緩衝配置與定序的問題就要等到第一批真影格才浮現。
+    """
+    monkeypatch.setattr(settings.model, "classes", [FBODY_CLASS_ID])
+    detector = _detector_with_runner(_CountingRunner(sleep_cycles=0))
+
+    detector._warmup()
+
+    assert detector.in_flight == 0
