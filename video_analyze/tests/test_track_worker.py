@@ -44,7 +44,6 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import polars as pl
 import pytest
-import torch
 from ultralytics.engine.results import Boxes
 
 from video_analyze.config.constants import FBODY_CLASS_ID, HEAD_CLASS_ID
@@ -116,7 +115,7 @@ class _RecordingTracker:
     def update(self, stream_id: int, yolo_boxes: Boxes) -> np.ndarray:
         cls = [int(c) for c in yolo_boxes.cls.tolist()]
         self.received_cls.append(cls)
-        xyxy = yolo_boxes.xyxy.numpy()
+        xyxy = np.asarray(yolo_boxes.xyxy)
         if len(xyxy) == 0:
             return np.array([])
         # 列格式同 MultiStreamByteTracker.update：[x1,y1,x2,y2,track_id,score,cls,idx]
@@ -225,7 +224,7 @@ def test_boxes_and_foot_points_are_mapped_back_to_the_source_resolution(
     換算回 1080p 是 `(171, 390)`；框底邊中點則是 `(141, 399)`。
 
     把反算移到 `estimate` 之前，`heads` 仍在推論尺度、`tracks` 已回原始解析度，
-    `_match_head` 全數回 `None`，落腳點正好退回那個框底邊中點——列數、`track_id`、
+    `_match_heads` 全數配不到，落腳點正好退回那個框底邊中點——列數、`track_id`、
     bbox 全部正常，只有落腳點靜默偏掉（ADR-009 要修掉的偏移就這樣回來）。
     """
     _trackers, path = _run_worker(tmp_path, monkeypatch, [_FRAME_0_DETECTIONS])
@@ -417,11 +416,11 @@ def test_payload_round_trip_preserves_confidence_and_class():
     _stream_id, box_data, _frame_index, _timestamp = to_payload(
         0, _FRAME_0_DETECTIONS, 0, _BASE
     )
-    restored = Boxes(torch.from_numpy(box_data), _INFER_SHAPE)
+    restored = Boxes(box_data, _INFER_SHAPE)
 
-    np.testing.assert_allclose(restored.conf.numpy(), _FRAME_0_DETECTIONS[:, 4])
-    np.testing.assert_allclose(restored.cls.numpy(), _FRAME_0_DETECTIONS[:, 5])
-    np.testing.assert_allclose(restored.xyxy.numpy(), _FRAME_0_DETECTIONS[:, :4])
+    np.testing.assert_allclose(np.asarray(restored.conf), _FRAME_0_DETECTIONS[:, 4])
+    np.testing.assert_allclose(np.asarray(restored.cls), _FRAME_0_DETECTIONS[:, 5])
+    np.testing.assert_allclose(np.asarray(restored.xyxy), _FRAME_0_DETECTIONS[:, :4])
     assert restored.orig_shape == _INFER_SHAPE
 
 

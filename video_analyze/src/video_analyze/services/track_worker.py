@@ -7,7 +7,8 @@
 **跨進程傳的是偵測框而不是影格**：每格幾十個框、幾 KB，pickle 成本遠低於影格。影格在
 推論完成後就沒有用途（環形緩衝的 slot 在**前處理**完成當下就歸還了，見 ADR-010 與
 ADR-013），追蹤只需要框。推論端自建後處理之後，送進來的框已經是 CPU numpy——`Boxes`
-不再出現在跨進程的介面上，本模組是唯一把它包回來餵 tracker 的地方。
+不再出現在跨進程的介面上，本模組是唯一把它包回來餵 tracker 的地方，包的是 numpy、
+不經 torch。
 
 座標一路都停在推論尺度上（影格在讀取端就縮好了），本模組在寫出前才映回原始解析
 度——所以每路的反算參數與內容區也跟著搬到這裡。
@@ -46,7 +47,6 @@ from queue import Full
 from types import FrameType
 
 import numpy as np
-import torch
 from ultralytics.engine.results import Boxes
 from vfa_observability import StructuredLogger
 
@@ -119,21 +119,28 @@ def fanout_track_signal(
             )
 
 
-def split_detections(boxes: Boxes) -> tuple[Boxes, np.ndarray]:
+def split_detections(box_data: np.ndarray) -> tuple[Boxes, np.ndarray]:
     """把一格的偵測結果拆成「要餵給 tracker 的 fbody 子集」與「head 框座標」。
 
     head 只用來推算落腳點，**不可進 tracker**：送進去的話同一個人會多出一條頭部
     軌跡，`track_id` 的語義從「一個人」變成「一個偵測目標」，下游的不重複訪客與
     進出人數會直接翻倍。
 
+    拆分在 numpy 上做，只有要餵 tracker 的那一份包成 `Boxes`（`BYTETracker` 要
+    `.conf`／`.cls`／`.xywh`）。`orig_shape` 給**推論尺寸**——此時座標確實在那個尺度上
+    （影格在讀取端就縮好了），給錯會讓 `Boxes` 的衍生屬性算錯。
+
     Args:
-        boxes: 單格的偵測結果，需已在 CPU（`Boxes.cpu()`）。
+        box_data: 單格的 N×6 偵測陣列（x1、y1、x2、y2、conf、cls），座標位於推論尺度。
 
     Returns:
         `(fbody 子集, head 框的 [M, 4] xyxy)`；沒有 head 時第二項為 `(0, 4)` 空陣列。
     """
-    cls = boxes.cls
-    return boxes[cls == FBODY_CLASS_ID], boxes.xyxy[cls == HEAD_CLASS_ID].numpy()
+    cls = box_data[:, 5]
+    return (
+        Boxes(box_data[cls == FBODY_CLASS_ID], (INFER_HEIGHT, INFER_WIDTH)),
+        box_data[cls == HEAD_CLASS_ID, :4],
+    )
 
 
 def to_payload(
@@ -146,7 +153,7 @@ def to_payload(
     空陣列的 pickle。**這裡不複製**：正式路徑的複製由 `mp.Queue` 的 pickle 負責。
 
     送的是**全部類別**的框（含 head），拆分留到 `_track_one` 做：`split_detections` 是
-    純函式，而本模組本來就要把 numpy 包回 `Boxes` 才餵得了 tracker，拆在這一側等於零成本。
+    純函式，而拆分本身在 numpy 上做，拆在這一側等於零成本。
 
     Args:
         stream_id: 該格所屬的攝影機編號。
@@ -215,15 +222,14 @@ def _track_one(
       了，少了這一步 4K 的框會在反算時外擴最多 8 px（每個推論像素放大 6 倍），而 head
       配對與 tracker 也會看到與改動前不同的框（見 `letterbox.py`）。
     - **反算在 `foot_estimator.estimate` 之後**。`heads` 是這裡唯一沒有反算的陣列，先把
-      `tracks` 換算回原始解析度會讓兩者尺度不一致，`_match_head` 全數回 `None`、每列退回
+      `tracks` 換算回原始解析度會讓兩者尺度不一致，`_match_heads` 全數配不到、每列退回
       框底邊中點，而列數、`track_id`、bbox 全部正常（ADR-009 要修掉的偏移就這樣靜默回
       來）。在推論尺度上配對是安全的：三個判準（中心落在框內、面積比、主軸傾角）在等比
       縮放＋等量平移下都不變。
 
-    `BYTETracker` 吃的是 ultralytics `Boxes` 而不是裸陣列（它要 `.conf`／`.cls`／
-    `.xywh`），所以這裡把跨進程傳來的 numpy 重新包成 `Boxes`。`orig_shape` 給**推論
-    尺寸**——此時座標確實在那個尺度上（影格在讀取端就縮好了），給錯會讓 `Boxes` 的
-    衍生屬性算錯。
+    裁切直接就地改跨進程傳來的那個 numpy——payload 經 `mp.Queue` pickle 之後是本進程自己
+    的新陣列，沒有別人看得到它。包成 `Boxes` 的只有 fbody 子集，在 `split_detections`
+    裡做。
 
     Args:
         tracker: 多路 ByteTrack 狀態管理器（跨格重用，維持軌跡延續）。
@@ -243,9 +249,8 @@ def _track_one(
         # `FootPointEstimator` 的 TTL 也是同理：它按「有軌跡的幀」計 tick，空格由
         # `estimate` 自己早退，不能由這裡代為跳過而改變 tick 的推進節奏。
         box_data = np.zeros((0, _EMPTY_DETECTION_COLUMNS), dtype=np.float32)
-    detections = Boxes(torch.from_numpy(box_data), (INFER_HEIGHT, INFER_WIDTH))
-    clip_to_content_inplace(detections.data, content)
-    fbody_boxes, heads = split_detections(detections)
+    clip_to_content_inplace(box_data, content)
+    fbody_boxes, heads = split_detections(box_data)
     tracks = tracker.update(stream_id, fbody_boxes)
     # 配對用 tracker 輸出的 Kalman 平滑框，不用 detection 框：落腳點才與同列寫進
     # parquet 的 bbox 自洽（tracker 回傳的 idx 也不是傳入陣列的索引，無法拿來回填，

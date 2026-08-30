@@ -12,6 +12,8 @@
    後方那個人的頭（透視下他在畫面中更高），故那個直覺的判準刻意不採用，見 ADR-009。
 """
 
+from collections import Counter
+
 import numpy as np
 import numpy.testing as npt
 import pytest
@@ -393,3 +395,241 @@ def test_prune_clears_expired_state_of_a_stream_that_stopped_calling():
         est.estimate(0, ongoing, empty)
 
     assert (1, 1) not in est._offsets
+
+
+# --- 向量化與逐框參考實作等價 -------------------------------------------------
+#
+# 配對、反射與偏移量在 issue #146 改成整格一次算完（原本是每個框各跑一次
+# `_match_head`、再逐列建小陣列）。改的是計算佈局，輸出必須逐值不變——而「逐值」在這裡
+# 不是修辭：落腳點會進 parquet，下游 line／zone 的跨越判定吃的就是這兩欄。
+#
+# 參考實作是改動前那一份的最小重寫，**刻意抄在測試檔裡**：從產線程式碼 import 一份
+# 「舊版」的話，兩邊會一起被改掉，這支測試就退化成自己跟自己比。
+
+
+def _reference_match_head(body, heads):
+    """改動前的逐框配對：替單一 fbody 框挑一顆 head，挑不到回 `None`。"""
+    if len(heads) == 0:
+        return None
+    x1, y1, x2, y2 = body
+    center = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
+    body_area = max((x2 - x1) * (y2 - y1), 1e-6)
+
+    head_centers = np.stack(
+        [(heads[:, 0] + heads[:, 2]) / 2, (heads[:, 1] + heads[:, 3]) / 2], axis=1
+    )
+    head_areas = (heads[:, 2] - heads[:, 0]) * (heads[:, 3] - heads[:, 1])
+    dx = head_centers[:, 0] - center[0]
+    dy = center[1] - head_centers[:, 1]
+    tilt = np.degrees(np.arctan2(np.abs(dx), np.maximum(dy, 1e-6)))
+
+    ok = (
+        (head_centers[:, 0] >= x1)
+        & (head_centers[:, 0] <= x2)
+        & (head_centers[:, 1] >= y1)
+        & (head_centers[:, 1] <= y2)
+        & (head_areas <= fp._MAX_HEAD_AREA_RATIO * body_area)
+        & (head_centers[:, 1] < center[1])
+        & (tilt <= fp._MAX_AXIS_TILT_DEG)
+    )
+    if not ok.any():
+        return None
+    return int(np.argmin(np.where(ok, tilt, np.inf)))
+
+
+def _reference_reflect(body, head):
+    """改動前的逐列反射。"""
+    center = np.array([(body[0] + body[2]) / 2, (body[1] + body[3]) / 2])
+    head_top_mid = np.array([(head[0] + head[2]) / 2, head[1]])
+    return 2 * center - head_top_mid
+
+
+def _reference_estimate_from_heads(boxes, heads):
+    """改動前的 `estimate_from_heads`。"""
+    boxes = np.asarray(boxes, dtype=float).reshape(-1, 4)
+    heads = np.asarray(heads, dtype=float).reshape(-1, 4)
+    points = bbox_bottom_center(boxes)
+    for i, body in enumerate(boxes):
+        j = _reference_match_head(body, heads)
+        if j is not None:
+            points[i] = _reference_reflect(body, heads[j])
+    return points
+
+
+class _ReferenceEstimator:
+    """改動前的 `FootPointEstimator`：逐框配對、逐列建 size 與偏移量。
+
+    `_prune` 與 TTL／tick 的語義不重寫，直接沿用產線那一份——這支測試要比的是計算
+    佈局，不是跨幀狀態的生命週期規則（那些由上面既有的測試各自釘住）。
+    """
+
+    def __init__(self, method):
+        self._method = method
+        self._offsets = {}
+        self._ticks = {}
+
+    def estimate(self, stream_id, tracks, heads):
+        tracks = np.asarray(tracks, dtype=float)
+        if tracks.size == 0:
+            return np.empty((0, 2))
+        boxes = tracks[:, :4]
+        points = bbox_bottom_center(boxes)
+        if self._method == "bbox_bottom":
+            return points
+
+        tick = self._ticks.get(stream_id, 0) + 1
+        self._ticks[stream_id] = tick
+        heads = np.asarray(heads, dtype=float).reshape(-1, 4)
+
+        matched = [_reference_match_head(body, heads) for body in boxes]
+        shared = {
+            j
+            for j, n in Counter(j for j in matched if j is not None).items()
+            if n > 1
+        }
+
+        for i, body in enumerate(boxes):
+            key = (stream_id, int(tracks[i][4]))
+            size = np.array(
+                [max(body[2] - body[0], 1e-6), max(body[3] - body[1], 1e-6)]
+            )
+            bottom = points[i].copy()
+            j = matched[i]
+            if j is not None:
+                points[i] = _reference_reflect(body, heads[j])
+                if j not in shared:
+                    self._offsets[key] = ((points[i] - bottom) / size, tick)
+                continue
+            remembered = self._offsets.get(key)
+            if (
+                remembered is not None
+                and tick - remembered[1] <= fp._OFFSET_TTL_FRAMES
+            ):
+                points[i] = bottom + remembered[0] * size
+
+        fp.FootPointEstimator._prune(self, tick)
+        return points
+
+
+def _random_frame(rng, *, n_bodies, n_heads):
+    """一格合成資料：框在推論尺度的畫布上，head 刻意含各種邊界情形。
+
+    三種頭混在一起，`_match_heads` 七個判準各自可能翻轉的區域才都抽得到：
+
+    - **一般**（機率 0.45）：位置與大小都落在判準內側，配得到——沒有這種的話整批都
+      配不到頭，新舊實作都只回框底邊中點，比的是兩份空跑。
+    - **邊界**（機率 0.3）：面積比壓在 25% 上下、主軸傾角壓在 50° 上下
+      （`tan 50° ≈ 1.19`，所以 dx/dy 取在 1.19 附近），落在門檻兩側。
+    - **無關**（機率 0.25）：畫布上隨機一顆，多半在所有框外。
+
+    前兩種都從既有的框長出來，所以同一顆頭常常同時落在兩個重疊的框裡，共用路徑
+    也走得到。
+    """
+    x1 = rng.uniform(0, 500, n_bodies)
+    y1 = rng.uniform(0, 250, n_bodies)
+    bodies = np.stack(
+        [x1, y1, x1 + rng.uniform(20, 140, n_bodies), y1 + rng.uniform(40, 300, n_bodies)],
+        axis=1,
+    )
+
+    heads = []
+    for _ in range(n_heads):
+        if len(bodies) and rng.random() < 0.75:
+            # 從某個框身上長出來的頭
+            body = bodies[rng.integers(len(bodies))]
+            width = body[2] - body[0]
+            height = body[3] - body[1]
+            centre_y = (body[1] + body[3]) / 2
+            boundary = rng.random() < 0.4
+            # 傾角：dy 先定，dx 由目標傾角回推
+            dy = rng.uniform(0.05, 0.45) * height
+            tilt_deg = rng.uniform(45.0, 55.0) if boundary else rng.uniform(0.0, 35.0)
+            dx = np.tan(np.radians(tilt_deg)) * dy * rng.choice([-1.0, 1.0])
+            head_cx = (body[0] + body[2]) / 2 + dx
+            head_cy = centre_y - dy
+            ratio = rng.uniform(0.2, 0.32) if boundary else rng.uniform(0.02, 0.15)
+            side = np.sqrt(ratio * width * height)
+            heads.append(
+                [
+                    head_cx - side / 2,
+                    head_cy - side / 2,
+                    head_cx + side / 2,
+                    head_cy + side / 2,
+                ]
+            )
+        else:
+            hx = rng.uniform(0, 640)
+            hy = rng.uniform(0, 384)
+            side = rng.uniform(8, 40)
+            heads.append([hx, hy, hx + side, hy + side])
+    return bodies, np.asarray(heads, dtype=float).reshape(-1, 4)
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_vectorised_matching_matches_the_per_box_reference(seed):
+    """無狀態路徑：整格向量化與逐框參考實作逐值相同（含 N=0、M=0）。"""
+    rng = np.random.default_rng(seed)
+
+    for n_bodies, n_heads in [(0, 3), (3, 0), (0, 0), (1, 1), (5, 4), (9, 12)]:
+        bodies, heads = _random_frame(rng, n_bodies=n_bodies, n_heads=n_heads)
+
+        got = estimate_from_heads(bodies, heads)
+        want = _reference_estimate_from_heads(bodies, heads)
+
+        assert got.shape == want.shape
+        assert np.array_equal(got, want), (n_bodies, n_heads)
+
+
+def test_random_frames_actually_exercise_matching_and_sharing():
+    """上面那支的素材真的走得到配對與共用兩條路徑——不然它比的是兩份空跑。
+
+    亂數 fixture 最容易失效的方式是「全都配不到頭」：那時新舊實作都只回框底邊中點，
+    測試照樣綠，而向量化的配對一行都沒被執行到。
+    """
+    rng = np.random.default_rng(0)
+    matched_rows = 0
+    shared_frames = 0
+
+    for _ in range(60):
+        bodies, heads = _random_frame(rng, n_bodies=6, n_heads=5)
+        matched = fp._match_heads(bodies, heads)
+        found = matched[matched >= 0]
+        matched_rows += len(found)
+        _, counts = np.unique(found, return_counts=True)
+        shared_frames += int((counts > 1).any())
+
+    assert matched_rows > 100  # 實測 137/360 列配到頭
+    assert shared_frames >= 5  # 實測 60 格裡有 12 格出現共用
+
+
+def test_vectorised_estimator_matches_the_per_row_reference_frame_by_frame():
+    """有狀態路徑：逐格輸出與逐格的 `_offsets`（key 集合與值）都要一致。
+
+    軌跡刻意有延續、有中斷、有跨 stream，偏移量的寫入／沿用／過期三條路徑才都走得到；
+    比對放在每一格之後，跨幀狀態一旦開始漂移就當場紅，不會被後面的格數稀釋掉。
+    """
+    rng = np.random.default_rng(20260829)
+    new = FootPointEstimator("head")
+    old = _ReferenceEstimator("head")
+
+    for frame in range(400):
+        stream_id = int(rng.integers(2))
+        n_bodies = int(rng.integers(0, 7))
+        bodies, heads = _random_frame(
+            rng, n_bodies=n_bodies, n_heads=int(rng.integers(0, 6))
+        )
+        # 軌跡編號從小池子抽：同一個 id 會在數格後再出現（中斷後接回），也會有從沒
+        # 配到過頭的 id
+        track_ids = rng.choice(np.arange(1, 12), size=n_bodies, replace=False)
+        tracks = np.concatenate(
+            [bodies, np.asarray(track_ids, dtype=float).reshape(-1, 1)], axis=1
+        ).reshape(-1, 5)
+
+        got = new.estimate(stream_id, tracks, heads)
+        want = old.estimate(stream_id, tracks, heads)
+
+        assert np.array_equal(got, want), f"第 {frame} 格的落腳點不同"
+        assert set(new._offsets) == set(old._offsets), f"第 {frame} 格的快取鍵不同"
+        for key, (offset, tick) in new._offsets.items():
+            assert np.array_equal(offset, old._offsets[key][0]), f"第 {frame} 格 {key}"
+            assert tick == old._offsets[key][1], f"第 {frame} 格 {key} 的 tick"
