@@ -65,6 +65,7 @@ from video_analyze.services.engine_metadata import (
     read_engine_metadata,
     sha256_of,
     validate_engine_metadata,
+    validate_engine_precision,
 )
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
 
@@ -170,9 +171,9 @@ def export_engine(weights: Path, batch: int, vfa_metadata: dict, dest: Path) -> 
 def verify_engine(engine_path: Path, batch: int, expected_sha256: str) -> dict:
     """在比對之前先驗引擎本身：metadata、精度、批次上限、實際跑得起來。
 
-    **精度驗 `metadata["args"]["half"]`，不是 backend 的 `fp16` 屬性**：FP16 引擎的
-    I/O binding 仍是 FP32，`AutoBackend` 對它永遠回報 `False`，拿那個值當判準等於
-    永遠判定「不是 FP16」。
+    **精度檢查與載入端共用同一份宣告、同一支函式**（`engine_metadata.EXPECTED_PRECISION_ARGS`
+    ／`validate_engine_precision`）：逐項比對 `metadata["args"]` 而不是只驗 `half`——
+    INT8 引擎可以同時把 FP16 flag 設成真，只驗 `half` 對這種引擎完全照過。
 
     Args:
         engine_path: 待驗的 `.engine`。
@@ -183,18 +184,15 @@ def verify_engine(engine_path: Path, batch: int, expected_sha256: str) -> dict:
         引擎的 metadata dict。
 
     Raises:
-        ValueError: metadata 與當下環境不符（`validate_engine_metadata`），或精度／
+        ValueError: metadata 與當下環境不符（`validate_engine_metadata`），精度旗標
+            與 `EXPECTED_PRECISION_ARGS` 不符（`validate_engine_precision`），或
             dynamic／批次上限不是預期值。
     """
     metadata = read_engine_metadata(engine_path)
     validate_engine_metadata(metadata, current_gpu_environment(), expected_sha256)
+    validate_engine_precision(metadata)
 
     export_args = metadata.get("args") or {}
-    if export_args.get("half") is not True:
-        raise ValueError(
-            f"引擎不是 FP16 建的（metadata.args.half = {export_args.get('half')}）。"
-            "正式推論路徑只收 FP16 引擎（ADR-011）。"
-        )
     if export_args.get("dynamic") is not True:
         raise ValueError(
             "引擎不是 dynamic 建的。靜態引擎會讓 640×384 的影格被填充成 640×640"

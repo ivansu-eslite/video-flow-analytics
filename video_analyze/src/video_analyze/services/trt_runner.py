@@ -60,7 +60,7 @@ def _check_infer_tensor(im: torch.Tensor) -> None:
         raise ValueError(
             f"推論張量的 dtype 是 {im.dtype}，預期 float32。FP16 引擎的 I/O binding "
             "仍是 FP32，送 float16 進去只會讓同一塊位元組被重新解讀，輸出仍是形狀"
-            "正常的框（見 `detector._validate_precision`）。"
+            "正常的框（見 `engine_metadata.validate_engine_precision`）。"
         )
     if not im.is_contiguous():
         raise ValueError(
@@ -195,7 +195,7 @@ class TrtRunner:
         if input_dtype != trt.DataType.FLOAT:
             raise ValueError(
                 f"引擎輸入 binding 的 dtype 是 {input_dtype}，不是 FP32。FP16 引擎的 "
-                "I/O binding 仍是 FP32（見 `detector._validate_precision`）；真的收到"
+                "I/O binding 仍是 FP32（見 `engine_metadata.validate_engine_precision`）；真的收到"
                 "別的 dtype 代表前處理送進去的位元組會被重新解讀，而輸出仍是形狀正常"
                 "的框。"
             )

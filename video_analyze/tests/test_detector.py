@@ -35,7 +35,6 @@ from video_analyze.services.detector import (
     _require_engine_file,
     _validate_classes,
     _validate_dynamic,
-    _validate_precision,
     postprocess_batch,
     stack_frames,
     to_infer_tensor,
@@ -152,19 +151,29 @@ def test_yolo_detector_aborts_without_cuda_instead_of_falling_back_to_cpu(
         YOLODetector()
 
 
-def test_validate_precision_accepts_an_fp16_engine():
-    _validate_precision(_metadata())
-
-
-def test_validate_precision_rejects_an_fp32_engine():
-    """精度驗的是 `metadata["args"]["half"]`，不是 I/O binding 的 dtype。
-
-    FP16 引擎的 I/O binding 仍是 FP32（`TrtRunner` 那道 dtype 檢查驗的就是這件事）——
-    拿 binding 的 dtype 當判準會**永遠**判定「不是 FP16」，於是這道檢查只能被拿掉或
-    永遠失敗，兩種都等於沒有在驗精度。
+def test_yolo_detector_calls_the_shared_precision_check(monkeypatch, tmp_path):
+    """載入序列真的會呼叫 `engine_metadata.validate_engine_precision`，不是掛在
+    `engine_metadata.py` 卻沒被接進 `__init__`。精度細節本身的 case（FP16 通過／
+    FP32 擋下／INT8 擋下／缺欄擋下）在 test_engine_metadata.py，這裡只釘「載入序列有
+    呼叫到它」——拿掉這行呼叫，這支測試要紅，而不會被其餘各驗各欄位的載入檢查頂替。
     """
-    with pytest.raises(ValueError, match="half"):
-        _validate_precision(_metadata(args={"half": False, "dynamic": True}))
+    monkeypatch.setattr(settings.model, "model_path", str(_fake_engine(tmp_path)))
+    monkeypatch.setattr(
+        "video_analyze.services.detector.current_gpu_environment", lambda: None
+    )
+    monkeypatch.setattr(
+        "video_analyze.services.detector.validate_engine_metadata", lambda *a, **k: None
+    )
+
+    def _raise_marker(metadata):
+        raise ValueError("precision-check-was-called")
+
+    monkeypatch.setattr(
+        "video_analyze.services.detector.validate_engine_precision", _raise_marker
+    )
+
+    with pytest.raises(ValueError, match="precision-check-was-called"):
+        YOLODetector()
 
 
 def test_validate_classes_passes_when_all_ids_present(monkeypatch):

@@ -10,6 +10,7 @@ from video_analyze.services.engine_metadata import (
     current_gpu_environment,
     read_engine_metadata,
     validate_engine_metadata,
+    validate_engine_precision,
 )
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
 from video_analyze.services.trt_runner import END2END_COLUMNS, TrtRunner
@@ -148,29 +149,6 @@ def _validate_classes(metadata: dict) -> None:
         )
 
 
-def _validate_precision(metadata: dict) -> None:
-    """驗證引擎是 FP16 建的。
-
-    **驗 `metadata["args"]["half"]`，不是 I/O binding 的 dtype**：FP16 引擎的 I/O
-    binding 仍是 FP32（`TrtRunner` 那道 dtype 檢查驗的就是這件事），拿 binding 的
-    dtype 當判準等於永遠判定「不是 FP16」。`args` 是 exporter 把匯出參數原樣寫進
-    metadata 的那一份，只有它反映建置時的實際設定。
-
-    Args:
-        metadata: `read_engine_metadata` 讀回的 metadata。
-
-    Raises:
-        ValueError: 引擎不是以 `half=True` 匯出的。
-    """
-    half = (metadata.get("args") or {}).get("half")
-    if half is not True:
-        raise ValueError(
-            f"引擎的匯出參數 half={half}，不是 FP16。正式推論路徑的精度由引擎自帶"
-            "（不是設定項），FP32 引擎會讓吞吐掉回改動前的水準而完全沒有訊號。"
-            "請用 `tools/build_engine.py` 重建。"
-        )
-
-
 def _validate_dynamic(metadata: dict) -> None:
     """驗證引擎是 dynamic 建的。
 
@@ -247,7 +225,7 @@ def to_infer_tensor(u8_nhwc: torch.Tensor) -> torch.Tensor:
     的張量會被當成連續的讀進去。
 
     **是 `.float()` 不是 `.half()`**：FP16 引擎的 I/O binding 仍是 FP32
-    （見 `_validate_precision`），送 FP16 進去會變快又變得不一樣。
+    （見 `engine_metadata.validate_engine_precision`），送 FP16 進去會變快又變得不一樣。
 
     Args:
         u8_nhwc: `(B, INFER_HEIGHT, INFER_WIDTH, 3)` 的 uint8 BGR 張量，即
@@ -338,7 +316,7 @@ class YOLODetector:
         """載入 `settings.model.model_path` 指定的 TensorRT 引擎並配置流水用的緩衝。
 
         **看 metadata 的那幾道排在載入引擎之前**（`_require_engine_file`、
-        `validate_engine_metadata`、`_validate_precision`、`_validate_dynamic`、
+        `validate_engine_metadata`、`validate_engine_precision`、`_validate_dynamic`、
         `_validate_classes`）：它們都只看引擎檔頭（ultralytics 把 `json.dumps(metadata)`
         寫在引擎前面，見 `services/engine_metadata.py`），不合格的引擎不必先吃掉
         deserialize 的數秒與數 GB 顯存。**看引擎自己宣告的那幾道在 `TrtRunner` 裡**
@@ -359,10 +337,11 @@ class YOLODetector:
 
         Raises:
             ValueError: `model_path` 不是 `.engine`、引擎 metadata 與當下環境不符
-                （見 `engine_metadata.validate_engine_metadata`）、引擎不是 FP16
-                （`_validate_precision`）、引擎不是 dynamic（`_validate_dynamic`）、
-                `classes` 指定了引擎沒有的類別 id（`_validate_classes`），或引擎的
-                I/O 宣告不合格（見 `TrtRunner.__init__`）。
+                （見 `engine_metadata.validate_engine_metadata`）、引擎的精度旗標與
+                預期不符（`engine_metadata.validate_engine_precision`）、引擎不是
+                dynamic（`_validate_dynamic`）、`classes` 指定了引擎沒有的類別 id
+                （`_validate_classes`），或引擎的 I/O 宣告不合格（見
+                `TrtRunner.__init__`）。
             FileNotFoundError: `model_path` 指定的引擎檔不存在。
             RuntimeError: 沒有可用的 CUDA 裝置，或建出來的 stream 是 default stream。
         """
@@ -374,7 +353,7 @@ class YOLODetector:
             current_gpu_environment(),
             settings.model.source_weights_sha256,
         )
-        _validate_precision(metadata)
+        validate_engine_precision(metadata)
         _validate_dynamic(metadata)
         _log_engine_metadata(metadata)
         _validate_classes(metadata)

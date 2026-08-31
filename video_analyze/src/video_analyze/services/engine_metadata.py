@@ -45,6 +45,11 @@ _META_LEN_BYTES = 4
 # 先擋長度，錯誤訊息才指得出真正的原因。
 _META_LEN_MAX = 1 << 20
 
+# 正式推論路徑預期的匯出精度旗標。**不做成 `config.toml` 欄位**：精度由引擎自帶，
+# 不是設定項（見 `validate_engine_precision`），加一個唯一合法值是 FP16 的旋鈕沒有
+# 意義，而放行 `int8=True` 等於推翻已否決的 INT8 決定。
+EXPECTED_PRECISION_ARGS = {"half": True, "int8": False}
+
 
 @dataclass(frozen=True)
 class GpuEnvironment:
@@ -362,4 +367,41 @@ def validate_engine_metadata(
             "（不影響引擎有效性，僅供追溯）。",
             build_torch_cuda_major=vfa.get("torch_cuda_major"),
             current_torch_cuda_major=environment.torch_cuda_major,
+        )
+
+
+def validate_engine_precision(metadata: dict) -> None:
+    """驗引擎的匯出參數是否符合 `EXPECTED_PRECISION_ARGS` 宣告的每一項精度旗標。
+
+    **逐項比對 `metadata["args"]`，不是只驗 `half`**：TensorRT 的 INT8 引擎可以同時把
+    FP16 flag 設成真（INT8 只是多開一個 flag），只驗 `half` 對 INT8 引擎完全照過——
+    2026-08-30 的實測就是這個缺口：一顆 INT8 引擎在不改本 repo 任何一行的情況下被正式
+    推論路徑載入、跑完九路、產出欄位與格式完全正常的 `tracking_results.parquet`，只有
+    數字變了（總偵測數 −15.75%、下游 `entries` −10.36%）。
+
+    **缺欄一律視為不符**：沒有這個欄位不代表「沒開那個精度」，代表這顆引擎的 exporter
+    版本或匯出路徑與預期不同，此時無法判定實際精度，不能放行。
+
+    **建置期與載入期共用同一份宣告、同一支函式**：`tools/build_engine.py` 的
+    `verify_engine` 與 `services/detector.py` 的載入序列都呼叫這裡，不再各自維護一顆
+    只驗 `half` 的布林檢查。
+
+    Args:
+        metadata: `read_engine_metadata` 讀回的 metadata。
+
+    Raises:
+        ValueError: `EXPECTED_PRECISION_ARGS` 任一旗標缺欄或值不符，訊息逐項列出實際值。
+    """
+    args = metadata.get("args") or {}
+    mismatches = []
+    for flag, expected in EXPECTED_PRECISION_ARGS.items():
+        if flag not in args:
+            mismatches.append(f"{flag}：引擎沒有宣告此旗標，無法判定精度")
+        elif args[flag] is not expected:
+            mismatches.append(f"{flag}：引擎是 {args[flag]!r}，預期 {expected!r}")
+    if mismatches:
+        raise ValueError(
+            "引擎的精度與預期不符：" + "；".join(mismatches) + "。"
+            "正式推論路徑的精度由引擎自帶（不是設定項），精度不符會讓吞吐或偵測結果"
+            "改變而完全沒有訊號。請用 `tools/build_engine.py` 重建。"
         )
