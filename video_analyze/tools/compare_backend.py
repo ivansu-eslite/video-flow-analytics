@@ -70,7 +70,11 @@ _INFER_IMGSZ = (INFER_HEIGHT, INFER_WIDTH)
 # `DEFAULT_OUTLIER_PX` 的配對不得超過 `DEFAULT_MAX_OUTLIER_RATIO_PCT`。單一個離群不擋
 # （實測那一個是 conf 0.255 對 0.455 的邊界偵測，模型自己就不確定人腳在哪，不是 FP16
 # 的捨入誤差），系統性的尾巴擋得住。
-DEFAULT_MAX_FOOT_DEV_P99_PX = 1.20
+#
+# 門檻本身在 2026-08-31 從 1.20 放寬到 1.3：同一份設定、同一張卡重建 TensorRT 引擎，
+# p99 會在 1.183–1.250 px 之間跳（TensorRT 建置本身不可重現），1.20 正好落在這個離散
+# 區間裡面，等於有一半的建置會被自己擋下——擋掉的是建置的骰子，不是引擎品質。
+DEFAULT_MAX_FOOT_DEV_P99_PX = 1.3
 DEFAULT_OUTLIER_PX = 5.0
 DEFAULT_MAX_OUTLIER_RATIO_PCT = 0.5
 # 兩條「整批壞掉」的門檻：精度或形狀出錯時偏差不見得變大，但框數與配對率會塌。
