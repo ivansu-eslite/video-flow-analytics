@@ -57,7 +57,7 @@ def _write_engine(path, metadata: dict):
     """照 ultralytics 的格式寫一顆假引擎：4 bytes 長度 ＋ JSON ＋ 引擎本體。
 
     本體是無法被真正解出的假 bytes——測試預期在讀到這裡之前就被精度檢查擋下；
-    如果 `YOLO` 沒被монkeypatch 掉還跑到這裡，會是明確的載入失敗而不是靜默通過。
+    如果 `YOLO` 沒被 monkeypatch 掉還跑到這裡，會是明確的載入失敗而不是靜默通過。
     """
     meta = json.dumps(metadata).encode("utf-8")
     path.write_bytes(struct.pack("<i", len(meta)) + meta + b"\x00not-a-real-engine")
@@ -68,28 +68,23 @@ def _reject_gpu_probe(*args, **kwargs):
     pytest.fail("precision 檢查應該在碰 YOLO(engine_path) 之前就中止")
 
 
-def test_verify_engine_rejects_an_int8_engine(monkeypatch, tmp_path):
-    """INT8 引擎可以同時把 FP16 flag 設成真——2026-08-30 實測擋不住的正是這種
-    metadata 形狀。`verify_engine` 要在碰 GPU 之前擋下，不能靠載入端事後補一刀。"""
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(
+            {"half": True, "int8": True, "dynamic": True, "batch": 16}, id="int8_true"
+        ),
+        pytest.param({"half": True, "dynamic": True, "batch": 16}, id="int8_missing"),
+    ],
+)
+def test_verify_engine_rejects_a_non_fp16_engine(args, monkeypatch, tmp_path):
+    """INT8 引擎可以同時把 FP16 flag 設成真——2026-08-30 實測擋不住的正是這種 metadata
+    形狀。缺 `int8` 欄同理擋下：不是「沒開那個精度」，是匯出路徑與預期不同，無法判定
+    實際精度。兩種情況都要在碰 GPU（`YOLO(engine_path)`）之前被 `verify_engine` 擋下，
+    不能靠載入端事後補一刀。"""
     monkeypatch.setattr(build_engine, "current_gpu_environment", lambda: _ENV)
     monkeypatch.setattr(build_engine, "YOLO", _reject_gpu_probe)
-    engine = _write_engine(
-        tmp_path / "fake_sm75.engine",
-        _metadata({"half": True, "int8": True, "dynamic": True, "batch": 16}),
-    )
-
-    with pytest.raises(ValueError, match="int8"):
-        build_engine.verify_engine(engine, batch=16, expected_sha256=_SHA)
-
-
-def test_verify_engine_rejects_metadata_missing_the_int8_flag(monkeypatch, tmp_path):
-    """缺 `int8` 欄不是「沒開那個精度」，是匯出路徑與預期不同，一律擋下而不是放行。"""
-    monkeypatch.setattr(build_engine, "current_gpu_environment", lambda: _ENV)
-    monkeypatch.setattr(build_engine, "YOLO", _reject_gpu_probe)
-    engine = _write_engine(
-        tmp_path / "fake_sm75.engine",
-        _metadata({"half": True, "dynamic": True, "batch": 16}),
-    )
+    engine = _write_engine(tmp_path / "fake_sm75.engine", _metadata(args))
 
     with pytest.raises(ValueError, match="int8"):
         build_engine.verify_engine(engine, batch=16, expected_sha256=_SHA)
