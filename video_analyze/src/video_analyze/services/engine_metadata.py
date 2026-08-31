@@ -1,14 +1,16 @@
 """TensorRT 引擎自帶 metadata 的注入格式、讀取，以及對當下環境的驗證。
 
-**建置端與載入端共用這一份**：`tools/build_engine.py` 用它組出要注入的欄位，
+**建置端與載入端共用這一份**：`tools/build_engine.py` 用它組出並寫入檔頭，
 `services/detector.py` 用它把欄位讀回來比對。分成兩份寫的話，哪天有人只改其中一邊，
 比對會靜默地全數通過（欄位名對不上就走「缺欄位」那條路），而那正是這些欄位存在的
 理由——引擎是二進位產物，跑錯一顆不會有任何症狀。
 
-metadata 的容器格式不是我們定的：ultralytics 的 exporter 把 `json.dumps(metadata)`
-的長度以 4 bytes little-endian 寫在引擎檔開頭，接著是 JSON 本體，然後才是序列化的
-引擎（`utils/export/engine.py` 的 `onnx2engine`）。`nn/backends/tensorrt.py` 讀回來
-之後會把**每一個 key `setattr` 到 backend 上**，所以注入的欄位全部收在單一的
+metadata 的容器格式不是我們定的：ultralytics 的 `nn/backends/tensorrt.py` 從引擎檔
+開頭讀「4 bytes little-endian 的長度 ＋ JSON 本體」，然後才 deserialize 引擎本體。
+接管 builder 之後（ADR-015）**寫**這個檔頭的是本模組的 `write_engine_with_metadata`，
+讀回來的是 `read_engine_metadata`——兩件事放同一個檔，就是這個模組原本存在的理由。
+`nn/backends/tensorrt.py` 讀回來之後會把**每一個 key `setattr` 到 backend 上**，
+所以注入的欄位全部收在單一的
 `VFA_METADATA_KEY` 底下，而不是攤成數個頂層 key——攤開的話要逐一避開
 `fp16`／`dynamic`／`model`／`context`／`bindings`／`output_names` 這些 backend
 自己的屬性（其中前幾個是在 `apply_metadata` **之後**才賦值的，注入的值會被無聲蓋掉，
@@ -49,6 +51,37 @@ _META_LEN_MAX = 1 << 20
 # 不是設定項（見 `validate_engine_precision`），加一個唯一合法值是 FP16 的旋鈕沒有
 # 意義，而放行 `int8=True` 等於推翻已否決的 INT8 決定。
 EXPECTED_PRECISION_ARGS = {"half": True, "int8": False}
+
+# 引擎檔頭 `args` 應有的鍵。這是 ultralytics 對 `format="engine"` 宣告的
+# `Arguments`（`engine/exporter.py::export_formats` 的 TensorRT 那列，用於
+# `exporter.py` 的 `{k: v for k, v in self.args if k in fmt_keys}`）。接管 builder
+# 之後檔頭由本模組寫，這份清單就是「引擎檔頭與 ultralytics 匯出的引擎長得一樣」的
+# 唯一依據——ONNX 中繼檔那次匯出組出來的 `args` 多一個 `opset`，照抄會讓兩種來源的
+# 引擎檔頭不同形。
+ENGINE_EXPORT_ARG_KEYS = (
+    "data",
+    "batch",
+    "fraction",
+    "half",
+    "int8",
+    "dynamic",
+    "simplify",
+    "nms",
+)
+
+# 檔頭必填鍵與型別。**缺鍵不會崩**：`nn/backends/base.py` 的 `apply_metadata` 走
+# `metadata.get(...)`，這幾個鍵全部有預設值，缺了只會靜默走錯路（見
+# `validate_engine_header`）。
+ENGINE_METADATA_TYPES: dict[str, type] = {
+    "stride": int,
+    "task": str,
+    "batch": int,
+    "imgsz": list,
+    "names": dict,
+    "channels": int,
+    "end2end": bool,
+    "args": dict,
+}
 
 
 @dataclass(frozen=True)
@@ -411,3 +444,118 @@ def validate_engine_precision(metadata: dict) -> None:
             "正式推論路徑的精度由引擎自帶（不是設定項），精度不符會讓吞吐或偵測結果"
             "改變而完全沒有訊號。請用 `tools/build_engine.py` 重建。"
         )
+
+
+def build_engine_metadata(onnx_metadata: dict, vfa_metadata: dict) -> dict:
+    """把 ONNX 匯出當下 ultralytics 組好的 metadata 改寫成引擎檔頭該有的樣子。
+
+    **模型衍生的欄位一個都不自己算**（`stride`／`task`／`names`／`channels`／
+    `end2end`／`imgsz`／`description`）：那些值 ultralytics 在 `Exporter.__call__` 裡
+    從模型身上取，自己重推一份就是把同一段邏輯寫兩遍，而算錯的症狀全部是靜默的——
+    `end2end` 是其中最嚴重的一個，見 `validate_engine_header`。所以建置端改成攔下
+    ONNX 那次匯出組好的 `exporter.metadata`（`tools/build_engine.py` 的
+    `on_export_start` callback），這裡只動兩件真的不一樣的事：
+
+    - **裁掉 `args` 裡的 `opset`**：`format="onnx"` 與 `format="engine"` 的 `fmt_keys`
+      差這一個鍵（見 `ENGINE_EXPORT_ARG_KEYS`）。
+    - **把 `args["half"]` 改寫成 `True`**：ONNX 中繼檔刻意以 `half=False` 匯出（在
+      `format="onnx"` 下 `half=True` 會真的把模型 `.half()`，得到 FP16 輸入 binding 的
+      另一種引擎，實測比 FP32 binding 慢），引擎的 FP16 是 builder flag 給的。這與
+      ultralytics 的引擎匯出路徑同義：它的中繼 ONNX 同樣是 FP32，而檔頭寫的是
+      `half=True`。
+
+    Args:
+        onnx_metadata: ONNX 匯出時 `exporter.metadata` 的內容。
+        vfa_metadata: 要注入的 `vfa` 欄位（`build_vfa_metadata` 的輸出）。
+
+    Returns:
+        可交給 `write_engine_with_metadata` 的完整檔頭 dict。
+
+    Raises:
+        ValueError: 組出來的檔頭沒過 `validate_engine_header`。
+    """
+    metadata = dict(onnx_metadata)
+    onnx_args = metadata.get("args") or {}
+    args = {k: v for k, v in onnx_args.items() if k in ENGINE_EXPORT_ARG_KEYS}
+    args["half"] = True
+    metadata["args"] = args
+    metadata[VFA_METADATA_KEY] = vfa_metadata
+    # 在建置之前就驗：檔頭組錯而等到引擎建完才發現，代價是 T4 上約 7 分鐘重跑
+    validate_engine_header(metadata)
+    return metadata
+
+
+def validate_engine_header(metadata: dict) -> None:
+    """驗檔頭的必填鍵存在、型別正確，且 `end2end` 為真。
+
+    **這幾個鍵缺了不會崩，會被 ultralytics 的預設值靜默補上**：
+    `nn/backends/base.py` 的 `apply_metadata` 一律走 `metadata.get(...)`，
+    `stride`／`names`／`task`／`batch`／`channels`／`end2end`／`dynamic` 全部有預設值。
+    後果最嚴重的是 `end2end`——缺欄或為假時 `apply_metadata` 算出 `end2end = False`，
+    predictor 會對 `(B, 300, 6)` 的 end2end 輸出再跑一次完整 NMS，把類別分數當成
+    conf 與 cls，於是**建置期驗收與 `tools/compare_backend.py` 整批比錯而沒有任何
+    例外**。故 `end2end` 除了型別還驗值。
+
+    正式推論路徑不吃這個檔頭：`TrtRunner` 驗的是引擎自己宣告的輸出最後一維。這道檢查
+    保護的是建置期驗收與比對工具那條（都經 ultralytics 的 predictor）。
+
+    Args:
+        metadata: 完整的引擎檔頭 dict。
+
+    Raises:
+        ValueError: 任一必填鍵缺漏或型別不符，或 `end2end` 不為真。
+    """
+    problems = []
+    for key, expected_type in ENGINE_METADATA_TYPES.items():
+        if key not in metadata:
+            problems.append(f"{key}：缺漏")
+        elif not isinstance(metadata[key], expected_type):
+            problems.append(
+                f"{key}：型別是 {type(metadata[key]).__name__}，"
+                f"預期 {expected_type.__name__}"
+            )
+    if metadata.get("end2end") is not True:
+        problems.append(
+            f"end2end：是 {metadata.get('end2end')!r}，預期 True（本 repo 的權重是 "
+            "NMS-free head，檔頭寫成非真會讓 predictor 對 end2end 的輸出再跑一次"
+            "完整 NMS）"
+        )
+    if problems:
+        raise ValueError(
+            "引擎檔頭不合格：" + "；".join(problems) + "。這幾個鍵缺漏不會讓載入崩，"
+            "會被 ultralytics 的預設值靜默補上，所以要在寫檔之前擋下。"
+        )
+
+
+def write_engine_with_metadata(metadata: dict, engine: bytes, dest: Path) -> None:
+    """把檔頭與序列化引擎寫成一顆 `.engine`。
+
+    **長度欄位寫的是 payload 的位元組數，不是 `json.dumps` 的字元數。** ultralytics
+    寫的是 `len(json.dumps(metadata))`，只有在它預設的 `ensure_ascii=True`（非 ASCII
+    全部轉義成 `\\uXXXX`）下兩者才相等；本 repo 別處一律 `ensure_ascii=False`，照抄
+    字元數會讓任何非 ASCII 值（`description` 抄的是訓練資料路徑、`vfa.gpu_name`、
+    `vfa.train.*` 都可能有）把長度寫短——`read_engine_metadata` 讀到截斷的 JSON 而
+    解析失敗，或長度剛好還解得開時 `TrtRunner` 從錯誤的位移開始 deserialize。
+
+    Args:
+        metadata: 完整的引擎檔頭 dict（`build_engine_metadata` 的輸出）。
+        engine: `build_serialized_network` 產出的引擎位元組。
+        dest: 產物落點；父目錄會自動建立。
+
+    Raises:
+        ValueError: 序列化後的檔頭超出 `read_metadata_length` 認得的長度範圍。
+    """
+    payload = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+    if not 0 < len(payload) <= _META_LEN_MAX:
+        raise ValueError(
+            f"檔頭序列化後是 {len(payload)} bytes，超出讀取端認得的範圍 "
+            f"(0, {_META_LEN_MAX}]。寫下去的引擎會在 read_metadata_length 被當成"
+            "「不帶 ultralytics 檔頭」而擋下。"
+        )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "wb") as handle:
+        handle.write(
+            len(payload).to_bytes(_META_LEN_BYTES, byteorder="little", signed=True)
+        )
+        handle.write(payload)
+        handle.write(engine)

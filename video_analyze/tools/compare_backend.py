@@ -48,6 +48,19 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
+from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
+
+# 每一次 `predict` 都要帶的推論尺寸。**不是可有可無的參數**：predictor 的 warmup 不走
+# letterbox，直接用 `args.imgsz`（`engine/predictor.py` 的
+# `self.model.warmup(imgsz=(bs, ch, *self.imgsz))`），而 dynamic 引擎不把檔頭的 `imgsz`
+# 抄進 `args.imgsz`，所以不指定就是預設的 640×640。引擎的 optimization profile 收窄成
+# min=opt=max=384×640 之後（ADR-015）那個形狀出界，而 `nn/backends/tensorrt.py` 呼叫
+# `set_input_shape` **不檢查回傳值**，接著以 context 上一個 shape 執行——這裡逐張送
+# （batch 1），warmup 緩衝只有 1×3×640×640×4 而引擎照 16×3×384×640 讀，是越界讀取，
+# 最好的情況是拿到垃圾。帶上 384×640 之後 warmup 與 predict 同形狀；對 16:9 來源
+# letterbox 的結果與預設值逐值相同（兩者在 `auto=True` 下都收斂到 384×640）。
+_INFER_IMGSZ = (INFER_HEIGHT, INFER_WIDTH)
+
 # 驗收判準。**看 p99 而不是 max**，這一條要寫清楚理由：既有基準的兩個數字
 # （FP16 的 1.20 px、TensorRT 已驗的 1.16 px）分別是 **277 個框的 max** 與 **277 個框的
 # p99**，而本工具預設取樣 2000 個框以上。max 是樣本數的函數（樣本越多、尾巴越長），拿
@@ -103,7 +116,12 @@ def build_model(weights: Path, classes: list[int], half: bool) -> YOLO:
     if weights.suffix == ".pt":
         model = model.to("cuda")
     warmup = np.zeros((1080, 1920, 3), dtype=np.uint8)
-    kwargs: dict = {"verbose": False, "classes": classes, "device": 0}
+    kwargs: dict = {
+        "verbose": False,
+        "classes": classes,
+        "device": 0,
+        "imgsz": _INFER_IMGSZ,
+    }
     if half:
         kwargs["half"] = True
     model.predict([warmup], **kwargs)
@@ -125,7 +143,7 @@ def detect(
     model: YOLO, frames: list[np.ndarray], classes: list[int], half: bool
 ) -> list[np.ndarray]:
     """回傳每張畫面的偵測框陣列 [x1, y1, x2, y2, conf, cls]。"""
-    kwargs: dict = {"verbose": False, "classes": classes}
+    kwargs: dict = {"verbose": False, "classes": classes, "imgsz": _INFER_IMGSZ}
     if half:
         kwargs["half"] = True
     out = []

@@ -8,6 +8,17 @@
 編進去（`..._sm75.engine`）就是為了讓兩顆不可能被混用——下游 argus 的 promotion 用
 `Path(source_model_uri).stem` 當 `model_version`，兩顆同名會直接撞在一起。
 
+**引擎由本工具自己建，不走 ultralytics 的引擎匯出**（ADR-015）：ONNX 中繼檔仍由
+ultralytics 匯出，之後的 builder／network／optimization profile／config 都在
+`build_serialized_engine` 裡，檔頭由 `services/engine_metadata.py` 寫。接管的理由只有
+一個——optimization profile 的空間維。ultralytics 把它訂成
+`min=(1,3,32,32)／opt=(16,3,384,640)／max=(16,3,768,1280)`，兩個界都不是誰選的：上界是
+`workspace`（未指定即 2）當倍數的副產物，下界是一個永遠跑不起來的形狀（32×32 不到 300
+個 anchor，end2end head 的 `TopK(K=300)` 在建置期就明著警告）。而執行期的高寬只有一種
+（`trt_runner._check_infer_shape_of` 對任何非 384×640 fail loud），所以把三個界全部釘在
+384×640 不減少任何實際可用的形狀，換到的是 T4 上 forward 快 2.3%～6.1%、每個 execution
+context 的裝置記憶體從 1,329 MB 降到 332 MB。
+
 三個刻意的建置參數：
 
 - **`dynamic=True`**。不是為了彈性：靜態引擎的 `TensorRTBackend.forward` 會 assert
@@ -19,9 +30,10 @@
   實際形狀改由 `pre_transform` 的 `auto` letterbox 決定（見下一條與 `detector.py` 的
   `_check_infer_shape`）。
 - **`imgsz=(INFER_HEIGHT, INFER_WIDTH)`**。形狀在建置期固定成 optimization profile 的
-  opt shape。載入端**不驗** metadata 的 `imgsz`——dynamic 引擎不套用它（上一條），照抄
-  `_validate_imgsz` 會得到一個看起來有在驗、其實驗不到的檢查。執行期改為逐批核對
-  **實際進入推論的 (H, W)**（見 `detector.py` 的 `_check_infer_shape`）。
+  **三個界**（min／opt／max，見 `profile_shapes`）。載入端**不驗** metadata 的
+  `imgsz`——dynamic 引擎不套用它（上一條），照抄 `_validate_imgsz` 會得到一個看起來有
+  在驗、其實驗不到的檢查；驗的是引擎自己宣告的 profile（`trt_runner.check_profile_shapes`）
+  與逐批核對**實際進入推論的 (H, W)**（見 `detector.py` 的 `_check_infer_shape`）。
 - **`batch=<最大批次>`**。dynamic 引擎的 batch 維度上限就是這個值（optimization
   profile 的 max shape 取 `shape[0]`），所以它與 `config.toml` 的 `[model] batch`
   要一起定：兩者同尺度（設定值就是實際的單次推理批次），這裡要容得下設定值，
@@ -59,15 +71,18 @@ from compare_backend import (
 from ultralytics import YOLO
 
 from video_analyze.services.engine_metadata import (
-    VFA_METADATA_KEY,
+    build_engine_metadata,
     build_vfa_metadata,
     current_gpu_environment,
     read_engine_metadata,
     sha256_of,
+    validate_engine_header,
     validate_engine_metadata,
     validate_engine_precision,
+    write_engine_with_metadata,
 )
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
+from video_analyze.services.trt_runner import TrtRunner
 
 # 比對還沒跑完之前，產物先掛這個尾綴。**不用 `.tmp`**：那個尾綴在本 repo 已經是
 # `TrackingResultCollector` 的暫存檔語義（issue #113 正在處理它的殘檔），借用會讓兩件
@@ -124,56 +139,184 @@ def engine_filename(weights: Path, compute_capability: str) -> str:
     return f"{weights.stem}_sm{compute_capability.replace('.', '')}.engine"
 
 
-def export_engine(weights: Path, batch: int, vfa_metadata: dict, dest: Path) -> None:
-    """匯出 FP16 dynamic 引擎並把 `vfa` 欄位注入 metadata，產物落在 `dest`。
+def profile_shapes(batch: int) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    """optimization profile 的 min／opt／max（`(N, C, H, W)`）。
 
-    注入走 `on_export_start` callback：公開的 `export()` 沒有任意欄位入口，而
-    `Exporter.__call__` 是先組完 `self.metadata` 才 `run_callbacks("on_export_start")`，
-    所以那個時點改得動它。
+    空間維三個界一律 `(3, INFER_HEIGHT, INFER_WIDTH)`；batch 維是 `1`–`batch`，opt 取
+    上界。判準與載入端共用 `trt_runner.check_profile_shapes`，那裡也寫著為什麼下界
+    必須是 1（湊不滿批是常態）。
+
+    Args:
+        batch: 引擎綁的最大批次。
+
+    Returns:
+        `(min, opt, max)` 三個 shape。
+
+    Raises:
+        ValueError: `batch` 小於 1。
+    """
+    if batch < 1:
+        raise ValueError(f"--batch 是 {batch}，必須 >= 1。")
+    spatial = (3, INFER_HEIGHT, INFER_WIDTH)
+    return ((1, *spatial), (batch, *spatial), (batch, *spatial))
+
+
+def export_onnx(weights: Path, batch: int, workdir: Path) -> tuple[Path, dict]:
+    """用 ultralytics 匯出 ONNX 中繼檔，並攔下它為這顆模型組好的 metadata。
+
+    **`half=False` 是關鍵。** `format="engine"` 下 `half=True` 只作用於 builder flag
+    （`exporter.py` 只對 `fmt in {onnx, torchscript}` 呼叫 `model.half()`），所以
+    ultralytics 的中繼 ONNX 本來就是 FP32；改走 `format="onnx"` 之後同一個參數會真的
+    把模型 `.half()`，得到 FP16 輸入 binding 的另一種引擎（實測比 FP32 binding 慢）。
+    引擎的 FP16 由 `build_serialized_engine` 的 builder flag 給。
+
+    **metadata 攔下來而不自己重推。** 走 `on_export_start` callback：公開的 `export()`
+    沒有任意欄位入口，而 `Exporter.__call__` 是先組完 `self.metadata` 才
+    `run_callbacks("on_export_start")`。`stride`／`task`／`names`／`channels`／
+    `end2end` 這幾個模型衍生欄位算錯的症狀全是靜默的（見
+    `engine_metadata.validate_engine_header`），照抄 ultralytics 的結果比自己重推安全。
 
     **匯出在暫存目錄裡做，權重原地不動。** ultralytics 把產物寫在來源權重旁邊
-    （`self.file.with_suffix(...)`），而且引擎要先過 ONNX，所以一次匯出會在權重的目錄
-    生出 `<stem>.engine` 與 `<stem>.onnx` 兩個檔。權重放在共用的 artifacts 目錄是常態，
-    那樣做會**無聲蓋掉／刪掉同名的既有檔案**——實測在建置機上就是這樣輾掉了兩份先前
-    效能量測留下的產物。先把權重複製進暫存目錄再匯出，ultralytics 就只動得到那份副本。
+    （`self.file.with_suffix(...)`），權重放在共用的 artifacts 目錄是常態，那樣做會
+    **無聲蓋掉／刪掉同名的既有檔案**——實測在建置機上就是這樣輾掉了兩份先前效能量測
+    留下的產物。先把權重複製進暫存目錄再匯出，ultralytics 就只動得到那份副本。
+
+    Args:
+        weights: 來源 `.pt`。
+        batch: 引擎的最大批次（ONNX 的 dynamic axes 用它當 dummy 輸入的 batch）。
+        workdir: 暫存目錄；權重副本與 ONNX 都落在這裡。
+
+    Returns:
+        `(ONNX 檔路徑, exporter.metadata 的內容)`。
+
+    Raises:
+        RuntimeError: callback 沒被呼叫到（ultralytics 改了 `on_export_start` 的時點），
+            此時檔頭會少掉全部模型衍生欄位。
+    """
+    staged_weights = workdir / weights.name
+    shutil.copy2(weights, staged_weights)
+    model = YOLO(str(staged_weights))
+
+    captured: dict = {}
+
+    def _capture(exporter) -> None:
+        captured.update(exporter.metadata)
+
+    model.add_callback("on_export_start", _capture)
+    exported = Path(
+        model.export(
+            format="onnx",
+            half=False,
+            dynamic=True,
+            batch=batch,
+            imgsz=(INFER_HEIGHT, INFER_WIDTH),
+            simplify=True,
+            device=0,
+            verbose=False,
+        )
+    )
+    if not captured:
+        raise RuntimeError(
+            "ONNX 匯出沒有觸發 on_export_start，拿不到 ultralytics 組好的 metadata。"
+            "檔頭會少掉 stride／task／names／channels／end2end，而那些欄位缺漏不會讓"
+            "載入崩、只會被預設值靜默補上。"
+        )
+    return exported, captured
+
+
+def build_serialized_engine(onnx_path: Path, batch: int) -> bytes:
+    """從 ONNX 建出 FP16 引擎的序列化位元組（不含檔頭）。
+
+    刻意複製 ultralytics `utils/export/engine.py::onnx2engine` 在本工具的呼叫下實際
+    生效的設定，只改 optimization profile。兩處值得寫下來：
+
+    - **不設 `set_memory_pool_limit`。** ultralytics 的 `workspace` 預設 `None` →
+      `workspace_bytes = 0` → 整段略過，TensorRT 的預設上限就是整張卡可用的記憶體。
+      這不是疏漏而是收益的來源：workspace 上限同時是 **tactic 的篩選條件**，設一個
+      保守常數會排除吃 workspace 的 tactic，而「解鎖 tactic」正是收窄 profile 量到
+      增益的機制。相位 1 在 T4 上量的那批也是不設上限建的，設了就不是被量到的東西。
+    - **`profiling_verbosity` 取 `DETAILED`**（ultralytics 在 FP16 路徑上不動它，預設
+      是 `LAYER_NAMES_ONLY`）。與相位 1 的量測組態一致，並讓日後的逐層 profiling 拿得
+      到層名以外的資訊；代價是引擎檔略大，不影響 tactic 選擇。
+
+    Args:
+        onnx_path: `export_onnx` 產出的中繼檔。
+        batch: 引擎綁的最大批次。
+
+    Returns:
+        序列化的引擎位元組。
+
+    Raises:
+        RuntimeError: ONNX parse 失敗、網路不是單一輸入，或 builder 建不出引擎。
+            **前兩者 TensorRT 都只回 `False`／`None` 而不拋錯**，不自己擋的話 T4 上
+            一次失敗只會得到一句指不出原因的訊息。
+    """
+    import tensorrt as trt
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(0)
+    parser = trt.OnnxParser(network, logger)
+    if not parser.parse_from_file(str(onnx_path)):
+        errors = "\n  - ".join(
+            str(parser.get_error(i)) for i in range(parser.num_errors)
+        )
+        raise RuntimeError(f"ONNX parse 失敗（{onnx_path}）：\n  - {errors}")
+    if network.num_inputs != 1:
+        raise RuntimeError(
+            f"ONNX 的輸入是 {network.num_inputs} 個，本工具只設一個 optimization "
+            "profile 形狀，多輸入的網路會有 binding 停在未設定的形狀上。"
+        )
+
+    config = builder.create_builder_config()
+    config.set_flag(trt.BuilderFlag.FP16)
+    config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+    minimum, opt, maximum = profile_shapes(batch)
+    profile = builder.create_optimization_profile()
+    profile.set_shape(network.get_input(0).name, min=minimum, opt=opt, max=maximum)
+    config.add_optimization_profile(profile)
+
+    print(f"[建置] optimization profile min={minimum} opt={opt} max={maximum}")
+    serialized = builder.build_serialized_network(network, config)
+    if serialized is None:
+        raise RuntimeError(
+            "build_serialized_network 回 None（它失敗時不拋錯）。原因由 TensorRT 的 "
+            "logger 印在上方。"
+        )
+    return bytes(serialized)
+
+
+def export_engine(weights: Path, batch: int, vfa_metadata: dict, dest: Path) -> None:
+    """匯出 ONNX、自建 FP16 dynamic 引擎、寫上帶 `vfa` 欄位的檔頭，產物落在 `dest`。
+
+    ONNX 中繼檔跟著暫存目錄一起消失，不必也不該自己去刪權重旁邊的同名檔。
 
     Args:
         weights: 來源 `.pt`。
         batch: 引擎的最大批次。
         vfa_metadata: 要注入的欄位（`build_vfa_metadata` 的輸出）。
-        dest: 產物的落點（本函式會把匯出結果搬過去）。
+        dest: 產物的落點。
     """
     with tempfile.TemporaryDirectory(prefix="vfa-engine-") as tmp:
-        staged_weights = Path(tmp) / weights.name
-        shutil.copy2(weights, staged_weights)
-        model = YOLO(str(staged_weights))
-
-        def _inject(exporter) -> None:
-            exporter.metadata[VFA_METADATA_KEY] = vfa_metadata
-
-        model.add_callback("on_export_start", _inject)
-        exported = Path(
-            model.export(
-                format="engine",
-                half=True,
-                dynamic=True,
-                batch=batch,
-                imgsz=(INFER_HEIGHT, INFER_WIDTH),
-                device=0,
-                verbose=False,
-            )
-        )
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(exported), dest)
-        # ONNX 中繼檔跟著暫存目錄一起消失，不必也不該自己去刪權重旁邊的同名檔
+        onnx_path, onnx_metadata = export_onnx(weights, batch, Path(tmp))
+        # 檔頭先組好也先驗過，才進約 7 分鐘的建置：組錯而等到建完才發現要整個重跑
+        metadata = build_engine_metadata(onnx_metadata, vfa_metadata)
+        engine = build_serialized_engine(onnx_path, batch)
+        write_engine_with_metadata(metadata, engine, dest)
 
 
 def verify_engine(engine_path: Path, batch: int, expected_sha256: str) -> dict:
-    """在比對之前先驗引擎本身：metadata、精度、批次上限、實際跑得起來。
+    """在比對之前先驗引擎本身：檔頭、metadata、精度、profile、批次上限、跑得起來。
 
     **精度檢查與載入端共用同一份宣告、同一支函式**（`engine_metadata.EXPECTED_PRECISION_ARGS`
     ／`validate_engine_precision`）：逐項比對 `metadata["args"]` 而不是只驗 `half`——
     INT8 引擎可以同時把 FP16 flag 設成真，只驗 `half` 對這種引擎完全照過。
+
+    **optimization profile 走正式載入路徑驗**：`TrtRunner(engine_path)` 就是推論進程
+    載引擎的那一支，建一顆等於把載入期四道檢查（含
+    `trt_runner.check_profile_shapes`）全跑一遍，判準取的是**引擎自己宣告的 profile**
+    而不是本工具傳給 builder 的設定值。驗完就丟掉，讓它的 execution context 在
+    ultralytics 那顆 probe 起來之前先還回去。
 
     Args:
         engine_path: 待驗的 `.engine`。
@@ -184,11 +327,14 @@ def verify_engine(engine_path: Path, batch: int, expected_sha256: str) -> dict:
         引擎的 metadata dict。
 
     Raises:
-        ValueError: metadata 與當下環境不符（`validate_engine_metadata`），精度旗標
-            與 `EXPECTED_PRECISION_ARGS` 不符（`validate_engine_precision`），或
+        ValueError: 檔頭必填鍵缺漏或型別不符（`validate_engine_header`），metadata 與
+            當下環境不符（`validate_engine_metadata`），精度旗標與
+            `EXPECTED_PRECISION_ARGS` 不符（`validate_engine_precision`），
+            optimization profile 不符（`trt_runner.check_profile_shapes`），或
             dynamic／批次上限不是預期值。
     """
     metadata = read_engine_metadata(engine_path)
+    validate_engine_header(metadata)
     validate_engine_metadata(metadata, current_gpu_environment(), expected_sha256)
     validate_engine_precision(metadata)
 
@@ -203,13 +349,34 @@ def verify_engine(engine_path: Path, batch: int, expected_sha256: str) -> dict:
             f"引擎的最大批次是 {metadata.get('batch')}，要求的是 {batch}。"
         )
 
-    # 真的載一次並用滿批跑一格：deserialize 成功、且 optimization profile 涵蓋
-    # 「設定值換算出來的實際批次 × 推論尺寸」，這兩件事只有跑過才知道
+    runner = TrtRunner(engine_path)
+    profile_batch = runner.max_batch
+    print(
+        f"[驗證] 引擎宣告的 profile：batch 上限 {profile_batch}、"
+        f"高寬 {runner.input_height}×{runner.input_width}"
+    )
+    del runner
+    if profile_batch != batch:
+        raise ValueError(
+            f"引擎 optimization profile 的 batch 上限是 {profile_batch}，要求的是 "
+            f"{batch}。檔頭的 `batch` 只是一個字串欄位，改它不會改變引擎——這一項取的"
+            "是引擎自己宣告的值。"
+        )
+
+    # 真的用 ultralytics 載一次並用滿批跑一格：建置期驗收與 `compare_backend.py` 都走
+    # 這條路徑，它與正式推論路徑（`TrtRunner`）不同，要各驗一次
     import numpy as np
 
     probe = YOLO(str(engine_path))
     frames = [np.zeros((INFER_HEIGHT, INFER_WIDTH, 3), np.uint8) for _ in range(batch)]
-    probe.predict(frames, verbose=False, device=0)
+    # **`imgsz` 一定要帶。** predictor 的 warmup 不走 letterbox，直接用 `args.imgsz`
+    # （`engine/predictor.py` 的 `self.model.warmup(imgsz=(bs, ch, *self.imgsz))`），而
+    # dynamic 引擎不把檔頭的 `imgsz` 抄進 `args.imgsz`，所以不指定就是預設的 640×640。
+    # profile 收窄之前那個形狀還落在 max 界內，收窄之後就出界了——而
+    # `nn/backends/tensorrt.py` 呼叫 `set_input_shape` **不檢查回傳值**，接著以 context
+    # 上一個 shape 執行，症狀是讀到別的緩衝（batch 1 時直接越界讀取）。帶上 384×640 之後
+    # warmup 與 predict 同形狀；對 16:9 來源 letterbox 的結果與預設值逐值相同
+    probe.predict(frames, verbose=False, device=0, imgsz=(INFER_HEIGHT, INFER_WIDTH))
     shape = tuple(probe.predictor.model.bindings["images"].shape)
     print(f"[驗證] 滿批 {batch} 實際進入推論的張量形狀：{shape}")
     if shape[2:] != (INFER_HEIGHT, INFER_WIDTH):

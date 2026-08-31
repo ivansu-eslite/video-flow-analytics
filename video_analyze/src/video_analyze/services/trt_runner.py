@@ -12,8 +12,9 @@ GPU 算時 host 閒著。要讓兩邊重疊就得換成 `execute_async_v3`，並
 
 **引擎檔的檔頭格式沿用 ultralytics 的**（`json.dumps(metadata)` 的長度以 4 bytes
 little-endian 寫在最前面，接著 JSON，然後才是序列化的引擎），解析用的是
-`services/engine_metadata.py` 的同一組常數與同一支長度檢查——`tools/build_engine.py`
-仍以 ultralytics 的 exporter 產出引擎，格式不是我們定的，各寫一份只會漂移。
+`services/engine_metadata.py` 的同一組常數與同一支長度檢查——格式由 ultralytics 的
+`nn/backends/tensorrt.py` 讀，不是我們定的（接管 builder 之後由
+`engine_metadata.write_engine_with_metadata` 寫，見 ADR-015），各寫一份只會漂移。
 """
 
 from __future__ import annotations
@@ -111,6 +112,61 @@ def _check_infer_shape_of(shape: tuple[int, ...]) -> None:
         )
 
 
+def check_profile_shapes(
+    minimum: tuple[int, ...], opt: tuple[int, ...], maximum: tuple[int, ...]
+) -> None:
+    """核對 optimization profile 的三個界：空間維全部釘在推論尺寸，batch 維 1–max。
+
+    **空間維三個界都要驗，不是只驗 opt。** 執行期的高寬只有一種（`_check_infer_shape_of`
+    對任何非 384×640 fail loud），所以把 min／max 也釘在 384×640 讓 TensorRT 的
+    autotuning 不必為一整個範圍挑 kernel——實測 T4 上 forward 快 2.3%～6.1%，每個
+    execution context 的裝置記憶體從 1,329 MB 降到 332 MB（見 ADR-015）。反過來說，
+    **一顆寬 profile 的舊引擎會通過其餘全部載入檢查**（opt 高寬照樣是 384×640），
+    症狀只有「慢幾個百分點、多吃約 1 GB 顯存」——與同一個 `__init__` 裡別的檢查擋的
+    是同一類失效，所以在這裡擋下，訊息直說要重建。
+
+    **batch 維的下界必須是 1。** 湊不滿批是常態而非例外（T4 上實測一次跑完出現 1 到
+    16 全部 16 種批次），下界大於 1 的引擎會在第一個小批次上讓 `set_input_shape` 回
+    `False`。那條路徑在 `enqueue` 裡已經 fail loud，但那是部署之後才看得到；建置期
+    用同一支函式驗，工具才擋得下。
+
+    Args:
+        minimum: profile 的 min shape `(N, C, H, W)`。
+        opt: profile 的 opt shape。
+        maximum: profile 的 max shape。
+
+    Raises:
+        ValueError: 任一界的高寬不是 `INFER_HEIGHT` × `INFER_WIDTH`，或 batch 維不是
+            `1`–`maximum[0]`（`opt` 的 batch 必須等於上界）。
+    """
+    expected_hw = (INFER_HEIGHT, INFER_WIDTH)
+    problems = [
+        f"{label} 是 {shape}"
+        for label, shape in (("min", minimum), ("opt", opt), ("max", maximum))
+        if tuple(shape[2:]) != expected_hw
+    ]
+    if problems:
+        raise ValueError(
+            f"引擎 optimization profile 的空間維不是全部釘在 {expected_hw}："
+            + "、".join(problems)
+            + "。高寬是 dynamic axes，這顆引擎照樣跑得完、框也對，只是 kernel 是為"
+            "一整個尺寸範圍挑的——症狀只有變慢（T4 上 2.3%～6.1%）與每個 execution "
+            "context 多吃約 1 GB 裝置記憶體。請用 `tools/build_engine.py` 重建。"
+        )
+    if int(minimum[0]) != 1:
+        raise ValueError(
+            f"引擎 optimization profile 的 batch 下界是 {int(minimum[0])}，必須是 1。"
+            "湊不滿批是常態而非例外（T4 上實測一次跑完出現 1 到 16 全部 16 種批次），"
+            "下界大於 1 會讓第一個小批次的 set_input_shape 回 False。"
+        )
+    if int(opt[0]) != int(maximum[0]):
+        raise ValueError(
+            f"引擎 optimization profile 的 opt batch 是 {int(opt[0])}、上界是 "
+            f"{int(maximum[0])}，兩者必須相同。本套件的目標是把批次湊滿，opt 訂在"
+            "上界以外等於為一個不是主要工作點的批次挑 kernel。"
+        )
+
+
 class TrtRunner:
     """一顆 TensorRT 引擎與它的 execution context，只提供「非同步排一批進 stream」。
 
@@ -144,8 +200,8 @@ class TrtRunner:
 
         Raises:
             ValueError: 檔頭不是 ultralytics 的 metadata 格式、引擎的 I/O 張量不是
-                恰好一入一出、輸入 dtype 不是 float32、輸入 opt 高寬不是推論尺寸，
-                或輸出的最後一維不是 `END2END_COLUMNS`。
+                恰好一入一出、輸入 dtype 不是 float32、optimization profile 的三個界
+                不符 `check_profile_shapes`，或輸出的最後一維不是 `END2END_COLUMNS`。
             RuntimeError: 引擎 deserialize 失敗，或建不出 execution context
                 （兩者都只回 `None` 而不拋錯）。
         """
@@ -200,17 +256,12 @@ class TrtRunner:
                 "的框。"
             )
 
-        _min, opt, maximum = self._engine.get_tensor_profile_shape(self._input_name, 0)
+        minimum, opt, maximum = self._engine.get_tensor_profile_shape(
+            self._input_name, 0
+        )
+        check_profile_shapes(tuple(minimum), tuple(opt), tuple(maximum))
         self.max_batch = int(maximum[0])
         self.input_height, self.input_width = int(opt[2]), int(opt[3])
-        if (self.input_height, self.input_width) != (INFER_HEIGHT, INFER_WIDTH):
-            raise ValueError(
-                f"引擎 optimization profile 的 opt 高寬是 "
-                f"({self.input_height}, {self.input_width})，本套件送進去的一律是 "
-                f"({INFER_HEIGHT}, {INFER_WIDTH})。高寬是 dynamic axes，這顆引擎照樣"
-                "跑得完、框也對，只是所有 kernel 都是為別的尺寸挑的——症狀只有變慢。"
-                "請用 `tools/build_engine.py` 重建。"
-            )
 
         output_shape = tuple(self._engine.get_tensor_shape(self._output_name))
         if len(output_shape) != 3 or output_shape[-1] != END2END_COLUMNS:

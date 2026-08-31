@@ -1,4 +1,5 @@
-"""`tools/build_engine.py::verify_engine` 對精度旗標的把關。
+"""`tools/build_engine.py` 的純資料部分：optimization profile 的三個界，以及
+`verify_engine` 對精度旗標的把關。
 
 C18（PR #154）把精度檢查改成宣告式、建置期與載入期共用同一份宣告
 （`engine_metadata.EXPECTED_PRECISION_ARGS`／`validate_engine_precision`），但只有
@@ -9,6 +10,10 @@ C18（PR #154）把精度檢查改成宣告式、建置期與載入期共用同�
 
 精度判準本身的完整 case（FP16 通過／FP32 擋下／INT8 擋下／缺欄擋下）在
 test_engine_metadata.py，這裡只釘「`verify_engine` 有呼叫到它、且排在 GPU 探測之前」。
+
+`profile_shapes` 的部分釘的是 C21／ADR-015 的那次收窄：空間維三個界都是推論尺寸、
+batch 維是 `1`–`--batch`。判準本身（含舊的寬 profile 引擎要被擋下）在
+test_trt_runner.py 的 `check_profile_shapes`，這裡只釘建置端產生的值餵得過它。
 """
 
 import json
@@ -22,6 +27,8 @@ from video_analyze.services.engine_metadata import (
     VFA_METADATA_SCHEMA,
     GpuEnvironment,
 )
+from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
+from video_analyze.services.trt_runner import check_profile_shapes
 
 _ENV = GpuEnvironment(
     compute_capability="7.5",
@@ -35,7 +42,15 @@ _SHA = "a" * 64
 
 
 def _metadata(args: dict) -> dict:
+    """一份完整的引擎檔頭。**必填鍵一個都不能少**：`verify_engine` 的第一道
+    `validate_engine_header` 會擋下缺鍵的檔頭，而這幾支測試要驗的是後面那道精度檢查。
+    """
     return {
+        "stride": 32,
+        "task": "detect",
+        "imgsz": [INFER_HEIGHT, INFER_WIDTH],
+        "channels": 3,
+        "end2end": True,
         "names": {0: "head", 1: "vbody", 2: "fbody"},
         "batch": 16,
         "args": args,
@@ -88,3 +103,36 @@ def test_verify_engine_rejects_a_non_fp16_engine(args, monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="int8"):
         build_engine.verify_engine(engine, batch=16, expected_sha256=_SHA)
+
+
+@pytest.mark.parametrize("batch", [1, 2, 16])
+def test_profile_shapes_pin_the_spatial_dims_and_leave_batch_dynamic(batch):
+    """空間維三個界都是推論尺寸（收窄的全部內容），batch 維仍是 1–`--batch`。
+
+    收窄之前 ultralytics 給的是 `min=(1,3,32,32)／max=(16,3,768,1280)`：下界是一個
+    永遠跑不起來的形狀（32×32 不到 300 個 anchor，end2end head 的 `TopK(K=300)` 在
+    建置期就明著警告），上界是 `workspace` 當倍數的副產物。兩個界都在限制 tactic 的
+    選擇範圍，而執行期的高寬只有一種。
+    """
+    minimum, opt, maximum = build_engine.profile_shapes(batch)
+
+    assert minimum == (1, 3, INFER_HEIGHT, INFER_WIDTH)
+    assert opt == (batch, 3, INFER_HEIGHT, INFER_WIDTH)
+    assert maximum == (batch, 3, INFER_HEIGHT, INFER_WIDTH)
+
+
+@pytest.mark.parametrize("batch", [1, 2, 16])
+def test_profile_shapes_pass_the_load_time_check(batch):
+    """建置端產生的界，載入端要收得下。
+
+    兩邊各寫一份判準的話，收窄過的引擎會在自己的載入檢查上被擋下，而症狀是「剛建好的
+    引擎跑不起來」——所以這裡直接把 `profile_shapes` 的輸出餵給
+    `trt_runner.check_profile_shapes`。
+    """
+    check_profile_shapes(*build_engine.profile_shapes(batch))
+
+
+def test_profile_shapes_rejects_a_batch_below_one():
+    """batch 維上界小於 1 的 profile 建得出來，但任何一批都送不進去。"""
+    with pytest.raises(ValueError, match="必須 >= 1"):
+        build_engine.profile_shapes(0)
