@@ -377,7 +377,13 @@ def validate_engine_precision(metadata: dict) -> None:
     FP16 flag 設成真（INT8 只是多開一個 flag），只驗 `half` 對 INT8 引擎完全照過——
     2026-08-30 的實測就是這個缺口：一顆 INT8 引擎在不改本 repo 任何一行的情況下被正式
     推論路徑載入、跑完九路、產出欄位與格式完全正常的 `tracking_results.parquet`，只有
-    數字變了（總偵測數 −15.75%、下游 `entries` −10.36%）。
+    數字變了（總偵測數 −15.75%、下游 `entries` −10.36%）。**這道檢查擋的不是
+    `model.export(int8=True)`**：ultralytics 8.4.75 的 `exporter.py:550-552` 在
+    `half and int8` 同時為真時會強制把 `half` 覆寫成 `False`，所以走官方 `export()`
+    產出的 INT8 引擎，檔頭寫的就是 `half=False`，早已被 `half` 那項擋下。實測擋不住的
+    那顆是**自建 builder ＋手動覆蓋檔頭**的產物——威脅模型是「不經
+    `tools/build_engine.py::export_engine` 產出的引擎」，這道檢查驗的又只是**檔頭宣告
+    的值**，不是引擎本體實際的量化行為：**檔頭被改寫成看似合規的值，這裡就擋不到**。
 
     **缺欄一律視為不符**：沒有這個欄位不代表「沒開那個精度」，代表這顆引擎的 exporter
     版本或匯出路徑與預期不同，此時無法判定實際精度，不能放行。
