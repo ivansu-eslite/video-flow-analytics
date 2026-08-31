@@ -148,8 +148,10 @@ def detect(
         kwargs["half"] = True
     out = []
     # 逐張送，避免批次組成不同造成的差異混進來
-    for f in frames:
+    for index, f in enumerate(frames):
         r = model.predict([f], **kwargs)[0]
+        if index == 0:
+            _check_engine_infer_shape(model, f)
         if r.boxes is None or len(r.boxes) == 0:
             out.append(np.zeros((0, 6), dtype=np.float64))
             continue
@@ -158,6 +160,36 @@ def detect(
         cls = r.boxes.cls.cpu().numpy().astype(np.float64).reshape(-1, 1)
         out.append(np.hstack([xyxy, conf, cls]))
     return out
+
+
+def _check_engine_infer_shape(model: YOLO, frame: np.ndarray) -> None:
+    """引擎那側核對第一張畫面實際進入推論的高寬；`.pt` 那側沒有 binding，直接略過。
+
+    `_INFER_IMGSZ` 只在 `auto=True` 的 letterbox 收斂到 384×640 時才等於推論尺寸，而
+    **那不是所有長寬比都成立**：本 bucket 的四台（1920×1080 與 3840×2160）都收斂到
+    384×640，但例如 1440×1080 會得到 384×512。收窄 profile 之前那種形狀落在 max 界
+    （768×1280）內、跑得對；收窄之後它出界，而 `nn/backends/tensorrt.py` 呼叫
+    `set_input_shape` 不檢查回傳值，接著以 context 上一個 shape 執行——四道門檻多半會
+    因為偏差爆掉而擋下，但訊息會指向「比對沒過」而不是原因。
+
+    Args:
+        model: 已經至少 predict 過一次的 `YOLO`。
+        frame: 剛送進去的那張畫面，只用於錯誤訊息。
+
+    Raises:
+        SystemExit: 引擎實際吃到的高寬不是 `_INFER_IMGSZ`。
+    """
+    bindings = getattr(getattr(model.predictor, "model", None), "bindings", None)
+    if not bindings or "images" not in bindings:
+        return
+    shape = tuple(bindings["images"].shape)
+    if shape[2:] != _INFER_IMGSZ:
+        raise SystemExit(
+            f"引擎實際吃到的高寬是 {shape[2:]}，不是 {_INFER_IMGSZ}——來源畫面 "
+            f"{frame.shape[1]}×{frame.shape[0]} 經 letterbox 收斂不到推論尺寸。"
+            "收窄 profile 之後這個形狀落在 optimization profile 外，而 TensorRT 的 "
+            "`set_input_shape` 只回 False、不拋錯。請改用 16:9 的取樣來源。"
+        )
 
 
 def match_boxes(

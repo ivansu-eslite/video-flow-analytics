@@ -36,7 +36,8 @@ ONNX 中繼檔仍由 ultralytics 匯出（`format="onnx"`、`half=False`、`dyna
 `simplify=True`、`imgsz=(384, 640)`），之後的 builder 全部在
 `build_engine.build_serialized_engine`：FP16 builder flag、單一 optimization profile、
 `build_serialized_network`。設定刻意複製 `onnx2engine` 在本工具的呼叫下實際生效的那一組，
-只改 profile 一項。
+只改 optimization profile 與 `profiling_verbosity` 兩項；builder logger 的 severity 一併從
+`INFO` 降到 `WARNING`（不影響引擎，建置期警告仍看得到）。
 
 **`half=False` 是必要的。** 在 `format="engine"` 下 `half=True` 只作用於 builder flag
 （`exporter.py` 只對 `fmt in {onnx, torchscript}` 呼叫 `model.half()`），所以 ultralytics

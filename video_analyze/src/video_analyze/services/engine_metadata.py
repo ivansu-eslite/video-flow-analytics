@@ -537,6 +537,11 @@ def write_engine_with_metadata(metadata: dict, engine: bytes, dest: Path) -> Non
     `vfa.train.*` 都可能有）把長度寫短——`read_engine_metadata` 讀到截斷的 JSON 而
     解析失敗，或長度剛好還解得開時 `TrtRunner` 從錯誤的位移開始 deserialize。
 
+    **先寫同目錄的暫存檔再 `rename`**：引擎有數十 MB，寫到一半失敗（磁碟滿、被中斷）
+    留下的是一顆檔頭正常、引擎本體截斷的產物——`read_engine_metadata` 讀得過，
+    `deserialize_cuda_engine` 才失敗，而訊息指向「引擎檔本身損壞」。同目錄的 `rename`
+    在同一個檔案系統上是原子的。
+
     Args:
         metadata: 完整的引擎檔頭 dict（`build_engine_metadata` 的輸出）。
         engine: `build_serialized_network` 產出的引擎位元組。
@@ -553,9 +558,14 @@ def write_engine_with_metadata(metadata: dict, engine: bytes, dest: Path) -> Non
             "「不帶 ultralytics 檔頭」而擋下。"
         )
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest, "wb") as handle:
-        handle.write(
-            len(payload).to_bytes(_META_LEN_BYTES, byteorder="little", signed=True)
-        )
-        handle.write(payload)
-        handle.write(engine)
+    partial = dest.with_name(dest.name + ".partial")
+    try:
+        with open(partial, "wb") as handle:
+            handle.write(
+                len(payload).to_bytes(_META_LEN_BYTES, byteorder="little", signed=True)
+            )
+            handle.write(payload)
+            handle.write(engine)
+        partial.replace(dest)
+    finally:
+        partial.unlink(missing_ok=True)

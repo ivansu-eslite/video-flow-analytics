@@ -18,6 +18,7 @@ from dataclasses import replace
 import pytest
 
 from video_analyze.services.engine_metadata import (
+    ENGINE_EXPORT_ARG_KEYS,
     VFA_METADATA_KEY,
     VFA_METADATA_SCHEMA,
     GpuEnvironment,
@@ -429,3 +430,19 @@ def test_written_header_is_readable_by_the_precision_check(tmp_path):
     write_engine_with_metadata(metadata, b"\x00engine", dest)
 
     validate_engine_precision(read_engine_metadata(dest))
+
+
+def test_engine_arg_keys_stay_pinned_to_the_ultralytics_declaration():
+    """`ENGINE_EXPORT_ARG_KEYS` 是手抄的，判準要釘回 ultralytics 自己的宣告。
+
+    那份清單是「引擎檔頭與 ultralytics 匯出的引擎長得一樣」的唯一依據。ultralytics 改了
+    `export_formats()` 裡 TensorRT 那列的 `Arguments` 之後，這裡沒有訊號——檔頭會少寫
+    （或多寫）一個 `args` 鍵，而引擎照樣建得出來、載得起來。ultralytics 的版本是 pin 死
+    的，所以這支只在升版時會紅，那正是要它紅的時候。
+    """
+    from ultralytics.engine.exporter import export_formats
+
+    formats = export_formats()
+    declared = dict(zip(formats["Argument"], formats["Arguments"], strict=True))
+
+    assert set(ENGINE_EXPORT_ARG_KEYS) == set(declared["engine"])

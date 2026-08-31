@@ -228,7 +228,9 @@ def build_serialized_engine(onnx_path: Path, batch: int) -> bytes:
     """從 ONNX 建出 FP16 引擎的序列化位元組（不含檔頭）。
 
     刻意複製 ultralytics `utils/export/engine.py::onnx2engine` 在本工具的呼叫下實際
-    生效的設定，只改 optimization profile。兩處值得寫下來：
+    生效的設定，只改 optimization profile 與 `profiling_verbosity` 兩項（另外 builder
+    logger 的 severity 從 ultralytics 的 `INFO` 降到 `WARNING`，那一項不影響引擎）。
+    三處值得寫下來：
 
     - **不設 `set_memory_pool_limit`。** ultralytics 的 `workspace` 預設 `None` →
       `workspace_bytes = 0` → 整段略過，TensorRT 的預設上限就是整張卡可用的記憶體。

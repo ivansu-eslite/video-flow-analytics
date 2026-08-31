@@ -133,6 +133,24 @@ def test_profile_shapes_pass_the_load_time_check(batch):
 
 
 def test_profile_shapes_rejects_a_batch_below_one():
-    """batch 維上界小於 1 的 profile 建得出來，但任何一批都送不進去。"""
+    """`--batch` 小於 1 在組出 profile 之前就擋下——那個 profile 任何一批都送不進去。"""
     with pytest.raises(ValueError, match="必須 >= 1"):
         build_engine.profile_shapes(0)
+
+
+def test_verify_engine_rejects_a_header_missing_the_end2end_flag(monkeypatch, tmp_path):
+    """檔頭缺 `end2end` 要在碰 GPU 之前擋下，理由與精度那兩支同型。
+
+    缺鍵**不會**讓載入崩：`apply_metadata` 走 `metadata.get(...)`、這幾個鍵全部有預設
+    值。`end2end` 缺漏時算出 `False`，predictor 會對 `(B, 300, 6)` 的 end2end 輸出再跑
+    一次完整 NMS，把類別分數當成 conf 與 cls——建置期驗收與 `compare_backend.py` 整批
+    比錯而沒有任何例外。所以 `verify_engine` 的第一道就是這個檔頭檢查。
+    """
+    monkeypatch.setattr(build_engine, "current_gpu_environment", lambda: _ENV)
+    monkeypatch.setattr(build_engine, "YOLO", _reject_gpu_probe)
+    metadata = _metadata({"half": True, "int8": False, "dynamic": True, "batch": 16})
+    del metadata["end2end"]
+    engine = _write_engine(tmp_path / "fake_sm75.engine", metadata)
+
+    with pytest.raises(ValueError, match="end2end"):
+        build_engine.verify_engine(engine, batch=16, expected_sha256=_SHA)
