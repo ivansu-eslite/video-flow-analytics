@@ -20,6 +20,7 @@ from video_analyze.services.engine_metadata import (
     _tensorrt_package,
     read_engine_metadata,
     validate_engine_metadata,
+    validate_engine_precision,
 )
 
 _ENV = GpuEnvironment(
@@ -49,11 +50,13 @@ def _vfa(**overrides) -> dict:
     return block
 
 
-def _metadata(**vfa_overrides) -> dict:
+def _metadata(args: dict | None = None, **vfa_overrides) -> dict:
     return {
         "names": {0: "head", 1: "vbody", 2: "fbody"},
         "batch": 16,
-        "args": {"half": True, "dynamic": True, "batch": 16},
+        "args": args
+        if args is not None
+        else {"half": True, "int8": False, "dynamic": True, "batch": 16},
         VFA_METADATA_KEY: _vfa(**vfa_overrides),
     }
 
@@ -233,3 +236,48 @@ def test_tensorrt_package_returns_none_when_not_installed(monkeypatch, capsys):
 
     assert _tensorrt_package() is None
     assert '"severity": "WARNING"' in capsys.readouterr().out
+
+
+def test_validate_precision_accepts_an_fp16_engine():
+    validate_engine_precision(_metadata())
+
+
+def test_validate_precision_rejects_an_fp32_engine():
+    """精度驗的是 `metadata["args"]["half"]`，不是 I/O binding 的 dtype。
+
+    FP16 引擎的 I/O binding 仍是 FP32（`TrtRunner` 那道 dtype 檢查驗的就是這件事）——
+    拿 binding 的 dtype 當判準會**永遠**判定「不是 FP16」，於是這道檢查只能被拿掉或
+    永遠失敗，兩種都等於沒有在驗精度。
+    """
+    args = {"half": False, "int8": False, "dynamic": True}
+
+    with pytest.raises(ValueError, match="half"):
+        validate_engine_precision(_metadata(args=args))
+
+
+def test_validate_precision_rejects_an_int8_engine():
+    """INT8 引擎可以同時把 FP16 flag 設成真——INT8 只是多開一個 flag。只驗 `half` 的
+    舊版檢查對這種引擎完全照過：2026-08-30 的實測，一顆 INT8 引擎在不改本 repo 任何
+    一行的情況下被正式路徑載入、跑完九路、產出格式完全正常的 parquet，只有數字變了。
+    """
+    args = {"half": True, "int8": True, "dynamic": True}
+
+    with pytest.raises(ValueError, match="int8"):
+        validate_engine_precision(_metadata(args=args))
+
+
+def test_validate_precision_rejects_when_the_int8_flag_is_missing():
+    """缺 `int8` 欄不是「沒開那個精度」，是這顆引擎的匯出路徑與預期不同，此時無法
+    判定實際精度，一律擋下而不是靜默放行。"""
+    args = {"half": True, "dynamic": True}
+
+    with pytest.raises(ValueError, match="int8"):
+        validate_engine_precision(_metadata(args=args))
+
+
+def test_validate_precision_rejects_when_args_is_entirely_missing():
+    """整段 `args` 都不存在時，`half`／`int8` 兩項一起以缺欄回報，不是無聲通過。"""
+    metadata = {"names": {}, VFA_METADATA_KEY: _vfa()}
+
+    with pytest.raises(ValueError, match="half"):
+        validate_engine_precision(metadata)

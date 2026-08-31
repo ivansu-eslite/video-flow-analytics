@@ -225,8 +225,10 @@ forward 批次）。產物名為 `<權重 stem>_sm<SM>.engine`。
 
 1. 以 `half=True, dynamic=True, imgsz=(384, 640)` 匯出，並用 `on_export_start` callback
    把來源權重身分、SM、TensorRT／CUDA／驅動版本與訓練追溯資訊注入 metadata。
-2. 驗引擎本身：metadata 對得上當下環境、`args.half` 為真、`args.dynamic` 為真、最大批次
-   等於 `--batch`，並真的用滿批跑一格確認實際形狀是 384×640。
+2. 驗引擎本身：metadata 對得上當下環境、精度旗標逐項符合宣告（`args.half` 為真、
+   `args.int8` 為假；缺欄一律視為不符，見 `engine_metadata.validate_engine_precision`）、
+   `args.dynamic` 為真、最大批次等於 `--batch`，並真的用滿批跑一格確認實際形狀是
+   384×640。
 3. 對 Torch FP32 逐框比對（`tools/compare_backend.py`），比的是**框底邊中點的座標偏差**
    ——下游的落腳點、跨線進出、區域佔用都從這個點算。
 4. 套四道門檻（`compare_backend.check_report`）：落腳點偏差 **p99** ≤ 1.20 px、偏差
@@ -464,7 +466,10 @@ N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程�
   當下環境不符
   （compute capability／TensorRT 版本／TensorRT wheel 變體／來源權重 hash，四項各自拋錯、
   訊息指出是哪一項；驅動版本與 torch 的 CUDA 建置版本只記 warning——它們不在 TensorRT 對
-  引擎的約束裡）、引擎不是 FP16 建的。沒有 CUDA 也是中止而非 fallback CPU。
+  引擎的約束裡）、引擎的精度旗標與宣告不符（`args.half` 非真或 `args.int8` 非假，缺欄
+  一律視為不符——`engine_metadata.validate_engine_precision`，逐項比對而非只驗
+  `half`：INT8 引擎可以同時把 FP16 flag 設成真，只驗 `half` 對這種引擎完全照過）。
+  沒有 CUDA 也是中止而非 fallback CPU。
 - **引擎不是 dynamic 建的 → 拋 `ValueError`**。靜態引擎會通過其餘全部載入檢查，然後在
   第一個沒湊滿的批次上被 `set_input_shape` 擋下（訊息看不出原因）——而湊不滿批是
   常態：T4 上實測一次跑完出現 16 種不同的批次大小。
