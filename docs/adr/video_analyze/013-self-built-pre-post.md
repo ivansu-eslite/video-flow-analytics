@@ -46,7 +46,8 @@ postprocess 則是**逐格**在 GPU 上做 boolean index 再逐格 `.cpu()`：�
   `.contiguous()`），而 TensorRT 取的是 `im.data_ptr()`、不看 stride——非連續張量會被
   當成連續的讀進去，等於餵了一張錯位的影像。
 - **是 `.float()` 不是 `.half()`**。FP16 引擎的 I/O binding 仍是 FP32
-  （`_validate_precision` 的 docstring 已記這件事），送 FP16 進去會變快又變得不一樣。
+  （`trt_runner.py` 的 dtype 檢查與 `engine_metadata.validate_engine_precision` 的
+  docstring 已記這件事），送 FP16 進去會變快又變得不一樣。
   `AutoBackend` 建構時傳的 `fp16=False` 不是這件事的執行機制：engine 這條路徑上
   `TensorRTBackend.load_model` 會先把 `self.fp16` 設回 False、再依 input binding 的 dtype
   覆寫，`AutoBackend.forward` 讀的是覆寫後的 `self.backend.fp16`，建構子傳進來的值用不到。
