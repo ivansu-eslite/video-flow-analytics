@@ -219,8 +219,8 @@ class TrtRunner:
                 f"(B, num_det, {END2END_COLUMNS})。這顆引擎需要完整的 NMS，而本套件"
                 "只套用 end2end 的三行過濾（conf → 截斷 → classes）——那會把類別分數"
                 "當成 conf 與 cls，得到一堆座標是 xywh 的框，而輸出檔的欄位、列數、"
-                "格式全部正常。請用 `tools/build_engine.py` 重建（它以 `nms=True` "
-                "匯出）。"
+                "格式全部正常。請用 `tools/build_engine.py` 重建（它匯出的模型本身是 "
+                "end2end，NMS-free head 在 graph 內以兩個 `TopK` 完成，不靠 `nms=True`）。"
             )
         self.output_num_det = int(output_shape[1])
         # 已見過的推論張量形狀，用來讓「同一個形狀」只記一次 log
