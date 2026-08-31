@@ -317,11 +317,11 @@ class YOLODetector:
 
         **看 metadata 的那幾道排在載入引擎之前**（`_require_engine_file`、
         `validate_engine_metadata`、`validate_engine_precision`、`_validate_dynamic`、
-        `_validate_classes`）：它們都只看引擎檔頭（ultralytics 把 `json.dumps(metadata)`
+        `_validate_classes`）：它們都只看引擎檔頭（`json.dumps(metadata)` 的長度與本體
         寫在引擎前面，見 `services/engine_metadata.py`），不合格的引擎不必先吃掉
         deserialize 的數秒與數 GB 顯存。**看引擎自己宣告的那幾道在 `TrtRunner` 裡**
-        （一入一出、輸入 dtype、profile 的 opt 高寬、輸出最後一維是不是 6）：那些值
-        deserialize 之後才拿得到，而且要的正是引擎本身而不是檔頭裡的字串。
+        （一入一出、輸入 dtype、profile 三個界的空間維與 batch 維、輸出最後一維是不是
+        6）：那些值 deserialize 之後才拿得到，而且要的正是引擎本身而不是檔頭裡的字串。
 
         **兩條 stream 都是新建的非預設 stream**：TensorRT 對 `stream_handle=0` 會插入
         `cudaDeviceSynchronize`，整條流水會退化成「送出一批就等它算完」，而輸出檔一

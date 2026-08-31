@@ -221,14 +221,36 @@ uv run --package video_analyze python video_analyze/tools/build_engine.py \
 尺度：ultralytics 對 in-memory list source 一次 forward 整個 list，設定值就是實際的
 forward 批次）。產物名為 `<權重 stem>_sm<SM>.engine`。
 
+**引擎由本工具自己建，不走 ultralytics 的引擎匯出**（[ADR-015](../docs/adr/video_analyze/015-narrow-engine-profile.md)）。
+ONNX 中繼檔仍由 ultralytics 匯出，之後的 builder／network／optimization profile／config
+都在 `build_serialized_engine`，檔頭由 `services/engine_metadata.py` 寫。接管的理由只有
+一個——optimization profile 的空間維：
+
+| | 收窄前（ultralytics） | 收窄後（本工具） |
+| --- | --- | --- |
+| min | `(1, 3, 32, 32)` | `(1, 3, 384, 640)` |
+| opt | `(16, 3, 384, 640)` | `(16, 3, 384, 640)` |
+| max | `(16, 3, 768, 1280)` | `(16, 3, 384, 640)` |
+
+兩個舊界都不是誰選的（上界是 `workspace` 當倍數的副產物，下界是 32×32——不到 300 個
+anchor，end2end head 的 `TopK(K=300)` 在建置期就明著警告），而執行期的高寬只有一種。
+T4 上量到 forward 快 2.3%～6.1%、每個 execution context 的裝置記憶體 1,329 MB → 332 MB。
+
+⚠ **這會擋下改動之前建的每一顆引擎**：`TrtRunner` 驗的是三個界，舊引擎的 opt 照樣是
+384×640、會通過其餘全部載入檢查，症狀只有變慢與多吃顯存，所以在載入期擋下。**升版順序
+是有向的：先在目標卡上重建引擎並發布，才能滾動映像檔。**
+
 工具做四件事，**任何一關沒過就不留下產物**（先落在 `.unverified` 尾綴上，全過才改名）：
 
-1. 以 `half=True, dynamic=True, imgsz=(384, 640)` 匯出，並用 `on_export_start` callback
-   把來源權重身分、SM、TensorRT／CUDA／驅動版本與訓練追溯資訊注入 metadata。
-2. 驗引擎本身：metadata 對得上當下環境、精度旗標逐項符合宣告（`args.half` 為真、
-   `args.int8` 為假；缺欄一律視為不符，見 `engine_metadata.validate_engine_precision`）、
-   `args.dynamic` 為真、最大批次等於 `--batch`，並真的用滿批跑一格確認實際形狀是
-   384×640。
+1. 以 `half=False, dynamic=True, simplify=True, imgsz=(384, 640)` 匯出 ONNX 中繼檔
+   （`half` 在這一步必須是假，否則模型會真的 `.half()` 而得到 FP16 輸入 binding 的另一種
+   引擎），用 `on_export_start` callback 攔下 ultralytics 組好的 metadata，接上來源權重
+   身分、SM、TensorRT／CUDA／驅動版本與訓練追溯資訊，然後自建 builder 產出引擎並寫檔頭。
+2. 驗引擎本身：檔頭必填鍵存在且型別正確（`end2end` 還必須為真）、metadata 對得上當下
+   環境、精度旗標逐項符合宣告（`args.half` 為真、`args.int8` 為假；缺欄一律視為不符，見
+   `engine_metadata.validate_engine_precision`）、`args.dynamic` 為真、最大批次等於
+   `--batch`，接著用正式載入路徑（`TrtRunner`）確認**引擎自己宣告的** optimization
+   profile 三個界，最後真的用滿批跑一格確認實際形狀是 384×640。
 3. 對 Torch FP32 逐框比對（`tools/compare_backend.py`），比的是**框底邊中點的座標偏差**
    ——下游的落腳點、跨線進出、區域佔用都從這個點算。
 4. 套四道門檻（`compare_backend.check_report`）：落腳點偏差 **p99** ≤ 1.20 px、偏差
@@ -475,11 +497,12 @@ N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程�
   常態：T4 上實測一次跑完出現 16 種不同的批次大小。
 - **引擎自己宣告的 I/O 不合格 → 拋 `ValueError`**（`services/trt_runner.py`，
   deserialize 之後）：不是恰好一入一出、輸入 binding 的 dtype 不是 FP32、optimization
-  profile 的 opt 高寬不是 640×384、輸出 binding 的最後一維不是 6（即不是 end2end）。
-  四項一律取引擎自己宣告的值，不讀 JSON metadata 的對應欄位——後者改了不會改變引擎。
-  沒有內建 NMS 的引擎吐 `(B, 4 + nc, num_anchors)`，自建後處理那三行照樣跑得完，只是
-  把類別分數當成 conf 與 cls；opt 高寬不對的引擎則是框都對、只是所有 kernel 都為別的
-  尺寸挑（症狀只有變慢）。見 ADR-014。
+  profile 不符（空間維三個界不全是 640×384，或 batch 維不是 1–上界）、輸出 binding 的
+  最後一維不是 6（即不是 end2end）。四項一律取引擎自己宣告的值，不讀 JSON metadata 的
+  對應欄位——後者改了不會改變引擎。沒有內建 NMS 的引擎吐 `(B, 4 + nc, num_anchors)`，
+  自建後處理那三行照樣跑得完，只是把類別分數當成 conf 與 cls；profile 不對的引擎則是
+  框都對、只是所有 kernel 都為別的尺寸挑（症狀只有變慢與多吃顯存）——**沒收窄過的舊
+  引擎就落在這一條**，見 ADR-014 與 ADR-015。
 - **實際進入推論的張量形狀不是 640×384 → 拋 `ValueError`**，dtype 不是 float32、不是
   contiguous、不是 4D 或不在 CUDA 上亦然。驗的是本套件自己組出來、即將交給
   `execute_async_v3` 的那個張量。形狀這一項取代了 `_validate_imgsz`：dynamic 引擎不套用

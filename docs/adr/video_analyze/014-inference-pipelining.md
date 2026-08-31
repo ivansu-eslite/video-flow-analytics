@@ -33,6 +33,11 @@ execution context、從 optimization profile 讀 `max_batch` 與輸入高寬、
 檔頭的解析與 `services/engine_metadata.py` 共用同一支 `read_metadata_length`：引擎仍由
 ultralytics 的 exporter 產出，格式不是我們定的，各寫一份只會漂移。
 
+> **2026-08-31（[ADR-015](015-narrow-engine-profile.md)）**：引擎改由
+> `tools/build_engine.py` 自建 builder 產出，檔頭也由 `engine_metadata` 自己寫，所以
+> 「引擎仍由 ultralytics 的 exporter 產出」這句已不成立。**共用同一支
+> `read_metadata_length` 的理由不變**，而且更強了——現在讀與寫都在同一個模組。
+
 載入期四道 fail loud，判準一律取**引擎自己宣告的東西**，不是 JSON metadata（後者改了
 不會改變引擎）：
 
@@ -41,6 +46,9 @@ ultralytics 的 exporter 產出，格式不是我們定的，各寫一份只會�
    dtype 代表送進去的位元組會被重新解讀，而輸出仍是形狀正常的框。
 3. optimization profile 的 opt 高寬必須是 640×384。高寬是 dynamic axes，opt 不對的引擎
    照樣跑得完、框也對，只是所有 kernel 都是為別的尺寸挑的——**症狀只有變慢**。
+   （**ADR-015 起改驗三個界**：min／opt／max 的空間維都必須是 640×384，batch 維必須是
+   `1`–上界。收窄 profile 之後，「opt 對但 min／max 沒收窄」的舊引擎是同一類失效——
+   跑得完、框也對，只是慢 2.3%～6.1% 且每個 execution context 多吃約 1 GB。）
 4. 輸出 binding 的最後一維必須是 6（end2end）。這一項從 ADR-013 的「載入末端跑一次
    zeros forward 看輸出形狀」移到這裡：兩者的資訊來源是同一個（binding 宣告決定實跑的
    輸出形狀），但在這裡驗不必先配置緩衝，而且測得到——CI 上沒有 GPU 也沒有引擎，

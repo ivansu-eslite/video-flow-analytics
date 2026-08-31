@@ -48,6 +48,19 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
+from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
+
+# 每一次 `predict` 都要帶的推論尺寸。**不是可有可無的參數**：predictor 的 warmup 不走
+# letterbox，直接用 `args.imgsz`（`engine/predictor.py` 的
+# `self.model.warmup(imgsz=(bs, ch, *self.imgsz))`），而 dynamic 引擎不把檔頭的 `imgsz`
+# 抄進 `args.imgsz`，所以不指定就是預設的 640×640。引擎的 optimization profile 收窄成
+# min=opt=max=384×640 之後（ADR-015）那個形狀出界，而 `nn/backends/tensorrt.py` 呼叫
+# `set_input_shape` **不檢查回傳值**，接著以 context 上一個 shape 執行——這裡逐張送
+# （batch 1），warmup 緩衝只有 1×3×640×640×4 而引擎照 16×3×384×640 讀，是越界讀取，
+# 最好的情況是拿到垃圾。帶上 384×640 之後 warmup 與 predict 同形狀；對 16:9 來源
+# letterbox 的結果與預設值逐值相同（兩者在 `auto=True` 下都收斂到 384×640）。
+_INFER_IMGSZ = (INFER_HEIGHT, INFER_WIDTH)
+
 # 驗收判準。**看 p99 而不是 max**，這一條要寫清楚理由：既有基準的兩個數字
 # （FP16 的 1.20 px、TensorRT 已驗的 1.16 px）分別是 **277 個框的 max** 與 **277 個框的
 # p99**，而本工具預設取樣 2000 個框以上。max 是樣本數的函數（樣本越多、尾巴越長），拿
@@ -103,7 +116,12 @@ def build_model(weights: Path, classes: list[int], half: bool) -> YOLO:
     if weights.suffix == ".pt":
         model = model.to("cuda")
     warmup = np.zeros((1080, 1920, 3), dtype=np.uint8)
-    kwargs: dict = {"verbose": False, "classes": classes, "device": 0}
+    kwargs: dict = {
+        "verbose": False,
+        "classes": classes,
+        "device": 0,
+        "imgsz": _INFER_IMGSZ,
+    }
     if half:
         kwargs["half"] = True
     model.predict([warmup], **kwargs)
@@ -125,13 +143,15 @@ def detect(
     model: YOLO, frames: list[np.ndarray], classes: list[int], half: bool
 ) -> list[np.ndarray]:
     """回傳每張畫面的偵測框陣列 [x1, y1, x2, y2, conf, cls]。"""
-    kwargs: dict = {"verbose": False, "classes": classes}
+    kwargs: dict = {"verbose": False, "classes": classes, "imgsz": _INFER_IMGSZ}
     if half:
         kwargs["half"] = True
     out = []
     # 逐張送，避免批次組成不同造成的差異混進來
-    for f in frames:
+    for index, f in enumerate(frames):
         r = model.predict([f], **kwargs)[0]
+        if index == 0:
+            _check_engine_infer_shape(model, f)
         if r.boxes is None or len(r.boxes) == 0:
             out.append(np.zeros((0, 6), dtype=np.float64))
             continue
@@ -140,6 +160,36 @@ def detect(
         cls = r.boxes.cls.cpu().numpy().astype(np.float64).reshape(-1, 1)
         out.append(np.hstack([xyxy, conf, cls]))
     return out
+
+
+def _check_engine_infer_shape(model: YOLO, frame: np.ndarray) -> None:
+    """引擎那側核對第一張畫面實際進入推論的高寬；`.pt` 那側沒有 binding，直接略過。
+
+    `_INFER_IMGSZ` 只在 `auto=True` 的 letterbox 收斂到 384×640 時才等於推論尺寸，而
+    **那不是所有長寬比都成立**：本 bucket 的四台（1920×1080 與 3840×2160）都收斂到
+    384×640，但例如 1440×1080 會得到 384×512。收窄 profile 之前那種形狀落在 max 界
+    （768×1280）內、跑得對；收窄之後它出界，而 `nn/backends/tensorrt.py` 呼叫
+    `set_input_shape` 不檢查回傳值，接著以 context 上一個 shape 執行——四道門檻多半會
+    因為偏差爆掉而擋下，但訊息會指向「比對沒過」而不是原因。
+
+    Args:
+        model: 已經至少 predict 過一次的 `YOLO`。
+        frame: 剛送進去的那張畫面，只用於錯誤訊息。
+
+    Raises:
+        SystemExit: 引擎實際吃到的高寬不是 `_INFER_IMGSZ`。
+    """
+    bindings = getattr(getattr(model.predictor, "model", None), "bindings", None)
+    if not bindings or "images" not in bindings:
+        return
+    shape = tuple(bindings["images"].shape)
+    if shape[2:] != _INFER_IMGSZ:
+        raise SystemExit(
+            f"引擎實際吃到的高寬是 {shape[2:]}，不是 {_INFER_IMGSZ}——來源畫面 "
+            f"{frame.shape[1]}×{frame.shape[0]} 經 letterbox 收斂不到推論尺寸。"
+            "收窄 profile 之後這個形狀落在 optimization profile 外，而 TensorRT 的 "
+            "`set_input_shape` 只回 False、不拋錯。請改用 16:9 的取樣來源。"
+        )
 
 
 def match_boxes(

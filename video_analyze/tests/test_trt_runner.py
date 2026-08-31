@@ -3,7 +3,8 @@
 接手 `AutoBackend` 之後（ADR-014），「這顆引擎能不能用」有一半的判準從 ultralytics 搬
 到了本模組。搬過來的每一項都是**「引擎跑得完、輸出檔也完全正常，只有數值或成本不對」**：
 多輸入的引擎只會綁到其中一個 binding、輸出最後一維不是 6 代表引擎沒有內建 NMS（後處理
-會把類別分數當成 conf）、profile 的 opt 高寬不對則是一整天都跑在為別的尺寸挑的 kernel 上。
+會把類別分數當成 conf）、profile 的空間維不對則是一整天都跑在為別的尺寸挑的 kernel 上
+（收窄 profile 之後，「沒收窄過的舊引擎」也是同一類——見 ADR-015）。
 
 載入期那幾支用假的 `trt.Runtime` 跑（引擎檔頭是真的、序列化的引擎是假的），因此在 CI 上
 也測得到；真引擎與 GPU 定序的兩支標了 `skipif`，只在地端跑。
@@ -23,6 +24,7 @@ from video_analyze.services.trt_runner import (
     TrtRunner,
     _check_infer_shape_of,
     _check_infer_tensor,
+    check_profile_shapes,
 )
 
 _NO_GPU = not torch.cuda.is_available()
@@ -126,7 +128,13 @@ def _runner(monkeypatch, tmp_path, engine) -> TrtRunner:
     return TrtRunner(_engine_file(tmp_path))
 
 
-_PROFILE = ((1, 3, 32, 32), (16, 3, INFER_HEIGHT, INFER_WIDTH), (16, 3, 768, 1280))
+# 收窄後的 profile（ADR-015）：空間維三個界全部釘在推論尺寸，batch 維 1–16。
+_SPATIAL = (3, INFER_HEIGHT, INFER_WIDTH)
+_PROFILE = ((1, *_SPATIAL), (16, *_SPATIAL), (16, *_SPATIAL))
+
+# 收窄之前 ultralytics 給的那組界：下界是一個永遠跑不起來的形狀、上界是 `workspace`
+# 當倍數的副產物，opt 則已經是推論尺寸。
+_WIDE_PROFILE = ((1, 3, 32, 32), (16, *_SPATIAL), (16, 3, 768, 1280))
 
 
 def test_runner_reads_the_batch_ceiling_and_input_size_from_the_profile(
@@ -182,8 +190,39 @@ def test_runner_rejects_an_engine_built_for_another_input_size(monkeypatch, tmp_
     """
     profile = ((1, 3, 32, 32), (16, 3, 768, 1280), (16, 3, 768, 1280))
 
-    with pytest.raises(ValueError, match="opt 高寬"):
+    with pytest.raises(ValueError, match="空間維"):
         _runner(monkeypatch, tmp_path, _FakeEngine(_tensors(), profile))
+
+
+def test_runner_rejects_an_engine_whose_profile_was_never_narrowed(
+    monkeypatch, tmp_path
+):
+    """opt 對、min／max 沒收窄的舊引擎也要擋下。
+
+    這是收窄 profile（ADR-015）之前每一顆引擎的形狀：opt 已經是 384×640，所以它會通過
+    其餘全部載入檢查，症狀只有「forward 慢 2.3%～6.1%、每個 execution context 多吃約
+    1 GB 裝置記憶體」——與這個 `__init__` 裡別的檢查擋的是同一類失效。沒有這道檢查的
+    話，改動就變成「新引擎比較快，而舊引擎照樣載得起來」，兩者無從分辨。
+    """
+    with pytest.raises(ValueError, match="空間維"):
+        _runner(monkeypatch, tmp_path, _FakeEngine(_tensors(), _WIDE_PROFILE))
+
+
+def test_profile_check_rejects_a_batch_lower_bound_above_one():
+    """batch 下界大於 1 的引擎，第一個湊不滿的批次就送不進去。
+
+    湊不滿批是常態而非例外（T4 上實測一次跑完出現 1 到 16 全部 16 種批次）。這條在
+    `enqueue` 裡本來就 fail loud，但那是部署之後才看得到；載入期驗同一件事，建置工具
+    才擋得下。
+    """
+    with pytest.raises(ValueError, match="batch 下界"):
+        check_profile_shapes((2, *_SPATIAL), (16, *_SPATIAL), (16, *_SPATIAL))
+
+
+def test_profile_check_rejects_an_opt_batch_below_the_ceiling():
+    """opt batch 不等於上界代表 kernel 是為一個不是主要工作點的批次挑的。"""
+    with pytest.raises(ValueError, match="opt batch"):
+        check_profile_shapes((1, *_SPATIAL), (8, *_SPATIAL), (16, *_SPATIAL))
 
 
 def test_runner_reports_a_failed_deserialize_instead_of_crashing_later(

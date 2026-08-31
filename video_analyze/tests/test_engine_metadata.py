@@ -1,5 +1,9 @@
 """引擎自帶 metadata 的讀取與驗證。
 
+接管 builder 之後（ADR-015），檔頭改由本模組**寫**，所以除了讀與驗，還多了組裝
+（`build_engine_metadata`）、必填鍵把關（`validate_engine_header`）與寫檔
+（`write_engine_with_metadata`）三支。
+
 這幾支釘的是**「跑的不是你以為的那顆引擎」**這一類：引擎是二進位產物，拿錯一顆
 （別張卡建的、別份權重建的、別版 TensorRT 建的）不會有任何症狀——載得起來、跑得出
 結果、parquet 的欄位與列數全部正常，只有數值不對。所以每一項不符都要**各自**中止，
@@ -14,13 +18,17 @@ from dataclasses import replace
 import pytest
 
 from video_analyze.services.engine_metadata import (
+    ENGINE_EXPORT_ARG_KEYS,
     VFA_METADATA_KEY,
     VFA_METADATA_SCHEMA,
     GpuEnvironment,
     _tensorrt_package,
+    build_engine_metadata,
     read_engine_metadata,
+    validate_engine_header,
     validate_engine_metadata,
     validate_engine_precision,
+    write_engine_with_metadata,
 )
 
 _ENV = GpuEnvironment(
@@ -281,3 +289,160 @@ def test_validate_precision_rejects_when_args_is_entirely_missing():
 
     with pytest.raises(ValueError, match="half"):
         validate_engine_precision(metadata)
+
+
+# --- 檔頭的組裝與寫入（接管 builder 之後才有的三支） ---------------------------------
+
+def _onnx_metadata(**overrides) -> dict:
+    """ONNX 匯出當下 `exporter.metadata` 的樣子。
+
+    `args` 是 `format="onnx"` 的 `fmt_keys` 裁出來的——比引擎那組多一個 `opset`，
+    而且 `half` 是 `False`（中繼 ONNX 刻意以 FP32 匯出）。
+    """
+    metadata = {
+        "description": "Ultralytics YOLO26m model trained on crowdhuman_triple.yaml",
+        "author": "Ultralytics",
+        "date": "2026-08-31T00:00:00",
+        "version": "8.4.75",
+        "license": "AGPL-3.0 License (https://ultralytics.com/license)",
+        "docs": "https://docs.ultralytics.com",
+        "stride": 32,
+        "task": "detect",
+        "batch": 16,
+        "imgsz": [384, 640],
+        "names": {0: "head", 1: "vbody", 2: "fbody"},
+        "args": {
+            "data": None,
+            "batch": 16,
+            "fraction": 1.0,
+            "half": False,
+            "int8": False,
+            "dynamic": True,
+            "opset": 19,
+            "simplify": True,
+            "nms": False,
+        },
+        "channels": 3,
+        "end2end": True,
+    }
+    metadata.update(overrides)
+    return metadata
+
+
+def test_build_engine_metadata_drops_opset_and_declares_fp16():
+    """引擎檔頭的 `args` 要與 ultralytics 走 `format="engine"` 匯出的那份同形。
+
+    兩處差異都是刻意的：`opset` 只在 ONNX 那組 `fmt_keys` 裡；`half` 在中繼 ONNX 是
+    `False`（`format="onnx"` 下 `half=True` 會真的把模型 `.half()`，得到 FP16 輸入
+    binding 的另一種引擎），引擎的 FP16 由 builder flag 給，檔頭要寫實際的精度——
+    寫錯的話 `validate_engine_precision` 會擋下自己剛建好的引擎。
+    """
+    metadata = build_engine_metadata(_onnx_metadata(), _vfa())
+
+    assert "opset" not in metadata["args"]
+    assert metadata["args"]["half"] is True
+    assert set(metadata["args"]) == {
+        "data",
+        "batch",
+        "fraction",
+        "half",
+        "int8",
+        "dynamic",
+        "simplify",
+        "nms",
+    }
+    validate_engine_precision(metadata)
+
+
+def test_build_engine_metadata_keeps_the_model_derived_fields_verbatim():
+    """模型衍生欄位一個都不自己重推，照抄 ultralytics 組好的那份。"""
+    onnx_metadata = _onnx_metadata()
+
+    metadata = build_engine_metadata(onnx_metadata, _vfa())
+
+    for key in ("stride", "task", "names", "channels", "end2end", "imgsz", "batch"):
+        assert metadata[key] == onnx_metadata[key]
+    assert metadata[VFA_METADATA_KEY]["tensorrt"] == "10.13.3.9"
+
+
+@pytest.mark.parametrize(
+    "missing", ["stride", "task", "batch", "imgsz", "names", "channels", "end2end"]
+)
+def test_validate_engine_header_rejects_a_missing_key(missing):
+    """缺鍵**不會**讓載入崩：`apply_metadata` 走 `metadata.get(...)`，這幾個鍵全部有
+    預設值，缺了只會靜默走錯路。所以要在寫檔之前擋下。"""
+    metadata = _onnx_metadata()
+    del metadata[missing]
+
+    with pytest.raises(ValueError, match=missing):
+        build_engine_metadata(metadata, _vfa())
+
+
+def test_validate_engine_header_rejects_a_non_end2end_declaration():
+    """`end2end` 缺漏或為假是這幾個鍵裡症狀最嚴重的一個。
+
+    `apply_metadata` 算出 `end2end = False` 之後，predictor 會對 `(B, 300, 6)` 的
+    end2end 輸出再跑一次完整 NMS，把類別分數當成 conf 與 cls——建置期驗收與
+    `tools/compare_backend.py` 整批比錯，而且沒有任何例外。
+    """
+    with pytest.raises(ValueError, match="end2end"):
+        validate_engine_header(_onnx_metadata(end2end=False))
+
+
+def test_validate_engine_header_rejects_a_wrong_type():
+    """型別錯與缺鍵同一類：`names` 是一串而不是 dict 時，類別 id 的比對會全數落空。"""
+    with pytest.raises(ValueError, match="names"):
+        validate_engine_header(_onnx_metadata(names=["head", "vbody", "fbody"]))
+
+
+def test_written_header_round_trips_with_non_ascii_values(tmp_path):
+    """長度欄位寫的是**位元組數**，不是 `json.dumps` 的字元數。
+
+    ultralytics 寫的是 `len(json.dumps(metadata))`，只有在它預設的 `ensure_ascii=True`
+    下兩者才相等。本 repo 別處一律 `ensure_ascii=False`，照抄字元數會讓任何非 ASCII 值
+    （`description` 抄的是訓練資料路徑、`gpu_name`、`train.*` 都可能有）把長度寫短，
+    讀回來就是截斷的 JSON。
+    """
+    metadata = build_engine_metadata(
+        _onnx_metadata(description="在中文路徑下訓練的模型"),
+        _vfa(gpu_name="Tesla T4（量測機）"),
+    )
+    engine_bytes = b"\x00not-a-real-engine"
+    dest = tmp_path / "out" / "e.engine"
+
+    write_engine_with_metadata(metadata, engine_bytes, dest)
+
+    read_back = read_engine_metadata(dest)
+    assert read_back["description"] == "在中文路徑下訓練的模型"
+    assert read_back[VFA_METADATA_KEY]["gpu_name"] == "Tesla T4（量測機）"
+    # 引擎本體要從檔頭之後**剛好**接上：位移算錯的話 deserialize 會從中間開始
+    payload = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+    assert dest.read_bytes() == (
+        struct.pack("<i", len(payload)) + payload + engine_bytes
+    )
+
+
+def test_written_header_is_readable_by_the_precision_check(tmp_path):
+    """寫出去的檔頭要過得了自己那道載入期精度檢查。"""
+    metadata = build_engine_metadata(_onnx_metadata(), _vfa())
+    dest = tmp_path / "e.engine"
+
+    write_engine_with_metadata(metadata, b"\x00engine", dest)
+
+    validate_engine_precision(read_engine_metadata(dest))
+
+
+def test_engine_arg_keys_stay_pinned_to_the_ultralytics_declaration():
+    """`ENGINE_EXPORT_ARG_KEYS` 是手抄的，判準要釘回 ultralytics 自己的宣告。
+
+    那份清單是「引擎檔頭與 ultralytics 匯出的引擎長得一樣」的唯一依據。ultralytics 改了
+    `export_formats()` 裡 TensorRT 那列的 `Arguments` 之後，這裡沒有訊號——檔頭會少寫
+    （或多寫）一個 `args` 鍵，而引擎照樣建得出來、載得起來。ultralytics 的版本是 pin 死
+    的，所以這支只在升版時會紅，那正是要它紅的時候。
+    """
+    from ultralytics.engine.exporter import export_formats
+
+    formats = export_formats()
+    declared = dict(zip(formats["Argument"], formats["Arguments"], strict=True))
+
+    assert set(ENGINE_EXPORT_ARG_KEYS) == set(declared["engine"])

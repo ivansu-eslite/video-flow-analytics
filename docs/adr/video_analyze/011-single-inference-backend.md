@@ -101,6 +101,13 @@ self.args.imgsz = self.model.imgsz`，靜態引擎反而**會**套用 metadata �
 建 execution context 實測吃約 1.3 GB 顯存（規劃階段估的是 4.7 GB，偏保守），且不隨實際
 批次縮小。T4 有 15 GB，容得下。
 
+> **這段代價已由 [ADR-015](015-narrow-engine-profile.md) 消掉（2026-08-31）。** 那個 2×
+> 的 max 是 ultralytics 拿 `workspace` 當倍數的副產物，不是 dynamic 逼出來的——batch 維
+> 動態與空間維動態是兩件事。`build_engine.py` 接管 builder 之後，空間維三個界都釘在
+> 384×640（batch 維仍是 1–max），execution context 的裝置記憶體降到約 0.33 GB。本節
+> 「dynamic ⇒ 顯存代價」的因果不再成立；Decision 7 那道執行期形狀核對仍然成立，而且
+> 正是收窄的前提。
+
 ### 4. 精度驗 `metadata["args"]["half"]`，不是 backend 的 `fp16` 屬性
 
 **FP16 引擎的 I/O binding 仍是 FP32**，`AutoBackend` 對 FP16 引擎永遠回報 `fp16 = False`。
