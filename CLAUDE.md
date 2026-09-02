@@ -28,10 +28,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [flow_report/README.md](flow_report/README.md)
 
 **跨專案脈絡**：本 repo 是 `video_analyze` 推論鏈的開發正本，改動會往 argus 的兩份副本
-移植（`pipelines/onprem/` 交付副本 → 各雲端 job）。移植方向、測試素材清單、GPU 環境與
-權限約束、以及各條線目前的進度**不記在本檔**，見 `~/.claude/playbook/vfa-argus-topology.md`
-與 board（`~/.claude/board`，看板由 `wf next` 產生；兩者皆為本機個人筆記，
-不進版控，同仁看不到）。
+移植（`pipelines/onprem/` 交付副本 → 各雲端 job）。與 `pipelines/onprem/` 交付副本之間
+已知的差異對照記在 [docs/porting/argus-onprem.md](docs/porting/argus-onprem.md)（進版控）；
+移植方向、測試素材清單、GPU 環境與權限約束、以及各條線目前的進度仍**不記在本檔**，見
+`~/.claude/playbook/vfa-argus-topology.md` 與 board（`~/.claude/board`，看板由 `wf next`
+產生；兩者皆為本機個人筆記，不進版控，同仁看不到）。
 
 ## 常用指令
 
