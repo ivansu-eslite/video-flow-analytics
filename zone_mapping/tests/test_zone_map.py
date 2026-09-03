@@ -663,3 +663,33 @@ def test_map_zones_daily_rejects_non_positive_dwell_parameters(tmp_path):
                 output_root=tmp_path / "outputs",
                 **kwargs,
             )
+
+
+def test_gap_estimate_uses_median_not_mean_or_max(tmp_path):
+    """取樣間隔用**中位數**，不是平均或最大值——偏態的時間軸只有中位數不會誤擋。
+
+    per-track 的間隔序列本來就偏態：多數是幀間隔，少數是漏偵測留下的空洞（上界
+    `track_buffer / fps`）。這裡 29 個 0.1 秒的間隔配 3 個 5 秒空洞：中位數 0.1 秒、
+    平均約 0.56 秒、最大 5 秒。容忍窗取 **0.4 秒**——遠大於幀間隔，對這台攝影機完全
+    夠用（5 秒空洞會被切開，但那本來就不是同一段停留）。三個統計量刻意夾在 0.4 的
+    兩側：median（0.1）放行，mean（0.56）與 max（5）都會擋下整天，而誤擋的代價是
+    該日整份報表都產不出來。
+    """
+    bucket_dir, output_dir = _one_zone_bucket(tmp_path)
+    offsets, t = [], 0.0
+    for i in range(33):
+        offsets.append(t)
+        t += 5.0 if i in (10, 20, 30) else 0.1
+    _write_tracking_results(
+        output_dir / "tracking_results.parquet", "loc_cam001", tracks={1: offsets}
+    )
+
+    counts_path = map_zones_daily(
+        date=datetime.date(2026, 5, 1),
+        bucket_dir=str(bucket_dir),
+        bucket_minutes=60,
+        dwell_gap_seconds=0.4,
+        output_root=tmp_path / "outputs",
+    )
+
+    assert pl.read_parquet(counts_path)["unique_visitors"].to_list() == [1]

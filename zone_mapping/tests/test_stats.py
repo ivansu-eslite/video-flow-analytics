@@ -336,19 +336,45 @@ def test_dwell_counts_two_events_for_the_same_track():
 
 
 def test_dwell_attributed_to_the_bucket_of_the_crossing_frame():
-    """一段停留歸戶到「首次跨過門檻」那一格的時段，不是起點或終點那一格。
+    """一段停留歸戶到「首次跨過門檻」那一格的時段，不是起點也不是終點那一格。
 
-    26 格（elapsed 0–25 秒），第 21 格（elapsed = 20）起換到下一個時段：達標那一格
-    在第二個時段，所以人次要記在第二個時段。歸到起點會讓跨時段的停留全落在前一段。
+    26 格（elapsed 0–25 秒），達標的是 index 20–25 那六格。時段切換點刻意放在
+    **達標區間之內**（第 24 格起換到下一個時段）：首次跨過門檻的 index 20 在第一個
+    時段，末格 index 25 在第二個。切換點若放在達標區間之外（例如第 21 格），
+    `.first()` 與 `.last()` 會給同一個答案，這條語義就沒被釘住。
     """
     n = 26
     cam_sub = _make_cam_sub(
-        [_DEEP_INSIDE] * n, bucket_index=[0] * 20 + [1] * (n - 20)
+        [_DEEP_INSIDE] * n, bucket_index=[0] * 23 + [1] * (n - 23)
     )
 
     result = _visits(cam_sub).sort("time_bucket")
 
-    assert result["dwell_events"].to_list() == [0, 1]
+    assert result["dwell_events"].to_list() == [1, 0]
+
+
+def test_dwell_counts_two_tracks_separately():
+    """兩個不同的人各自達標算 2：段的分組鍵必須帶 `track_id`。
+
+    段號是各 track 各自從 1 起算的（`cum_sum().over("track_id")`），所以
+    `group_by("track_id", "_dwell_seg")` 少了 `track_id` 會把兩人的第 1 段併成同一
+    組，兩次停留只計一次——**漏計**方向的錯，而輸出檔完全正常。時間錯開讓兩人不在
+    同一格，避免測試依賴列順序。
+    """
+    cam_sub = pl.concat(
+        [
+            _make_cam_sub([_DEEP_INSIDE] * 26, track_id="t1"),
+            _make_cam_sub(
+                [_DEEP_INSIDE] * 26,
+                track_id="t2",
+                offsets=[30.0 + i for i in range(26)],
+            ),
+        ]
+    ).sort("timestamp")
+
+    result = _visits(cam_sub)
+
+    assert _dwell_total(result) == 2
 
 
 def test_dwell_uses_raw_in_zone_not_committed_state():

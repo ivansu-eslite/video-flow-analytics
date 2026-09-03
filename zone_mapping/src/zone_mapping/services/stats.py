@@ -168,8 +168,11 @@ def count_zone_visits(
     dwell_events = (
         in_z.with_columns(
             # 同一 track 相鄰兩次「在區內」的間隔 > T 就開新段；該 track 的第一列
-            # diff 為 null，要顯式納入（`null > x` 得 null，cum_sum 會把 null 傳染
-            # 給整個 track，最後一列不剩——與 entries 的 `_prev != 1` 同一個坑）
+            # diff 為 null，`is_null()` 那一半要顯式納入（`null > x` 得 null，
+            # cum_sum 會把 null 傳染給整個 track，最後一列不剩——與 entries 的
+            # `_prev != 1` 同一個坑）。兩個 `.over("track_id")` 在目前實作下是防禦
+            # 性的：下游 group_by 已把 track_id 納入分組鍵，拿掉輸出不變。保留是為
+            # 了讓 `_dwell_seg` 的語義（段號在 track 內編號）不依賴下游怎麼分組。
             (_gap_us.is_null() | (_gap_us > gap_us))
             .cum_sum()
             .over("track_id")

@@ -163,9 +163,13 @@ def _validate_gap_tolerance(
     （實測 camera-wide 間隔 max 有 61 秒，per-track 只有 2.1 秒）。
 
     per-track 序列另有一個結構性的好性質：ByteTrack 的 `max_frames_lost` 就是
-    `[tracker].track_buffer`（30 格），所以同一 `track_id` 內的空洞有上界
+    `video_analyze` 的 `[tracker].track_buffer`，所以同一 `track_id` 內的空洞有上界
     `track_buffer / fps`，中位數必落在 `[1/fps, track_buffer/fps]`，最壞情況也只
     高估到約 1–2 秒，誤擋風險被限制住。
+
+    ⚠ 該上界不是常數：`track_buffer` 預設 30 格但可調，而本套件既讀不到也驗不到它。
+    上游調大它（或改抽幀）之後，這裡的中位數上界跟著放大，固定的
+    `dwell_gap_seconds` 預設值就可能誤擋——代價是該日整份報表都產不出來。
 
     Args:
         camera_id: 該攝影機的 `camera_id`（僅供錯誤訊息與日誌）。
@@ -206,7 +210,9 @@ def _validate_gap_tolerance(
         dwell_gap_seconds=dwell_gap_seconds,
     )
     if dwell_gap_seconds * 1_000_000 < median_us:
-        fps = 1_000_000 / median_us if median_us > 0 else float("inf")
+        # median_us 必然 > 0：走到這裡代表 dwell_gap_seconds * 1e6 < median_us，
+        # 而 map_zones_daily 的前置檢查已保證 dwell_gap_seconds > 0
+        fps = 1_000_000 / median_us
         raise ValueError(
             f"攝影機 {camera_id} 的 [zone].dwell_gap_seconds ="
             f" {dwell_gap_seconds} 秒小於該路的取樣間隔"
@@ -214,7 +220,9 @@ def _validate_gap_tolerance(
             f"取自同一 track 相鄰列的 {len(gaps)} 個間隔）。"
             "每一格都會被切成獨立的停留段，這台攝影機的 dwell_events 會恆為 0。"
             "兩條路擇一：把 dwell_gap_seconds 調到取樣間隔以上"
-            "（預設 3.0 秒涵蓋 15–30 fps），或確認上游 video_analyze 的 fps 是否異常。"
+            "（預設 3.0 秒涵蓋 15–30 fps），或確認上游 video_analyze 的 fps 與 "
+            "[tracker].track_buffer 是否異常——後者決定同一 track 內空洞的上界"
+            "（track_buffer / fps），調大它會把這個中位數一起拉高。"
         )
 
 
@@ -264,10 +272,18 @@ def map_zones_daily(
         ("dwell_gap_seconds", dwell_gap_seconds),
     ):
         if value <= 0:
+            # 兩個參數都沒有可用的退化語義，但 0 的後果剛好相反：門檻 0 讓每個段都
+            # 達標（超計到底），容忍窗 0 把每一格切成獨立的段（恆為 0）。分開講，
+            # 誤設的人才知道自己的數字往哪個方向錯。
+            consequence = (
+                "0 會讓每個在區內的段都達標，dwell_events 量到的就不再是停留"
+                if name == "dwell_threshold_seconds"
+                else "0 會把每一格都切成獨立的停留段，dwell_events 會恆為 0"
+            )
             raise ValueError(
                 f"{name} 必須大於 0（收到 {value}）。停留門檻與容忍窗都沒有可用的"
-                "退化語義：0 會讓每個在區內的段都達標，dwell_events 量到的就不再是"
-                "停留（見 ADR-016）。"
+                "退化語義（不像 boundary_band_px_1080p 的 0 = 純內外判定）："
+                f"{consequence}（見 ADR-016）。"
             )
 
     output_dir = output_root / Path(bucket_dir).name / date.isoformat()

@@ -136,7 +136,7 @@ dwell_gap_seconds = 3.0         # 同一段停留可容忍的中斷（秒）
 | | `bucket_minutes` | `60` | 事件統計時間粒度（分鐘），`>= 1`；與 `line_counting`／`flow_report` 的同名欄位是同一個口徑，三包要填一致的值 |
 | `[zone]` | `boundary_band_px_1080p` | `25` | `entries` 的線段區域寬度，`>= 0`，以 1080p（寬 1920）為基準的像素；執行時依各攝影機的 `frame_width` 換算成實際像素（`基準值 × frame_width / 1920`，只用寬度、線性），`0` = 純內外判定且換算後仍是 `0` |
 | | `dwell_threshold_seconds` | `20.0` | `dwell_events` 的停留門檻（秒），`> 0`。絕對時間、不隨解析度換算。**改這個值等於換一個指標定義**，見「已知限制」 |
-| | `dwell_gap_seconds` | `3.0` | 同一段停留可容忍的中斷（秒），`> 0`。小於該路取樣間隔時 fail loud（否則該台攝影機的 `dwell_events` 會恆為 0）。有效上界是 `track_buffer / fps`（約 1–2 秒），再放大只會把「真的走出區域又回來」接成一段 |
+| | `dwell_gap_seconds` | `3.0` | 同一段停留可容忍的中斷（秒），`> 0`。小於該路取樣間隔時 fail loud（否則該台攝影機的 `dwell_events` 會恆為 0）。補漏偵測的有效上界是 `track_buffer / fps`（約 1–2 秒），超過之後接回來的是「真的走出區域又回來」；預設 3.0 高於該上界是為了涵蓋各路 fps 差異，實測從 2.2 拉到 3.0 一段都沒多（見 ADR-016 Decision 3） |
 
 `[input]` 由共用 lib `vfa_config` 提供、四包同一份定義，故本包也接受 `camera_ids`
 （只有 `video_analyze` 會讀）；`bucket_minutes` 於 issue #79 由 `[zone]` 移到這裡，沿用
@@ -188,8 +188,8 @@ dwell_gap_seconds = 3.0         # 同一段停留可容忍的中斷（秒）
   `bucket_dir/camera_registry.yaml` 的定義，registry 裡有 `zones` 定義就必須有
   `zone_counts.parquet`，缺檔會中止整份報表、連出入口三個分頁也不產（見
   [ADR-005](../docs/adr/flow_report/005-report-input-requirement-from-snapshot.md)、
-  [ADR-007](../docs/adr/shared/007-remove-registry-snapshot.md)）。上面兩道
-  fail-loud 誤擋的代價因此不只是區域那兩頁。
+  [ADR-007](../docs/adr/shared/007-remove-registry-snapshot.md)）。上面的窄區域、缺欄位
+  與容忍窗三道 fail-loud，誤擋的代價因此都不只是區域那兩頁。
 - **跨日報表會混到兩種口徑**：`flow_report` 以 `append` 累加各日的 `zone_counts.parquet`，
   改動前後產出的 `entries` 語義不同。要口徑一致就得重跑歷史日期，否則需在報表註明
   改動日期。`unique_visitors` 無此問題（數值完全不變）。
@@ -206,8 +206,8 @@ dwell_gap_seconds = 3.0         # 同一段停留可容忍的中斷（秒）
 - **停留判定對邊界徘徊沒有防護，容忍窗也會把真實的離區時間算進停留**：`dwell_events` 用
   的是生的 point-in-polygon 布林值，不吃線段區域，所以在邊界上待滿門檻的人照計；而段長
   是「最後一格 − 第一格」，含所有被容忍窗橋接的空洞。實測（2026-08-01）容忍窗 3.0 秒下
-  有 0.083% 的區內間隔落在 2–3 秒，超過漏偵測空洞的上界 2.133 秒——那些是被橋接起來的
-  真實離區。取捨與量測數字見
+  有 0.068% 的區內間隔落在 2.133 秒以上、3.0 秒以內——超過漏偵測空洞的上界、卻仍在容忍
+  窗之內，那些是被橋接起來的真實離區。取捨與量測數字見
   [ADR-016](../docs/adr/zone_mapping/016-zone-dwell-threshold.md)。
 - **軌跡斷裂造成的低估看不出來**：容忍窗只吃得掉 `track_buffer / fps`（約 1–2 秒）以內的
   空檔，超過就換新 `track_id`，永遠接不回來。門檻 20 秒對這件事相當敏感，低估幅度隨場景
