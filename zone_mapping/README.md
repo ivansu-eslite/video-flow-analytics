@@ -7,7 +7,7 @@
 
 輸入是追蹤明細 `tracking_results.parquet` 與 `camera_registry.yaml` 的區域定義；以每個
 track 的落腳點 `(foot_x, foot_y)` 做 ray-casting 判定是否落在區域多邊形內，再依
-`time_bucket` 聚合出兩項事件指標，輸出 `zone_counts.parquet`：
+`time_bucket` 聚合出三項指標，輸出 `zone_counts.parquet`：
 
 落腳點是上游 `video_analyze` 算好寫進 `tracking_results.parquet` 的欄位（由 head 框推算，
 推不出來才退回 bbox 底邊中點），本套件不自行從 bbox 推算；缺這兩欄的舊 parquet 直接
@@ -17,8 +17,10 @@ fail loud。理由見 [ADR-009](../docs/adr/shared/009-head-based-foot-point.md)
 | --- | --- |
 | `unique_visitors` | 該時段內在區域出現過的不重複 `track_id` 數 |
 | `entries` | 「區域外 → 區域內」的轉換次數，由線段區域（`boundary_band_px_1080p`）濾掉邊界抖動 |
+| `dwell_events` | 該時段內連續停留達 `dwell_threshold_seconds` 的**人次**（同一人兩段各自達標算兩次） |
 
-**兩項指標刻意用不同判定**（見 [ADR-006](../docs/adr/zone_mapping/006-zone-boundary-band.md)）：
+**三項指標刻意用不同判定**（見 [ADR-006](../docs/adr/zone_mapping/006-zone-boundary-band.md)
+與 [ADR-016](../docs/adr/zone_mapping/016-zone-dwell-threshold.md)）：
 `entries` 是事件型指標，用線段區域的 Schmitt-trigger——落腳點的帶號距離 `> band` 才確認
 在區內、`< -band` 才確認在區外，落在帶內時沿用前一個已確認狀態，因此在邊界附近來回
 徘徊只計一次進入。`unique_visitors` 是佔用型指標，仍用當格的 point-in-polygon 布林值，
@@ -26,13 +28,22 @@ fail loud。理由見 [ADR-009](../docs/adr/shared/009-head-based-foot-point.md)
 訪客）。**`entries` 首次出現即在區內算一次進入**，與 `line_counting` 的「起始側不計」
 相反，是刻意的。
 
+`dwell_events` **與 `unique_visitors` 同源、與 `entries` 同型**：判定基礎同樣是當格的
+point-in-polygon 布林值（不吃黏著狀態——停留與 `unique_visitors` 一樣是佔用型的量），
+但它是事件型指標，跨時段相加不重複。演算法是把每個 track 在區內的列依時間切段——相鄰
+兩次在區內的間隔超過 `dwell_gap_seconds` 就開新段——段內「最後一格 − 第一格」達到
+`dwell_threshold_seconds` 即計一次人次，歸戶到該段**首次跨過門檻**那一格的時段。
+**它不是 `unique_visitors` 的子集**：同一人同一時段內兩段都達標會計 2，下游不可寫
+`dwell_events <= unique_visitors` 這類 sanity check。
+
 本階段只做「事件轉化」，不做跨期間彙總或分析。純 CPU 向量化運算，不需 GPU。只調整區域
 幾何時僅需重跑本階段。
 
 **進入點是函式呼叫，CLI 只是外殼**：核心是
 `map_zones_daily(date, bucket_dir, bucket_minutes, boundary_band_px_1080p=25,
-output_root=OUTPUT_ROOT) -> Path`（在 `services/zone_map.py`），CLI 進入點
-`zone_mapping.main:main` 只是從 `config.toml` 組出參數後呼叫它。
+dwell_threshold_seconds=20.0, dwell_gap_seconds=3.0, output_root=OUTPUT_ROOT) -> Path`
+（在 `services/zone_map.py`），CLI 進入點 `zone_mapping.main:main` 只是從 `config.toml`
+組出參數後呼叫它。
 
 原始碼採 DDD 分層（`src/zone_mapping/`）：
 
@@ -114,6 +125,8 @@ bucket_minutes = 60         # 事件統計時間粒度（分鐘）
 
 [zone]
 boundary_band_px_1080p = 25 # entries 的線段區域（1080p 基準像素）；0 = 純內外判定
+dwell_threshold_seconds = 20.0  # dwell_events 的停留門檻（秒）
+dwell_gap_seconds = 3.0         # 同一段停留可容忍的中斷（秒）
 ```
 
 | 區塊 | 欄位 | 預設 | 約束 / 說明 |
@@ -122,6 +135,8 @@ boundary_band_px_1080p = 25 # entries 的線段區域（1080p 基準像素）；
 | | `date` | — | 統計日期；未設定時報錯 |
 | | `bucket_minutes` | `60` | 事件統計時間粒度（分鐘），`>= 1`；與 `line_counting`／`flow_report` 的同名欄位是同一個口徑，三包要填一致的值 |
 | `[zone]` | `boundary_band_px_1080p` | `25` | `entries` 的線段區域寬度，`>= 0`，以 1080p（寬 1920）為基準的像素；執行時依各攝影機的 `frame_width` 換算成實際像素（`基準值 × frame_width / 1920`，只用寬度、線性），`0` = 純內外判定且換算後仍是 `0` |
+| | `dwell_threshold_seconds` | `20.0` | `dwell_events` 的停留門檻（秒），`> 0`。絕對時間、不隨解析度換算。**改這個值等於換一個指標定義**，見「已知限制」 |
+| | `dwell_gap_seconds` | `3.0` | 同一段停留可容忍的中斷（秒），`> 0`。小於該路取樣間隔時 fail loud（否則該台攝影機的 `dwell_events` 會恆為 0）。補漏偵測的有效上界是 `track_buffer / fps`（約 1–2 秒），超過之後接回來的是「真的走出區域又回來」；預設 3.0 高於該上界是為了涵蓋各路 fps 差異，實測從 2.2 拉到 3.0 一段都沒多（見 ADR-016 Decision 3） |
 
 `[input]` 由共用 lib `vfa_config` 提供、四包同一份定義，故本包也接受 `camera_ids`
 （只有 `video_analyze` 會讀）；`bucket_minutes` 於 issue #79 由 `[zone]` 移到這裡，沿用
@@ -173,11 +188,30 @@ boundary_band_px_1080p = 25 # entries 的線段區域（1080p 基準像素）；
   `bucket_dir/camera_registry.yaml` 的定義，registry 裡有 `zones` 定義就必須有
   `zone_counts.parquet`，缺檔會中止整份報表、連出入口三個分頁也不產（見
   [ADR-005](../docs/adr/flow_report/005-report-input-requirement-from-snapshot.md)、
-  [ADR-007](../docs/adr/shared/007-remove-registry-snapshot.md)）。上面兩道
-  fail-loud 誤擋的代價因此不只是區域那兩頁。
+  [ADR-007](../docs/adr/shared/007-remove-registry-snapshot.md)）。上面的窄區域、缺欄位
+  與容忍窗三道 fail-loud，誤擋的代價因此都不只是區域那兩頁。
 - **跨日報表會混到兩種口徑**：`flow_report` 以 `append` 累加各日的 `zone_counts.parquet`，
   改動前後產出的 `entries` 語義不同。要口徑一致就得重跑歷史日期，否則需在報表註明
   改動日期。`unique_visitors` 無此問題（數值完全不變）。
+- **`dwell_events` 的母體很小，個位數是預期值不是 bug**：實測 2026-07-28 的八路 3001 條
+  軌跡裡，活得夠久（≥ 20 秒）的只佔 9.5%，而那是「在整個畫面裡活多久」，在單一 zone 內
+  停留 20 秒的只會更少。2026-08-01 那批十個 zone 一小時共 140 人次，每個 zone 是 9–26。
+- **改 `dwell_threshold_seconds` 等於換一個指標，而輸出檔沒有任何地方記得產生時用的值**：
+  `flow_report` 以 `append` 累加，不同門檻產生的列會疊進同一份 `report.xlsx`，與上一條
+  同型，只是這次混的是指標定義本身。改門檻要重跑歷史日期。欄位名刻意不帶門檻數字
+  （`dwell_events_30s` 會讓 schema 變動態，`flow_report` 的固定 schema 接不住）。
+- **`dwell_gap_seconds` 那道 fail-loud 只擋容忍窗太小，擋不到門檻設太大**：門檻設成一小時
+  會讓 `dwell_events` 全天是 0，而沒有任何訊號——這是上面「內切半徑檢查是必要條件，不是
+  充分條件」在停留這一側的對應版本。
+- **停留判定對邊界徘徊沒有防護，容忍窗也會把真實的離區時間算進停留**：`dwell_events` 用
+  的是生的 point-in-polygon 布林值，不吃線段區域，所以在邊界上待滿門檻的人照計；而段長
+  是「最後一格 − 第一格」，含所有被容忍窗橋接的空洞。實測（2026-08-01）容忍窗 3.0 秒下
+  有 0.068% 的區內間隔落在 2.133 秒以上、3.0 秒以內——超過漏偵測空洞的上界、卻仍在容忍
+  窗之內，那些是被橋接起來的真實離區。取捨與量測數字見
+  [ADR-016](../docs/adr/zone_mapping/016-zone-dwell-threshold.md)。
+- **軌跡斷裂造成的低估看不出來**：容忍窗只吃得掉 `track_buffer / fps`（約 1–2 秒）以內的
+  空檔，超過就換新 `track_id`，永遠接不回來。門檻 20 秒對這件事相當敏感，低估幅度隨場景
+  擁擠度變動，而輸出檔本身完全正常。
 
 ## 輸入 / 輸出檔案
 
@@ -187,7 +221,7 @@ boundary_band_px_1080p = 25 # entries 的線段區域（1080p 基準像素）；
 | --- | --- | --- |
 | `outputs/{bucket}/{date}/tracking_results.parquet` | 讀 | 追蹤明細；缺少時報錯。須含 `frame_width`／`frame_height`（線段區域寬度的解析度換算靠它，issue #63 起才有）與 `foot_x`／`foot_y`（落腳點，本階段不自行從 bbox 推算，issue #72 起才有）四欄，缺任一欄都直接報錯要求重跑 `video_analyze`——只有 issue #72 之後產出的檔案才同時具備 |
 | `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與區域幾何 |
-| `outputs/{bucket}/{date}/zone_counts.parquet` | 寫 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries` |
+| `outputs/{bucket}/{date}/zone_counts.parquet` | 寫 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries` / `dwell_events` |
 
 **時區**：`tracking_results.parquet` 的 `timestamp` 已是台北在地時間（`Asia/Taipei`），
 `time_bucket` 沿用之，本階段不做任何時區位移。

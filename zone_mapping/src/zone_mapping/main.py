@@ -23,6 +23,8 @@ def main() -> None:
         bucket_dir=settings.input.bucket_dir,
         bucket_minutes=settings.input.bucket_minutes,
         boundary_band_px_1080p=settings.zone.boundary_band_px_1080p,
+        dwell_threshold_seconds=settings.zone.dwell_threshold_seconds,
+        dwell_gap_seconds=settings.zone.dwell_gap_seconds,
     )
 
 

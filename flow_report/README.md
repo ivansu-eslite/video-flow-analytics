@@ -240,7 +240,7 @@ registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都�
 
 | 路徑 | 讀 / 寫 | 內容 |
 | --- | --- | --- |
-| `outputs/{bucket}/{date}/zone_counts.parquet` | 讀 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries`；registry 有區域定義時缺少即報錯 |
+| `outputs/{bucket}/{date}/zone_counts.parquet` | 讀 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries` / `dwell_events`（`dwell_events` 為停留人次，issue #163 起才有，本套件目前不讀）；registry 有區域定義時缺少即報錯 |
 | `outputs/{bucket}/{date}/line_counts.parquet` | 讀 | 每時段每計數線進出人數，欄位 `line_group` / `camera_id` / `line` / `time_bucket` / `in_count` / `out_count`；registry 有計數線定義時缺少即報錯 |
 | `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與區域／計數線定義；缺少時報錯 |
 | `outputs/{bucket}/report.xlsx` | 寫 | 跨日累加的 Excel 報表（六個分頁）；不存在時建立，存在時依 `on_duplicate_date` 更新（缺哪個分頁就補建哪個） |
