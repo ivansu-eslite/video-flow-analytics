@@ -238,6 +238,15 @@ Negative
   一個量級到 256 MiB，但容器預設值（Docker 不給 `--shm-size` 時是 64 MB）**仍然不夠**。
   逐塊判斷造成的部分落磁碟也沒有消失，反而因為每塊縮到 22.5 MiB 而更容易發生——64 MB 夠塞
   前兩三路、其餘掉出去，正是最難歸因的情況。
+  **（2026-09-02 實測修正）「效能崩掉」的量級被兩組獨立實測推翻**：M15 `shm64` 格對照
+  正常配置，`overall_fps` 755.8 對 747.8／749.3，降級那格反而略高，差異在重跑雜訊內；C25
+  容器驗收在 `python:3.12-slim --shm-size=64m` 裡實跑 9 次 `create_ring_buffer`，5 塊落
+  `/dev/shm`、4 塊落 `/tmp/pymp-*`，全部成功不報錯，且掉到 `/tmp` 的那 45 MB 全程待在
+  page cache、沒碰過磁碟（出處：`outputs/vfa_perf/research/cloud-gap-20260902/
+  SUMMARY-P40.md`）。**前提是容器記憶體充裕、`/tmp` 落在有 page cache 的機器**：記憶體
+  吃緊或 `/tmp` 是慢速掛載時仍會付出代價；這輪驗到的是記憶體充裕的條件，Vertex 容器的
+  記憶體上限仍未知，不能直接外推。上面「配置前的擋」正當性不建立在這個量級上——靜默
+  改變 backing store 本身就要 fail loud，`require_shm_capacity` 不變。
 - **`frame_ring.py` 從零依賴模組變成 import `settings`**。目前無循環（`models/config.py`
   只 import `config/constants.py`，反向沒有），但這條依賴日後要維持單向。
   **（issue #116 後更新）`frame_ring.py` 已改回零依賴**：`RING_SLOTS` 搬到
