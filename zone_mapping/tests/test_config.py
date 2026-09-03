@@ -18,7 +18,11 @@ from pydantic import ValidationError
 from pydantic_settings import SettingsConfigDict
 from vfa_config import get_toml_path
 
-from zone_mapping.config.constants import DEFAULT_BOUNDARY_BAND_PX_1080P
+from zone_mapping.config.constants import (
+    DEFAULT_BOUNDARY_BAND_PX_1080P,
+    DEFAULT_DWELL_GAP_SECONDS,
+    DEFAULT_DWELL_THRESHOLD_SECONDS,
+)
 from zone_mapping.models import config as config_module
 from zone_mapping.models.config import AppConfig, ZoneConfig, load_config
 from zone_mapping.services.zone_map import map_zones_daily
@@ -34,6 +38,8 @@ _ENV_OVERRIDES = ("INPUT", "ZONE") + (
     "INPUT__BUCKET_MINUTES",
     "ZONE__BUCKET_MINUTES",
     "ZONE__BOUNDARY_BAND_PX_1080P",
+    "ZONE__DWELL_THRESHOLD_SECONDS",
+    "ZONE__DWELL_GAP_SECONDS",
     "ZONE__ENTRY_DEBOUNCE_FRAMES",
 )
 
@@ -218,21 +224,47 @@ def test_removed_entry_debounce_frames_from_env_raises(monkeypatch, tmp_path):
         _config_class(toml)()
 
 
-def test_default_boundary_band_agrees_across_all_three_places():
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        ("boundary_band_px_1080p", DEFAULT_BOUNDARY_BAND_PX_1080P),
+        ("dwell_threshold_seconds", DEFAULT_DWELL_THRESHOLD_SECONDS),
+        ("dwell_gap_seconds", DEFAULT_DWELL_GAP_SECONDS),
+    ],
+)
+def test_zone_defaults_agree_across_all_three_places(field, expected):
     """版控的 `config.toml`、`ZoneConfig` 與 `map_zones_daily` 簽名的預設值要一致。
 
-    這個值是實測調出來的（見 README），不是「沒設定時的中性值」；任兩處分岔都會讓同
-    一份程式用不同的線段區域尺度統計，而且不會有任何錯誤訊息——沒有 `config.toml` 的環境
+    這三個值都是實測調出來的（見 README），不是「沒設定時的中性值」；任兩處分岔都會
+    讓同一份程式用不同的口徑統計，而且不會有任何錯誤訊息——沒有 `config.toml` 的環境
     吃模型預設值，直接呼叫 `map_zones_daily`（README 說明的正式進入點）吃的是簽名
     預設值。後兩者已共用同一個常數，`config.toml` 無法引用常數，由本測試鎖住。
     （`bucket_dir` 一類的欄位刻意不受此約束。）
+
+    停留的兩個門檻比線段區域寬度更該釘：線段區域分岔只是判定尺度不同，停留門檻分岔
+    是兩份輸出在量不同的指標。三個參數共用同一支參數化測試，各寫一份會漂移。
     """
-    assert AppConfig().zone.boundary_band_px_1080p == DEFAULT_BOUNDARY_BAND_PX_1080P
-    assert ZoneConfig().boundary_band_px_1080p == DEFAULT_BOUNDARY_BAND_PX_1080P
-    signature_default = inspect.signature(map_zones_daily).parameters[
-        "boundary_band_px_1080p"
-    ].default
-    assert signature_default == DEFAULT_BOUNDARY_BAND_PX_1080P
+    assert getattr(AppConfig().zone, field) == expected
+    assert getattr(ZoneConfig(), field) == expected
+    assert inspect.signature(map_zones_daily).parameters[field].default == expected
+
+
+@pytest.mark.parametrize(
+    "field", ["dwell_threshold_seconds", "dwell_gap_seconds"]
+)
+@pytest.mark.parametrize("value", ["0", "-1.0"])
+def test_non_positive_dwell_parameters_raise(field, value, tmp_path):
+    """兩個停留門檻是 `gt=0`（不是線段區域的 `ge=0`）：0 與負值都要報錯。
+
+    0 對線段區域寬度有明確的退化語義（純內外判定），對停留沒有——門檻 0 會讓每個
+    在區內的段都達標，容忍窗 0 則把每一格切成獨立的段。兩者都會產出看起來合理、
+    量的卻是別的東西的數字，正是這個 repo 一直在擋的靜默換口徑。
+    """
+    toml = tmp_path / "config.toml"
+    toml.write_text(f"[zone]\n{field} = {value}\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        _config_class(toml)()
 
 
 def test_load_config_warns_when_toml_missing(monkeypatch, capsys):
