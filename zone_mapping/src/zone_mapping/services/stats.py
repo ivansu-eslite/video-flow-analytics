@@ -1,12 +1,17 @@
 """Zone Mapping 的核心演算法：point-in-polygon 判定與人流聚合統計。
 
-人流指標（兩者刻意用不同判定，見 ADR-006）：
+人流指標（三者刻意用不同判定，見 ADR-006、ADR-016）：
 - unique_visitors：該時段內腳底落在區域內的不重複 track_id 數（不重複訪客）。純粹
   用 `points_in_polygon` 的布林值，不吃線段區域的黏著狀態——佔用型指標若吃了黏著
   狀態，走出區域後停在邊界外線段區域內的人會在其後每個時段都被算成區內訪客。
 - entries：每個 track 依時間序偵測「區域外 → 區域內」的轉換次數，歸戶到轉換發生
   那格的時段（同一人離開再進入算多次；首次出現即在區域內也算一次進入）。事件型
   指標，用線段區域（Schmitt-trigger）濾掉腳底點在邊界附近抖動的重複計數。
+- dwell_events：該時段內有幾**人次**在區域內連續停留達到 `dwell_threshold_seconds`。
+  判定基礎與 `unique_visitors` 同源（生的 `in_zone`，不吃黏著狀態），指標型態與
+  `entries` 同型（事件型、跨時段相加不重複）。同一人在同一時段內兩段都達標會計 2，
+  因此**不是 `unique_visitors` 的子集**，下游不可寫 `dwell_events <= unique_visitors`
+  這類 sanity check。
 
 **首格語義與 `line_counting` 相反**：這裡首次出現即在區內算一次 entry（人可能從
 畫面外直接走進區內，沒有「先在區外被看到」那一格）；`line_counting` 的起始側不算
@@ -98,7 +103,12 @@ def signed_distance_to_polygon(
 
 
 def count_zone_visits(
-    cam_sub: pl.DataFrame, zone: Zone, boundary_band_px: float = 0
+    cam_sub: pl.DataFrame,
+    zone: Zone,
+    boundary_band_px: float = 0,
+    *,
+    dwell_threshold_seconds: float,
+    dwell_gap_seconds: float,
 ) -> pl.DataFrame:
     """對單一攝影機的追蹤明細套一個 zone，回傳每個 time_bucket 的人流統計。
 
@@ -109,7 +119,13 @@ def count_zone_visits(
     一次進入。腳底點在邊界附近抖動時整段維持同一個已確認狀態，因此只計一次；
     `band = 0` 退化成純內外判定。
 
-    `unique_visitors` 不吃已確認狀態，仍用當格的 `points_in_polygon` 布林值。
+    `unique_visitors` 與 `dwell_events` 都不吃已確認狀態，用的是當格的
+    `points_in_polygon` 布林值（見 ADR-016）。
+
+    `dwell_events` 把每個 track 在區內的列依時間切段——相鄰兩次在區內的間隔超過
+    `dwell_gap_seconds` 就開新段——段內 `最後一格 − 第一格` 達到
+    `dwell_threshold_seconds` 即計一次人次，歸戶到該段**首次跨過門檻**那一格的時段。
+    一段只計一次；同一人的兩段各自達標則計兩次。
 
     Args:
         cam_sub: 單一攝影機的追蹤明細，需已含 `foot_x`／`foot_y`／
@@ -117,9 +133,14 @@ def count_zone_visits(
         zone: 要套用的區域定義。
         boundary_band_px: 線段區域的半寬，**實際像素**（1080p 基準值的換算
             在 `services/zone_map.py` 完成，本模組維持純幾何）。
+        dwell_threshold_seconds: 停留門檻（秒），必須 > 0。keyword-only 且**刻意
+            不給預設值**：`boundary_band_px = 0` 有中性的退化語義（純內外判定），
+            這兩個參數沒有——沒有預設值就不可能有人拿到錯的預設值。
+        dwell_gap_seconds: 同一段停留可容忍的中斷（秒），必須 > 0。
 
     Returns:
-        依 `time_bucket` 聚合的 `unique_visitors`／`entries` 統計表。
+        依 `time_bucket` 聚合的 `unique_visitors`／`entries`／`dwell_events`
+        統計表。
     """
     signed_d, inside = signed_distance_to_polygon(
         cam_sub["foot_x"].to_numpy(),
@@ -130,10 +151,47 @@ def count_zone_visits(
         pl.Series("in_zone", inside), pl.Series("_signed_d", signed_d)
     ).sort("track_id", "timestamp")
 
-    unique_visitors = (
-        z.filter(pl.col("in_zone"))
+    # unique_visitors 與 dwell_events 共用同一份「生 in_zone」子集
+    in_z = z.filter(pl.col("in_zone"))
+
+    unique_visitors = in_z.group_by("time_bucket").agg(
+        pl.col("track_id").n_unique().alias("unique_visitors")
+    )
+
+    # 時間一律用整數微秒比較：timestamp 是 Datetime("us")，由 segment.start +
+    # frame_index / fps 算出，30 fps 的相鄰間隔在 33333／33334 µs 之間跳動，用秒的
+    # 浮點數比會在除不盡的間隔上分岔。
+    dwell_us = round(dwell_threshold_seconds * 1_000_000)
+    gap_us = round(dwell_gap_seconds * 1_000_000)
+    _gap_us = pl.col("timestamp").diff().over("track_id").dt.total_microseconds()
+
+    dwell_events = (
+        in_z.with_columns(
+            # 同一 track 相鄰兩次「在區內」的間隔 > T 就開新段；該 track 的第一列
+            # diff 為 null，要顯式納入（`null > x` 得 null，cum_sum 會把 null 傳染
+            # 給整個 track，最後一列不剩——與 entries 的 `_prev != 1` 同一個坑）
+            (_gap_us.is_null() | (_gap_us > gap_us))
+            .cum_sum()
+            .over("track_id")
+            .alias("_dwell_seg")
+        )
+        .with_columns(
+            # 分組鍵必須帶 track_id：段號是各 track 各自從 1 起算的，少了它會拿別人
+            # 的段起點當起算點，是**超計**方向的錯（晚到的人繼承早到者的起算時間）。
+            # 用 min 而非 first：不依賴列順序，成本相同。
+            (
+                pl.col("timestamp")
+                - pl.col("timestamp").min().over("track_id", "_dwell_seg")
+            )
+            .dt.total_microseconds()
+            .alias("_dwell_us")
+        )
+        .filter(pl.col("_dwell_us") >= dwell_us)
+        # 過濾後每段最早的一列 = 首次跨過門檻的那一格；一段只計一次，歸到那一格的 bucket
+        .group_by("track_id", "_dwell_seg")
+        .agg(pl.col("time_bucket").sort_by("timestamp").first())
         .group_by("time_bucket")
-        .agg(pl.col("track_id").n_unique().alias("unique_visitors"))
+        .agg(pl.len().alias("dwell_events"))
     )
 
     entries = (
@@ -160,11 +218,16 @@ def count_zone_visits(
         .agg(pl.len().alias("entries"))
     )
 
-    return unique_visitors.join(
-        entries, on="time_bucket", how="full", coalesce=True
-    ).with_columns(
-        pl.col("unique_visitors").fill_null(0).cast(pl.Int64),
-        pl.col("entries").fill_null(0).cast(pl.Int64),
+    # 三方 join 後一律 fill_null(0)：漏掉會在 parquet 留 null，而 pl.len() 是
+    # UInt32，不 cast 會讓 flow_report 的 sum() 拿到不同型別
+    return (
+        unique_visitors.join(entries, on="time_bucket", how="full", coalesce=True)
+        .join(dwell_events, on="time_bucket", how="full", coalesce=True)
+        .with_columns(
+            pl.col("unique_visitors").fill_null(0).cast(pl.Int64),
+            pl.col("entries").fill_null(0).cast(pl.Int64),
+            pl.col("dwell_events").fill_null(0).cast(pl.Int64),
+        )
     )
 
 

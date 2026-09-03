@@ -18,6 +18,8 @@ from vfa_registry import Zone, load_registry, parse_and_validate_zones
 from zone_mapping.config.constants import (
     BASELINE_FRAME_WIDTH,
     DEFAULT_BOUNDARY_BAND_PX_1080P,
+    DEFAULT_DWELL_GAP_SECONDS,
+    DEFAULT_DWELL_THRESHOLD_SECONDS,
     OUTPUT_ROOT,
     REQUIRED_TRACKING_COLUMNS,
     TMP_SUFFIX,
@@ -36,6 +38,10 @@ logger = StructuredLogger(component="zone_map")
 # 內切半徑取樣的格點密度：步長取 band/8，且長短邊各至少取這麼多點（小 zone 才不會
 # 只取到幾個格點）。
 _INRADIUS_MIN_SAMPLES = 32
+
+# 估算取樣間隔所需的最少樣本數。各路的幀間隔極穩定（實測 p90 = p50），少量樣本就
+# 夠估中位數；這個下限擋的是「每個 track 只有一兩列」那種算不出中位數的退化情形。
+_GAP_MIN_SAMPLES = 8
 
 
 def _resolve_band_px(
@@ -141,11 +147,84 @@ def _validate_zone_fits_band(
         )
 
 
+def _validate_gap_tolerance(
+    camera_id: str, cam_sub: pl.DataFrame, dwell_gap_seconds: float
+) -> None:
+    """fail-loud：容忍窗小於該攝影機的取樣間隔時，`dwell_events` 會恆為 0。
+
+    停留判定把相鄰兩次在區內的間隔超過 `dwell_gap_seconds` 的地方切成兩段。容忍窗
+    小於幀間隔時**每一格都會被切開**，段長恆為 0，達不到任何正的門檻——輸出檔照樣
+    產出、其餘兩個指標照樣正確，只有這一欄整天是 0。
+
+    取樣間隔用「同一 `track_id` 內相鄰兩列的間隔」估，**不是該攝影機的
+    `timestamp` diff**。後者有兩個致命問題：同一格畫面多人時 diff = 0
+    （`(camera_id, timestamp)` 不是唯一鍵），忙碌的攝影機中位數會直接變 0、檢查永遠
+    不觸發；沒有偵測的時段完全沒有列，冷清的攝影機中位數會膨脹到幾十秒而**誤擋**
+    （實測 camera-wide 間隔 max 有 61 秒，per-track 只有 2.1 秒）。
+
+    per-track 序列另有一個結構性的好性質：ByteTrack 的 `max_frames_lost` 就是
+    `[tracker].track_buffer`（30 格），所以同一 `track_id` 內的空洞有上界
+    `track_buffer / fps`，中位數必落在 `[1/fps, track_buffer/fps]`，最壞情況也只
+    高估到約 1–2 秒，誤擋風險被限制住。
+
+    Args:
+        camera_id: 該攝影機的 `camera_id`（僅供錯誤訊息與日誌）。
+        cam_sub: 只含該攝影機的追蹤明細，需已含 `track_id`／`timestamp` 欄位。
+        dwell_gap_seconds: 同一段停留可容忍的中斷（秒）。
+
+    Raises:
+        ValueError: `dwell_gap_seconds` 小於估出的取樣間隔中位數。
+    """
+    gaps = (
+        cam_sub.sort("track_id", "timestamp")
+        .select(
+            pl.col("timestamp")
+            .diff()
+            .over("track_id")
+            .dt.total_microseconds()
+            .alias("_gap_us")
+        )["_gap_us"]
+        .drop_nulls()
+    )
+    if len(gaps) < _GAP_MIN_SAMPLES:
+        # 證據不足時放行，與 `_validate_zone_fits_band` 對「沒有 zone 就不檢查」
+        # 同一個立場：誤擋的代價是該日整份報表都產不出來。
+        logger.warning(
+            "取樣間隔樣本不足，跳過容忍窗檢查",
+            camera_id=camera_id,
+            gap_samples=len(gaps),
+            min_samples=_GAP_MIN_SAMPLES,
+            dwell_gap_seconds=dwell_gap_seconds,
+        )
+        return
+    median_us = float(gaps.median())
+    logger.info(
+        "取樣間隔估算（同一 track 相鄰列）",
+        camera_id=camera_id,
+        gap_samples=len(gaps),
+        median_gap_ms=round(median_us / 1000, 2),
+        dwell_gap_seconds=dwell_gap_seconds,
+    )
+    if dwell_gap_seconds * 1_000_000 < median_us:
+        fps = 1_000_000 / median_us if median_us > 0 else float("inf")
+        raise ValueError(
+            f"攝影機 {camera_id} 的 [zone].dwell_gap_seconds ="
+            f" {dwell_gap_seconds} 秒小於該路的取樣間隔"
+            f"（中位數約 {median_us / 1000:.1f} ms，換算約 {fps:.1f} fps，"
+            f"取自同一 track 相鄰列的 {len(gaps)} 個間隔）。"
+            "每一格都會被切成獨立的停留段，這台攝影機的 dwell_events 會恆為 0。"
+            "兩條路擇一：把 dwell_gap_seconds 調到取樣間隔以上"
+            "（預設 3.0 秒涵蓋 15–30 fps），或確認上游 video_analyze 的 fps 是否異常。"
+        )
+
+
 def map_zones_daily(
     date: datetime.date,
     bucket_dir: str,
     bucket_minutes: int,
     boundary_band_px_1080p: float = DEFAULT_BOUNDARY_BAND_PX_1080P,
+    dwell_threshold_seconds: float = DEFAULT_DWELL_THRESHOLD_SECONDS,
+    dwell_gap_seconds: float = DEFAULT_DWELL_GAP_SECONDS,
     output_root: Path = OUTPUT_ROOT,
 ) -> Path:
     """讀取當日追蹤結果，依 `camera_registry.yaml` 的 zone 定義統計人流。
@@ -162,6 +241,9 @@ def map_zones_daily(
             （寬 1920）為基準的像素值；逐攝影機依其 `frame_width` 換算成實際像素後
             才進判定（見 ADR-004、ADR-006）。`0` = 純內外判定，且換算後仍是 0；
             預設 25 取自實測（見 README「已知限制」）。
+        dwell_threshold_seconds: `dwell_events` 的停留門檻（秒），必須 > 0。與像素
+            參數不同，這是絕對時間、不隨解析度換算（見 ADR-016）。
+        dwell_gap_seconds: 同一段停留可容忍的中斷（秒），必須 > 0。
         output_root: 輸出根目錄。
 
     Returns:
@@ -172,8 +254,22 @@ def map_zones_daily(
             `bucket_dir` 底下找不到 `camera_registry.yaml`。
         ValueError: 追蹤結果缺少影像尺寸或落腳點欄位（舊版 `video_analyze` 的
             產物）、`camera_registry.yaml` 定義了 zone 的攝影機在當天追蹤結果中
-            查無資料、任一 zone 定義不合法，或有 zone 窄到放不下線段區域。
+            查無資料、任一 zone 定義不合法、有 zone 窄到放不下線段區域，或任一
+            攝影機的 `dwell_gap_seconds` 小於其取樣間隔。
     """
+    # 直接呼叫本函式時不經 pydantic，這兩個門檻的 gt=0 要自己擋一次：0 會讓每個
+    # 在區內的段都計一次，數字看起來合理但量的是別的東西。
+    for name, value in (
+        ("dwell_threshold_seconds", dwell_threshold_seconds),
+        ("dwell_gap_seconds", dwell_gap_seconds),
+    ):
+        if value <= 0:
+            raise ValueError(
+                f"{name} 必須大於 0（收到 {value}）。停留門檻與容忍窗都沒有可用的"
+                "退化語義：0 會讓每個在區內的段都達標，dwell_events 量到的就不再是"
+                "停留（見 ADR-016）。"
+            )
+
     output_dir = output_root / Path(bucket_dir).name / date.isoformat()
     results_path = output_dir / TRACKING_RESULTS_FILENAME
     if not results_path.exists():
@@ -222,9 +318,18 @@ def map_zones_daily(
         # 換算在此算好，`count_zone_visits` 收到的一律是實際像素——判定邏輯不需要
         # 知道「基準解析度」這個概念，`stats.py` 維持純幾何
         band_px, scale = _resolve_band_px(camera_id, cam_sub, boundary_band_px_1080p)
+        # 容忍窗檢查是 camera 級（估的是該路的取樣間隔），與 zone 幾何無關，故在
+        # zone 迴圈之前只做一次
+        _validate_gap_tolerance(camera_id, cam_sub, dwell_gap_seconds)
         for zone in zones:
             _validate_zone_fits_band(camera_id, zone, band_px, scale)
-            counts = count_zone_visits(cam_sub, zone, band_px).with_columns(
+            counts = count_zone_visits(
+                cam_sub,
+                zone,
+                band_px,
+                dwell_threshold_seconds=dwell_threshold_seconds,
+                dwell_gap_seconds=dwell_gap_seconds,
+            ).with_columns(
                 pl.lit(camera_id).alias("camera_id"),
                 pl.lit(zone.name).alias("zone"),
             )
