@@ -221,7 +221,7 @@ cameras:
 | 路徑 | 產出階段 | 內容 |
 | --- | --- | --- |
 | `outputs/{bucket}/{date}/tracking_results.parquet` | video_analyze | 追蹤明細；含 `foot_x`／`foot_y` 與 `frame_width`／`frame_height`（見下） |
-| `outputs/{bucket}/{date}/zone_counts.parquet` | zone_mapping | 每時段每區域事件統計 |
+| `outputs/{bucket}/{date}/zone_counts.parquet` | zone_mapping | 每時段每區域人流統計，欄位 `camera_id`／`zone`／`time_bucket`／`unique_visitors`／`entries`／`dwell_events` |
 | `outputs/{bucket}/{date}/line_counts.parquet` | line_counting | 每時段每計數線進出人數，欄位 `line_group`／`camera_id`／`line`／`time_bucket`／`in_count`／`out_count` |
 | `outputs/{bucket}/report.xlsx` | flow_report | 跨日累加的 Excel 報表（六個分頁：區域兩頁、出入口三頁、活動事件一頁） |
 
@@ -261,6 +261,7 @@ cameras:
 | [013](docs/adr/video_analyze/013-self-built-pre-post.md) | `video_analyze` | 推論進程自建前處理與後處理、ultralytics 只留 `AutoBackend` 的 forward，記錄前處理為何必須是 `.float()` 且 `permute` 要排在通道索引之前（否則張量不 contiguous 而 TensorRT 只看 `data_ptr`）、後處理的 conf → 截斷 → classes 順序不可調動、載入期為何以實跑的輸出形狀驗 end2end 而非讀 metadata、slot 歸還點為何得以前移到前處理之後（修訂 ADR-010 的 Decision 2／4／6），以及驗收判準為何是逐值相同 |
 | [014](docs/adr/video_analyze/014-inference-pipelining.md) | `video_analyze` | 推論進程改成兩批深度的流水（ping-pong 緩衝、複製與運算各一條 stream、以 event 定序）、正式路徑改吃本套件自建的 TensorRT runner（`execute_async_v3`），記錄 `AutoBackend.forward` 為何擋住重疊（阻塞的 `execute_v2` ＋ 會被下一次 forward 覆寫的 binding buffer）、四道載入期檢查為何一律取引擎自己宣告的值、`set_input_shape` 回 `False` 之後會沿用上一批 shape 的靜默錯批路徑、批次序號為何要核對而不靠 FIFO 默契，以及 `detection_fps` 的口徑為何從此不可與改動前相減（取代 ADR-013 的 Decision 3／4，並再次修訂 ADR-010 的 Decision 2） |
 | [015](docs/adr/video_analyze/015-narrow-engine-profile.md) | `video_analyze` | `tools/build_engine.py` 接管 TensorRT builder（不再走 ultralytics 的引擎匯出）、optimization profile 的空間維三個界釘成 384×640（batch 維維持 1–max），記錄兩個舊界為何都不是誰選的（上界是 `workspace` 的副產物、下界是 `TopK(K=300)` 跑不起來的形狀）、記憶體上限為何刻意不設（它同時篩掉 tactic，正是收益來源）、檔頭長度為何必須寫位元組數而非字元數、載入端為何要擋下沒收窄過的舊引擎（症狀只有變慢與多吃 1 GB 顯存），以及收窄之後 ultralytics 的 warmup 會送 640×640 出界而 `set_input_shape` 的回傳值沒人檢查（修訂 ADR-011 Decision 3 的「代價」那段） |
+| [016](docs/adr/zone_mapping/016-zone-dwell-threshold.md) | `zone_mapping` | `zone_counts.parquet` 新增停留人次 `dwell_events`，記錄判定基礎為何接在生的 `in_zone` 上（與 `unique_visitors` 同源、與 `entries` 同型）、加一道「該段要真的深入區內」的對照組為何被量測結果否決（X=20 s 只差 3.6%，且被排除的段深入 27–42 px）、容忍窗的有效上界為何就是漏偵測空洞的上界 `track_buffer / fps`（實測 2.133 s，T 由 2.2 拉到 3.0 一段都沒多），以及取樣間隔的 fail-loud 為何必須用 per-track 而非 camera-wide 的統計量（同格多人會把中位數壓成 0，檢查在最需要它的忙碌攝影機上失效） |
 
 
 **取號規則**：編號是全域流水號，與子目錄無關；新增 ADR 一律取上表的下一號，不在各子目錄
