@@ -52,14 +52,17 @@ def rollup_by_period(
 
     輸入需含 local_time（naive datetime）、zone、metric 指定的欄位。
 
-    metric='unique_visitors' 是近似值：跨 bucket 用 sum() 彙總會讓同一人跨相鄰
-    bucket 停留時被重複計入（track_id 未保留到這層無法消除重複）；'entries' 不受影響。
+    三個可彙總的欄位分兩類：`'entries'` 與 `'dwell_events'` 是事件型計數，上游只在
+    事件發生的那一個 bucket 記一次，跨 bucket 用 sum() 加總不會重複計；
+    `'unique_visitors'` 則是近似值，同一人跨相鄰 bucket 停留時會被重複計入
+    （track_id 未保留到這層無法消除重複）。
 
     Args:
         df: 含 `local_time`（naive datetime）、`zone`、`metric` 指定欄位的
             資料表（見 `to_taipei`）。
         period_minutes: 彙總的時段粒度（分鐘）。
-        metric: 要彙總的欄位名稱（`"entries"` 或 `"unique_visitors"`）。
+        metric: 要彙總的欄位名稱（`"entries"`、`"unique_visitors"` 或
+            `"dwell_events"`）。
 
     Returns:
         依 `date`／`weekday`／`period`／`zone` 排序的彙總表。輸出欄位：date

@@ -41,10 +41,13 @@ from flow_report.config.constants import (
     SHEET_LINE_HOURLY,
     SHEET_LINE_PEAK_IN,
     SHEET_LINE_PEAK_OUT,
+    SHEET_ZONE_DWELL,
     SHEET_ZONE_HOURLY,
     SHEET_ZONE_PEAK,
     TMP_SUFFIX,
     ZONE_COUNTS_FILENAME,
+    ZONE_DWELL_COLUMNS,
+    ZONE_DWELL_SORT_COLUMNS,
     ZONE_HOURLY_COLUMNS,
     ZONE_HOURLY_SORT_COLUMNS,
     ZONE_PEAK_COLUMNS,
@@ -60,6 +63,10 @@ from flow_report.services.stats import (
 
 logger = StructuredLogger(component="report_builder")
 
+# 「各區域停留人次」分頁固定彙總的 zone_counts 欄位；它不受 `[report].metric` 影響
+# （`metric` 只作用於「人流量」「尖峰人流」兩頁）。
+DWELL_METRIC = "dwell_events"
+
 
 class ReportFrames(NamedTuple):
     """本次要寫入報表的各分頁資料；`None` 代表該類統計在這個 bucket 沒有定義。
@@ -71,6 +78,7 @@ class ReportFrames(NamedTuple):
 
     zone_hourly: pl.DataFrame | None
     zone_peak: pl.DataFrame | None
+    zone_dwell_hourly: pl.DataFrame | None
     line_hourly: pl.DataFrame | None
     line_peak_in: pl.DataFrame | None
     line_peak_out: pl.DataFrame | None
@@ -104,6 +112,12 @@ _DATA_SHEETS = (
         SHEET_ZONE_HOURLY, ZONE_HOURLY_COLUMNS, ZONE_HOURLY_SORT_COLUMNS, "zone_hourly"
     ),
     _DataSheet(SHEET_ZONE_PEAK, ZONE_PEAK_COLUMNS, ZONE_PEAK_SORT_COLUMNS, "zone_peak"),
+    _DataSheet(
+        SHEET_ZONE_DWELL,
+        ZONE_DWELL_COLUMNS,
+        ZONE_DWELL_SORT_COLUMNS,
+        "zone_dwell_hourly",
+    ),
     _DataSheet(
         SHEET_LINE_HOURLY, LINE_HOURLY_COLUMNS, LINE_HOURLY_SORT_COLUMNS, "line_hourly"
     ),
@@ -182,7 +196,17 @@ def _zone_frames(
     period_minutes: int,
     metric: str,
     registry_file: Path,
-) -> tuple[pl.DataFrame, pl.DataFrame]:
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """讀當日 zone parquet，回傳逐時段人流、每日尖峰、逐時段停留人次三個 frame。
+
+    三者共用同一次 `read_parquet`／`to_taipei`／`_reject_unknown_pairs`：停留分頁的
+    (camera_id, zone) 維度與另外兩頁完全相同，沒有第二次驗證的理由。
+
+    Raises:
+        FileNotFoundError: registry 定義了區域，但當日 parquet 不存在。
+        ValueError: parquet 缺 `dwell_events` 欄（上游是舊版 `zone_mapping`），或
+            出現不在 registry 內的 (camera_id, zone) 組合。
+    """
     counts_path = output_dir / ZONE_COUNTS_FILENAME
     if not counts_path.exists():
         raise FileNotFoundError(
@@ -193,6 +217,16 @@ def _zone_frames(
     # parse_and_validate_zones 順便驗證跨攝影機 zone 名稱唯一性
     zone_cameras = parse_and_validate_zones(zone_entries)
     df = to_taipei(pl.read_parquet(counts_path))
+    # schema 不對就沒必要再驗內容，故排在 _reject_unknown_pairs 之前。不靠 polars
+    # 自己拋 ColumnNotFoundError：那個訊息只說找不到欄位，讀的人無從分辨是「上游是
+    # 舊版」還是「報表程式寫錯欄名」，更不會知道重跑 zone_mapping 就能解決。
+    # 只檢查欄位存在、不檢查型別——既有兩欄也不驗型別，加一道不對稱的檢查沒有理由。
+    if DWELL_METRIC not in df.columns:
+        raise ValueError(
+            f"{counts_path} 缺少 {DWELL_METRIC} 欄位，無法產生「{SHEET_ZONE_DWELL}」"
+            "分頁。該檔由舊版 zone_mapping 產生（該欄自 ADR-016 起才有），"
+            "請用新版 zone_mapping 重跑該日（純 CPU 運算，不必重跑偵測）。"
+        )
     valid_pairs = {
         (camera_id, zone.name)
         for camera_id, zones in zone_cameras.items()
@@ -201,7 +235,11 @@ def _zone_frames(
     _reject_unknown_pairs(df, ("camera_id", "zone"), valid_pairs, counts_path)
 
     hourly_df = rollup_by_period(df, period_minutes, metric)
-    return hourly_df, peak_per_day(hourly_df)
+    return (
+        hourly_df,
+        peak_per_day(hourly_df),
+        rollup_by_period(df, period_minutes, DWELL_METRIC),
+    )
 
 
 def _line_frames(
@@ -272,9 +310,9 @@ def _build_report_frames(
             f"{registry_file} 中沒有任何攝影機定義區域或計數線，沒有可彙總的統計。"
         )
 
-    zone_hourly = zone_peak = None
+    zone_hourly = zone_peak = zone_dwell_hourly = None
     if has_zone_defs:
-        zone_hourly, zone_peak = _zone_frames(
+        zone_hourly, zone_peak, zone_dwell_hourly = _zone_frames(
             output_dir, zone_entries, period_minutes, metric, registry_file
         )
     else:
@@ -301,6 +339,7 @@ def _build_report_frames(
     return ReportFrames(
         zone_hourly=zone_hourly,
         zone_peak=zone_peak,
+        zone_dwell_hourly=zone_dwell_hourly,
         line_hourly=line_hourly,
         line_peak_in=line_peak_in,
         line_peak_out=line_peak_out,
@@ -490,7 +529,8 @@ def export_report_daily(
         period_minutes: 報表人流彙總的時段粒度（分鐘），需為 `bucket_minutes`
             的倍數。
         metric: 「人流量」「尖峰人流」使用的統計量；只作用於區域統計，計數線
-            固定用 `in_count`／`out_count`。
+            固定用 `in_count`／`out_count`。新增的「各區域停留人次」分頁固定用
+            `dwell_events`，同樣不受 `metric` 影響。
         on_duplicate_date: 同一天資料已存在時的處理方式。
         bucket_minutes: 上游 parquet 的時段粒度（分鐘）。
         output_root: 輸出根目錄。
@@ -503,8 +543,9 @@ def export_report_daily(
             `camera_registry.yaml` 中有跨攝影機重複的 zone／line 名稱、
             registry 中沒有任何區域或計數線定義、上游 parquet 出現不在該 registry
             內的 (camera_id, zone)／(camera_id, line) 組合、registry 已無某一側的
-            定義但當日對應 parquet 仍有資料，或 `on_duplicate_date="error"` 時
-            發現日期已存在。
+            定義但當日對應 parquet 仍有資料、`zone_counts.parquet` 由舊版
+            `zone_mapping` 產生而缺 `dwell_events` 欄，或 `on_duplicate_date="error"`
+            時發現日期已存在。
         FileNotFoundError: registry 要求的當日 parquet 不存在，或 `bucket_dir`
             底下找不到 `camera_registry.yaml`。
     """

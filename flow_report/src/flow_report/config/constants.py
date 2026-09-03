@@ -20,6 +20,7 @@ TMP_SUFFIX = ".tmp"
 # 「每日尖峰」），讓兩組分頁的命名對稱；既有 report.xlsx 的舊分頁不做遷移。
 SHEET_ZONE_HOURLY = "各區域人流"
 SHEET_ZONE_PEAK = "各區域每日尖峰"
+SHEET_ZONE_DWELL = "各區域停留人次"
 SHEET_LINE_HOURLY = "各出入口人流"
 SHEET_LINE_PEAK_IN = "各出入口每日進場尖峰"
 SHEET_LINE_PEAK_OUT = "各出入口每日出場尖峰"
@@ -39,6 +40,17 @@ ZONE_HOURLY_COLUMNS = (
     ("period", "小時"),
     ("zone", "區域"),
     ("value", "人流量"),
+)
+# 停留分頁的前四欄與 ZONE_HOURLY_COLUMNS 相同，只有值欄不同：它彙總的是
+# `dwell_events`（達到停留門檻的**人次**，同一人同一時段內兩段都達標計 2），
+# 與「人流量」不是子集關係，故表頭不共用、也不可相減。門檻秒數只在
+# `zone_mapping` 的 config.toml，報表側無從得知，因此不出現在表頭（見 ADR-017）。
+ZONE_DWELL_COLUMNS = (
+    ("date", "日期"),
+    ("weekday", "星期"),
+    ("period", "小時"),
+    ("zone", "區域"),
+    ("value", "停留人次"),
 )
 ZONE_PEAK_COLUMNS = (
     ("date", "日期"),
@@ -83,6 +95,9 @@ COLUMN_WIDTH = 14
 # 排序用的鍵值組合（使用欄位名稱而非索引，避免欄位順序調整時忘記同步改數字索引）。
 # 區域／計數線名稱都是全域唯一，故不必把「群組」也放進鍵值。
 ZONE_HOURLY_SORT_COLUMNS = ("日期", "小時", "區域")
+# 停留分頁的排序欄與 ZONE_HOURLY_SORT_COLUMNS 內容相同，但分開一份：兩頁的值欄
+# 語義不同，日後任一頁改欄序時不該被迫連動另一頁。
+ZONE_DWELL_SORT_COLUMNS = ("日期", "小時", "區域")
 ZONE_PEAK_SORT_COLUMNS = ("日期", "區域")
 LINE_HOURLY_SORT_COLUMNS = ("日期", "小時", "計數線")
 LINE_PEAK_SORT_COLUMNS = ("日期", "計數線")
