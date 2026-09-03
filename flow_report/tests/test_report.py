@@ -13,6 +13,7 @@ from flow_report.config.constants import (
     SHEET_LINE_HOURLY,
     SHEET_LINE_PEAK_IN,
     SHEET_LINE_PEAK_OUT,
+    SHEET_ZONE_DWELL,
     SHEET_ZONE_HOURLY,
     SHEET_ZONE_PEAK,
     ZONE_HOURLY_COLUMNS,
@@ -23,9 +24,11 @@ from flow_report.services.report import (
     _write_report,
 )
 
+# 順序必須與 report.py 的 `_DATA_SHEETS` 一致：分頁名的斷言是順序相等比對。
 _ALL_SHEETS = (
     SHEET_ZONE_HOURLY,
     SHEET_ZONE_PEAK,
+    SHEET_ZONE_DWELL,
     SHEET_LINE_HOURLY,
     SHEET_LINE_PEAK_IN,
     SHEET_LINE_PEAK_OUT,
@@ -73,27 +76,37 @@ def _write_registry(
 
 
 def _write_zone_counts(
-    path: Path, camera_id: str = "loc_cam001", zone: str = "entrance"
+    path: Path,
+    camera_id: str = "loc_cam001",
+    zone: str = "entrance",
+    with_dwell: bool = True,
 ) -> None:
-    df = pl.DataFrame(
-        {
-            "camera_id": [camera_id],
-            "zone": [zone],
-            "time_bucket": [
-                datetime.datetime(2026, 5, 1, 11, 0, tzinfo=ZoneInfo("Asia/Taipei"))
-            ],
-            "unique_visitors": [1],
-            "entries": [1],
-        },
-        schema={
-            "camera_id": pl.Utf8,
-            "zone": pl.Utf8,
-            "time_bucket": pl.Datetime("us", "Asia/Taipei"),
-            "unique_visitors": pl.Int64,
-            "entries": pl.Int64,
-        },
-    )
-    df.write_parquet(path)
+    """寫出當日 zone parquet。
+
+    `dwell_events` 的值刻意與 `entries`／`unique_visitors` 不同：停留分頁若誤接到
+    `metric` 指定的欄位，數字會一眼看得出來。`with_dwell=False` 造的是舊版
+    `zone_mapping`（ADR-016 之前）的產物，用來驗缺欄 fail loud。
+    """
+    columns = {
+        "camera_id": [camera_id],
+        "zone": [zone],
+        "time_bucket": [
+            datetime.datetime(2026, 5, 1, 11, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+        ],
+        "unique_visitors": [1],
+        "entries": [1],
+    }
+    schema = {
+        "camera_id": pl.Utf8,
+        "zone": pl.Utf8,
+        "time_bucket": pl.Datetime("us", "Asia/Taipei"),
+        "unique_visitors": pl.Int64,
+        "entries": pl.Int64,
+    }
+    if with_dwell:
+        columns["dwell_events"] = [4]
+        schema["dwell_events"] = pl.Int64
+    pl.DataFrame(columns, schema=schema).write_parquet(path)
 
 
 def _write_line_counts(
@@ -277,6 +290,42 @@ def test_build_report_frames_rejects_unknown_camera_zone_pair(tmp_path):
         _build(tmp_path, bucket_dir)
 
 
+def test_build_report_frames_rejects_zone_counts_without_dwell_events(tmp_path):
+    """舊版 zone_mapping 產的 zone_counts.parquet 缺 dwell_events 欄時要 fail loud。
+
+    靜默跳過該分頁的話，跨日累加的報表會出現「有些日期有停留、有些沒有」，看報表
+    的人無從分辨是「那天沒人停留」還是「那天沒算」。訊息連內容一起斷言：只說
+    「找不到欄位」的話，讀的人不會知道要重跑哪個階段。
+    """
+    bucket_dir, output_dir = _prepare_bucket(tmp_path)
+    _write_zone_counts(output_dir / "zone_counts.parquet", with_dwell=False)
+    _write_registry(bucket_dir / "camera_registry.yaml", {"cam001": ["entrance"]})
+
+    with pytest.raises(ValueError) as excinfo:
+        _build(tmp_path, bucket_dir)
+
+    message = str(excinfo.value)
+    assert "dwell_events" in message
+    assert "zone_mapping" in message
+    assert str(output_dir / "zone_counts.parquet") in message
+
+
+def test_build_report_frames_rolls_up_dwell_events_regardless_of_metric(tmp_path):
+    """停留分頁固定彙總 dwell_events，不受 [report].metric 影響。
+
+    parquet 的三個值互不相同（entries=1、unique_visitors=1、dwell_events=4），
+    停留分頁若誤接到 metric 指定的欄位，這裡就會拿到 1。
+    """
+    bucket_dir, output_dir = _prepare_bucket(tmp_path)
+    _write_zone_counts(output_dir / "zone_counts.parquet")
+    _write_registry(bucket_dir / "camera_registry.yaml", {"cam001": ["entrance"]})
+
+    for metric in ("entries", "unique_visitors"):
+        frames = _build(tmp_path, bucket_dir, metric=metric)
+        assert frames.zone_dwell_hourly["value"].to_list() == [4]
+        assert frames.zone_hourly["value"].to_list() == [1]
+
+
 def test_build_report_frames_skips_lines_when_registry_defines_none(tmp_path):
     """registry 沒有任何計數線定義時，缺 line_counts.parquet 不是錯誤——這個 bucket
     本來就沒有計數線，出入口三頁沒有資料可寫（分頁仍會建立）。"""
@@ -305,6 +354,7 @@ def test_build_report_frames_skips_zones_when_registry_defines_none(tmp_path):
     frames = _build(tmp_path, bucket_dir)
     assert frames.zone_hourly is None
     assert frames.zone_peak is None
+    assert frames.zone_dwell_hourly is None
     assert frames.line_hourly.height == 1
 
 
@@ -457,10 +507,24 @@ def _frames(**kwargs) -> ReportFrames:
     return ReportFrames(**fields)
 
 
-def _zone_frames(date="2026-05-01", weekday="星期五", period="09:00", value=10):
+def _zone_frames(
+    date="2026-05-01", weekday="星期五", period="09:00", value=10, dwell_value=7
+):
+    """zone 三頁的 frames。
+
+    停留人次預設與人流量不同值：既有的跨分頁回歸（欄位配對、overwrite 冪等、
+    error 模式原子性）都吃這個 helper，dwell 若留成 `None` 就等於新分頁完全沒被
+    它們保護到——`_frames` 對未給的欄位一律填 `None`，不會有任何訊號。
+
+    停留分頁與人流分頁的資料欄名同為 `value`（`rollup_by_period` 的輸出），故兩者
+    給不同值，串頁時看得出來。
+    """
     return _frames(
         zone_hourly=_make_zone_hourly_df([(date, weekday, period, "checkout", value)]),
         zone_peak=_make_zone_peak_df([(date, weekday, "checkout", period, value)]),
+        zone_dwell_hourly=_make_zone_hourly_df(
+            [(date, weekday, period, "checkout", dwell_value)]
+        ),
     )
 
 
@@ -512,7 +576,7 @@ def _sheet_rows(path: Path) -> dict[str, list[tuple]]:
 
 
 def test_write_report_creates_all_sheets_with_headers(tmp_path):
-    """不論該 bucket 有沒有計數線，6 個分頁的表頭一律建立，讓 BI 端的 schema 穩定。
+    """不論該 bucket 有沒有計數線，7 個分頁的表頭一律建立，讓 BI 端的 schema 穩定。
 
     表頭寫死字面值而非拿 constants 的常數比對：常數比對是恆等式，改了定義照樣
     通過，擋不住無意間的欄位增刪。這些字串是 BI 端接的對外契約，該由測試釘住。
@@ -527,6 +591,9 @@ def test_write_report_creates_all_sheets_with_headers(tmp_path):
     ]
     assert [c.value for c in wb[SHEET_ZONE_PEAK][1]] == [
         "日期", "星期", "區域", "尖峰時段", "尖峰人流",
+    ]
+    assert [c.value for c in wb[SHEET_ZONE_DWELL][1]] == [
+        "日期", "星期", "小時", "區域", "停留人次",
     ]
     assert [c.value for c in wb[SHEET_LINE_HOURLY][1]] == [
         "日期", "星期", "小時", "群組", "計數線", "進場人數", "出場人數", "淨進出",
@@ -590,6 +657,17 @@ def test_write_report_puts_each_value_under_its_paired_header(tmp_path):
         "區域": "checkout",
         "尖峰時段": "09:00",
         "尖峰人流": 10,
+    }
+
+    zone_dwell = wb[SHEET_ZONE_DWELL]
+    assert dict(
+        zip([c.value for c in zone_dwell[1]], [c.value for c in zone_dwell[2]])
+    ) == {
+        "日期": "2026-05-01",
+        "星期": "星期五",
+        "小時": "09:00",
+        "區域": "checkout",
+        "停留人次": 7,
     }
 
     line_peak = wb[SHEET_LINE_PEAK_IN]
@@ -734,7 +812,7 @@ def test_write_report_sorts_sheets_containing_blank_rows(tmp_path):
 
 
 def test_write_report_overwrite_is_idempotent_across_all_sheets(tmp_path):
-    """同一天以 overwrite 重跑，6 個分頁的列序與內容都須逐列一致。"""
+    """同一天以 overwrite 重跑，7 個分頁的列序與內容都須逐列一致。"""
     path = tmp_path / "report.xlsx"
     _write(path, _full_frames(), "overwrite")
     first = _sheet_rows(path)
@@ -769,6 +847,7 @@ def test_write_report_overwrite_clears_target_date_without_any_rows(tmp_path):
     empty = _frames(
         zone_hourly=_make_zone_hourly_df([]),
         zone_peak=_make_zone_peak_df([]),
+        zone_dwell_hourly=_make_zone_hourly_df([]),
         line_hourly=_make_line_hourly_df([]),
         line_peak_in=_make_line_peak_df([]),
         line_peak_out=_make_line_peak_df([]),
@@ -780,7 +859,7 @@ def test_write_report_overwrite_clears_target_date_without_any_rows(tmp_path):
 
 
 def test_write_report_error_mode_writes_nothing_on_conflict(tmp_path):
-    """error 模式遇到日期衝突時，6 個分頁都不可被寫入（跨分頁的原子性）。"""
+    """error 模式遇到日期衝突時，7 個分頁都不可被寫入（跨分頁的原子性）。"""
     path = tmp_path / "report.xlsx"
     _write(path, _full_frames(), "append")
     before = _sheet_rows(path)
@@ -803,6 +882,86 @@ def test_write_report_error_mode_detects_conflict_on_line_sheets(tmp_path):
 
     with pytest.raises(ValueError, match="未寫入任何內容"):
         _write(path, line_only, "error")
+
+
+def test_write_report_keeps_dwell_values_out_of_the_zone_hourly_sheet(tmp_path):
+    """停留人次不可滲進「各區域人流」頁，反之亦然。
+
+    兩個分頁的資料欄名都是 `value`、前四欄的表頭也完全相同，是本次最容易靜默錯位
+    的地方：兩頁若不小心共用同一個 frame，欄數、表頭、缺欄那幾支測試全都不會紅。
+    """
+    path = tmp_path / "report.xlsx"
+    _write(path, _zone_frames(value=10, dwell_value=7), "append")
+
+    rows = _sheet_rows(path)
+    assert rows[SHEET_ZONE_HOURLY] == [("2026-05-01", "星期五", "09:00", "checkout", 10)]
+    assert rows[SHEET_ZONE_DWELL] == [("2026-05-01", "星期五", "09:00", "checkout", 7)]
+
+
+def test_write_report_adds_dwell_sheet_to_workbook_without_it(tmp_path):
+    """升級路徑：本次改動前產的 report.xlsx 只有 6 個分頁，停留頁要補建在最後，
+    且既有分頁的表頭與既有列都不可被動到。"""
+    path = tmp_path / "report.xlsx"
+    _write(path, _full_frames(date="2026-04-01", weekday="星期三"), "append")
+    # 造出「加分頁之前」的檔：把停留頁整個拿掉
+    wb = openpyxl.load_workbook(path)
+    wb.remove(wb[SHEET_ZONE_DWELL])
+    wb.save(path)
+    wb.close()
+    before = _sheet_rows(path)
+    assert SHEET_ZONE_DWELL not in before
+
+    _write(path, _full_frames(date="2026-05-01", weekday="星期五"), "append")
+
+    wb = openpyxl.load_workbook(path)
+    assert wb.sheetnames == [*before, SHEET_ZONE_DWELL]
+    assert [c.value for c in wb[SHEET_ZONE_HOURLY][1]] == [
+        "日期", "星期", "小時", "區域", "人流量",
+    ]
+    wb.close()
+    rows = _sheet_rows(path)
+    # 舊日期在新分頁上沒有列——這是加欄位到跨日累加報表的必然結果（見 README 已知限制）
+    assert rows[SHEET_ZONE_DWELL] == [("2026-05-01", "星期五", "09:00", "checkout", 7)]
+    assert rows[SHEET_ZONE_HOURLY][0] == ("2026-04-01", "星期三", "09:00", "checkout", 10)
+
+
+def test_write_report_overwrite_clears_dwell_sheet_when_zone_side_is_none(tmp_path):
+    """registry 移除區域定義後以 overwrite 重跑該日：停留頁的舊列也要一併清除。
+
+    frames 只帶停留頁（不用 _full_frames）：別的分頁本來就會被清，混在一起的話
+    把停留頁從清除迴圈裡拿掉，測試照樣綠。
+    """
+    path = tmp_path / "report.xlsx"
+    dwell_only = _frames(
+        zone_dwell_hourly=_make_zone_hourly_df(
+            [("2026-05-01", "星期五", "09:00", "checkout", 7)]
+        )
+    )
+    _write(path, dwell_only, "append")
+    assert _sheet_rows(path)[SHEET_ZONE_DWELL]
+
+    line_only = _frames(
+        line_hourly=_make_line_hourly_df(
+            [("2026-05-01", "星期五", "09:00", "四樓書店", "main_gate", 3, 1, 2)]
+        )
+    )
+    _write(path, line_only, "overwrite")
+
+    assert _sheet_rows(path)[SHEET_ZONE_DWELL] == []
+
+
+def test_write_report_error_mode_detects_conflict_on_dwell_sheet(tmp_path):
+    """衝突偵測涵蓋停留頁：只有停留頁有該日資料時也要擋下。"""
+    path = tmp_path / "report.xlsx"
+    dwell_only = _frames(
+        zone_dwell_hourly=_make_zone_hourly_df(
+            [("2026-05-01", "星期五", "09:00", "checkout", 7)]
+        )
+    )
+    _write(path, dwell_only, "append")
+
+    with pytest.raises(ValueError, match="未寫入任何內容"):
+        _write(path, dwell_only, "error")
 
 
 def test_write_report_closes_workbook_after_save(tmp_path):
