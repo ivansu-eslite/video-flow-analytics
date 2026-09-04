@@ -412,6 +412,11 @@ zone 與 line 幾何都不會被驗證。
 （`output_parts.claim_parts_dir`，鎖是 `tracking_results.parts/.lock`），再以多進程拆成
 N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程：
 
+三種子進程都帶名字（`mp.Process(name=...)`）：`reader[<stream_dirname>]`、`inference`、
+`track[shard<k>]`。有兩個地方讀得到它——主進程異常彙總的訊息，以及子進程預設 traceback 的
+表頭（`Process reader[loc_cam]:`），所以在十幾個進程交錯的 stderr 上不必靠時間順序猜是哪
+一路死掉。
+
 - **影格走共享記憶體、不走 pickle**（`frame_ring.py`）：每路一塊固定格數的環形緩衝
   （`mp.RawArray`），queue 只傳 slot 索引，避免每格影格逐格 pickle 的高成本。推理進程
   直接消費 slot 的 view、不複製出私有副本（`view_slot`）。緩衝依**推論尺寸**（640×384）
@@ -482,7 +487,20 @@ N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程�
   分岔（例如 `2026/05/01/160000.000Z.mkv` 屬台北 05/02 00:00）。這代表片段被放進錯誤
   的日期目錄，寧可中止也不靜默寫錯天。此檢查在 `discover_segments` 掃描時、於主進程
   執行，**任一路踩到就整天中止**（不是只跳過該攝影機或該片段）。
-- 其餘片段的開檔 / 讀 FPS 失敗 → 讀取子進程拋錯、以非零 exitcode 結束。
+- 其餘片段的開檔 / 讀 FPS 失敗 → 讀取子進程拋錯、以非零 exitcode 結束，並在往外拋之前落
+  一筆 `component="video_reader"`、`severity="ERROR"` 的單行 JSON（例外型別、訊息、完整
+  stacktrace，加上 `camera`／`stream_id`／`segment` 三個脈絡欄位）。這筆紀錄涵蓋讀取進程
+  入口的**任何**失敗，不限 `_read_segment` 那幾個自帶檔名的 `ValueError`：解碼器拋的
+  `OSError`、`FrameRing.write_slot` 的形狀錯誤，原本都只留下一段既沒有攝影機也沒有片段的裸
+  traceback。組裝階段（`FrameRing`／`DailyStreamVideoReader`）失敗時 `segment` 為 `null`，
+  並**補送一次 `READER_FAILED`**——該階段 `run()` 的 `finally` 還沒機會執行，不補送的話推理
+  進程會一直阻塞到父進程 `_terminate_all` 的 SIGTERM。`KeyboardInterrupt` 刻意不走這條：
+  Ctrl+C 送給整個 process group，N 路齊噴 ERROR 在日誌上是假警報，而本 repo 把它當非錯誤
+  路徑處理。
+- 任一子進程異常結束 → 主進程拋 `RuntimeError`，訊息逐個列出「角色 pid exitcode」，負
+  exitcode 另附訊號名（`-9` → `SIGKILL`）。**不是所有被訊號終止的進程都顯示得出訊號名**：
+  `run_track_worker` 攔了 SIGTERM 轉 `SystemExit(128 + signum)`，那條路徑的 exitcode 是正
+  的 143、也不印 traceback。
 - **引擎載入前的檢查，任一不過即中止**（`services/detector.py`）：`model_path` 不是
   `.engine`、引擎檔不存在（`model_path` 是 cwd 相對路徑，跑錯目錄就是這個症狀；自己先
   擋是為了訊息——下一步讀檔頭時拋的例外只有一個路徑字串。經 `YOLO` 載入時這道檢查還

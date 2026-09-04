@@ -1,7 +1,9 @@
 import datetime
+import json
 import queue
 from fractions import Fraction
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -417,3 +419,261 @@ def test_probe_stream_fps_decodes_nothing(monkeypatch):
     video_reader.probe_stream_fps(_segment())
 
     assert container.decode_calls == 0
+
+
+def _segments(*filenames: str) -> list[video_reader.SegmentInfo]:
+    """依檔名建一串片段；`start` 只是佔位，下面幾支測試不看它。"""
+    return [
+        video_reader.SegmentInfo(
+            path=Path(f"loc_cam/2026/07/08/{name}"),
+            start=datetime.datetime(2026, 7, 8, 11, 0, tzinfo=_TAIPEI),
+        )
+        for name in filenames
+    ]
+
+
+def _entry_over(
+    monkeypatch,
+    segments,
+    *,
+    frame_ring=None,
+    read_segment=None,
+    stream_id=3,
+    stream_name="test_cam001",
+):
+    """裝好替身，回傳一個「跑 `run_video_reader` 一次」的現場。
+
+    **既有的 `_reader_over` 搆不到這裡要測的東西**：那個 helper 直接建
+    `DailyStreamVideoReader(segments=[], ...)`，而既有測試全部只呼叫
+    `reader._read_segment(...)`——沒有任何一支跑過 `run()`，更沒有跑過
+    `run_video_reader`。入口自己會建 `FrameRing(ring_buffer, num_slots, ...)`，所以
+    這裡把 `FrameRing` 換掉（初始化失敗的案例則換成建構時就拋錯的替身）。
+
+    回傳的 `call()` 直接跑入口、例外原樣往外拋，故失敗案例要用 `pytest.raises` 包住
+    它；兩條 queue 與建出來的 reader 都留在外面拿得到，才驗得了 `READER_FAILED` 與
+    `current_segment`。
+    """
+    monkeypatch.setattr(
+        video_reader, "FrameRing", frame_ring or (lambda *args: _RingStub())
+    )
+    if read_segment is not None:
+        monkeypatch.setattr(
+            video_reader.DailyStreamVideoReader, "_read_segment", read_segment
+        )
+    readers: list = []
+    real_init = video_reader.DailyStreamVideoReader.__init__
+
+    def recording_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        readers.append(self)
+
+    monkeypatch.setattr(
+        video_reader.DailyStreamVideoReader, "__init__", recording_init
+    )
+    data_queue: queue.Queue = queue.Queue()
+    free_queue: queue.Queue = queue.Queue()
+
+    def call():
+        video_reader.run_video_reader(
+            stream_id,
+            stream_name,
+            segments,
+            data_queue,
+            free_queue,
+            None,  # ring_buffer：`_RingStub` 不看它
+            _RingStub.num_slots,
+            FrameShape(height=1080, width=1920),
+        )
+
+    return SimpleNamespace(
+        call=call, data_queue=data_queue, free_queue=free_queue, readers=readers
+    )
+
+
+def _error_records(captured_err: str) -> list[dict]:
+    """從 stderr 挑出 `severity == "ERROR"` 的單行 JSON。
+
+    `_emit` 是在呼叫當下才取 `sys.stderr`，所以 `capsys` 抓得到，不需要 `capfd`。
+    """
+    records = []
+    for line in captured_err.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        record = json.loads(stripped)
+        if record.get("severity") == "ERROR":
+            records.append(record)
+    return records
+
+
+def _drain(q: queue.Queue) -> list:
+    items = []
+    while not q.empty():
+        items.append(q.get_nowait())
+    return items
+
+
+def test_reader_entry_logs_the_failure_with_camera_stream_and_segment(
+    monkeypatch, capsys
+):
+    """讀取階段失敗要留下一筆答得出「哪一路、哪一支、什麼例外」的紀錄。
+
+    `_read_segment` 內多數 fail-loud 檢查的訊息自帶片段路徑，但不屬於那幾個
+    `ValueError` 的例外（解碼器的 OSError、`FrameRing.write_slot` 的形狀錯誤）只會留下
+    `multiprocessing` 預設輸出的裸 traceback，與另外十幾個進程的輸出交錯在同一份
+    stderr。逐欄比值而非只驗欄位存在：拿掉 `camera=` 或 `segment=` 要會紅。
+    """
+
+    def boom(self, segment):
+        raise ValueError("解碼器炸了")
+
+    entry = _entry_over(
+        monkeypatch, _segments("030000.000Z.mkv"), read_segment=boom
+    )
+
+    with pytest.raises(ValueError, match="解碼器炸了"):
+        entry.call()
+
+    (record,) = _error_records(capsys.readouterr().err)
+    assert record["component"] == "video_reader"
+    assert record["severity"] == "ERROR"
+    assert record["camera"] == "test_cam001"
+    assert record["stream_id"] == 3
+    assert record["segment"] == "loc_cam/2026/07/08/030000.000Z.mkv"
+    assert record["error"]["type"] == "ValueError"
+    assert record["error"]["message"] == "解碼器炸了"
+    assert 'raise ValueError("解碼器炸了")' in record["error"]["stacktrace"]
+
+
+def test_reader_entry_reports_the_segment_it_was_reading_not_the_first(
+    monkeypatch, capsys
+):
+    """`segment` 欄是失敗當下那一支。
+
+    這條守的是「別人硬寫 `segments[0]`」：三支片段、讓第二支失敗。
+    """
+    segments = _segments("030000.000Z.mkv", "040000.000Z.mkv", "050000.000Z.mkv")
+
+    def boom_on_second(self, segment):
+        if segment is segments[1]:
+            raise ValueError("第二支壞了")
+
+    entry = _entry_over(monkeypatch, segments, read_segment=boom_on_second)
+
+    with pytest.raises(ValueError, match="第二支壞了"):
+        entry.call()
+
+    (record,) = _error_records(capsys.readouterr().err)
+    assert record["segment"] == "loc_cam/2026/07/08/040000.000Z.mkv"
+
+
+def test_reader_entry_sends_exactly_one_reader_failed_on_a_read_failure(monkeypatch):
+    """一次失敗只送一個 `READER_FAILED`。
+
+    釘住「入口的 except 只包組裝那一段」這個決定（同
+    `pipeline.run_inference_pipeline` 的註解）：讀取階段失敗時 `run()` 的 `finally`
+    已經送過一次，入口再送就變兩個。
+    """
+
+    def boom(self, segment):
+        raise ValueError("解碼器炸了")
+
+    entry = _entry_over(
+        monkeypatch, _segments("030000.000Z.mkv"), read_segment=boom
+    )
+
+    with pytest.raises(ValueError):
+        entry.call()
+
+    assert _drain(entry.data_queue) == [video_reader.READER_FAILED]
+
+
+def test_reader_entry_reports_an_initialization_failure_with_a_null_segment(
+    monkeypatch, capsys
+):
+    """組裝階段失敗時還沒有片段可指，`segment` 為 `null`，並補送 `READER_FAILED`。
+
+    這個階段 `run()` 的 `finally` 還沒有機會執行，這一路的結束訊號沒人送——推理進程
+    會一直阻塞到父進程 `_terminate_all` 的 SIGTERM。訊息本身不斷言階段。
+    """
+
+    def exploding_ring(*args):
+        raise RuntimeError("環形緩衝配置失敗")
+
+    entry = _entry_over(
+        monkeypatch, _segments("030000.000Z.mkv"), frame_ring=exploding_ring
+    )
+
+    with pytest.raises(RuntimeError, match="環形緩衝配置失敗"):
+        entry.call()
+
+    (record,) = _error_records(capsys.readouterr().err)
+    assert record["component"] == "video_reader"
+    assert record["camera"] == "test_cam001"
+    assert record["stream_id"] == 3
+    assert record["segment"] is None
+    assert record["error"]["type"] == "RuntimeError"
+    assert _drain(entry.data_queue) == [video_reader.READER_FAILED]
+
+
+def test_reader_entry_logs_nothing_when_every_segment_is_read(monkeypatch, capsys):
+    """正常路徑不留 ERROR 紀錄，`current_segment` 也回到 `None`。
+
+    留著最後一支會讓收尾階段的失敗指向一支已經讀完的片段。
+    """
+
+    def read_ok(self, segment):
+        pass
+
+    entry = _entry_over(
+        monkeypatch,
+        _segments("030000.000Z.mkv", "040000.000Z.mkv"),
+        read_segment=read_ok,
+    )
+
+    entry.call()
+
+    assert _error_records(capsys.readouterr().err) == []
+    assert _drain(entry.data_queue) == [video_reader.READER_DONE]
+    (reader,) = entry.readers
+    assert reader.current_segment is None
+
+
+def test_reader_entry_stays_quiet_on_a_keyboard_interrupt(monkeypatch, capsys):
+    """Ctrl+C 不產生 ERROR 紀錄。
+
+    終端機的 Ctrl+C 送給整個 process group，每一路 reader 都會在阻塞點收到它，而本
+    repo 把它當非錯誤路徑（`pipeline` 那側是 warning、`main` 是 `sys.exit(130)`）。
+    N 路齊噴 ERROR 在雲端日誌上是假警報。
+    """
+
+    def interrupted(self, segment):
+        raise KeyboardInterrupt
+
+    entry = _entry_over(
+        monkeypatch, _segments("030000.000Z.mkv"), read_segment=interrupted
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        entry.call()
+
+    assert _error_records(capsys.readouterr().err) == []
+
+
+def test_current_segment_is_set_before_any_segment_is_read():
+    """`__init__` 就要設，不能只在 `run()` 的 for 迴圈裡設。
+
+    `run()` 進 for 之前還有填 `free_queue` 的一段，`segments` 為空時 for 也一次都不
+    跑——沒有初始值的話，入口的 except handler 去讀它會自己拋 `AttributeError`，正是
+    這條線要消滅的「根因被蓋掉」。
+    """
+    reader = video_reader.DailyStreamVideoReader(
+        stream_id=0,
+        segments=[],
+        data_queue=queue.Queue(),
+        free_queue=queue.Queue(),
+        ring=_RingStub(),
+        source_shape=FrameShape(height=1080, width=1920),
+    )
+
+    assert reader.current_segment is None

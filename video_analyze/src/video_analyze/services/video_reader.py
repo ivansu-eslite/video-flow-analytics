@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import av
 import numpy as np
 from av.codec.hwaccel import HWAccel
+from vfa_observability import StructuredLogger
 
 from video_analyze.services.frame_ring import FrameRing
 from video_analyze.services.letterbox import (
@@ -32,6 +33,8 @@ _LOCAL_TZ = ZoneInfo("Asia/Taipei")
 # NVDEC 硬解解出來的畫面格式（`av_hwframe_transfer_data` 在 decode 當下就下載回主
 # 記憶體）。縮放在這個格式的兩個平面上做，故讀到別的格式要擋下，見 `_read_segment`。
 _HW_PIXEL_FORMAT = "nv12"
+
+logger = StructuredLogger(component="video_reader")
 
 
 class FrameShape(NamedTuple):
@@ -269,6 +272,11 @@ class DailyStreamVideoReader:
         self.free_queue = free_queue
         self.ring = ring
         self.source_shape = source_shape
+        # 失敗當下正在讀哪一支，供 `run_video_reader` 的例外紀錄取用。**這行不可省**：
+        # `run()` 進 for 之前還有填 `free_queue` 的一段，`segments` 為空時 for 也一次都
+        # 不跑——沒有初始值的話，入口的 except handler 自己會拋 AttributeError 把根因蓋掉。
+        # 刻意不記格序：那要逐格更新，而 `_read_segment` 的兩道逐格檢查訊息本來就帶格序
+        self.current_segment: SegmentInfo | None = None
 
     def _read_segment(self, segment: SegmentInfo) -> None:
         """讀完單一片段的所有影格，逐格核對解析度與像素格式後縮放、寫入 slot。
@@ -362,7 +370,10 @@ class DailyStreamVideoReader:
         failed = False
         try:
             for segment in self.segments:
+                self.current_segment = segment
                 self._read_segment(segment)
+            # 讀完就清掉，否則收尾階段的失敗會指向一支已經讀完的片段
+            self.current_segment = None
         except Exception:
             failed = True
             raise
@@ -374,6 +385,7 @@ class DailyStreamVideoReader:
 
 def run_video_reader(
     stream_id: int,
+    stream_name: str,
     segments: list[SegmentInfo],
     data_queue: mp.Queue,
     free_queue: mp.Queue,
@@ -388,8 +400,17 @@ def run_video_reader(
     而是與 `letterbox_nv12()` 綁在一起的固定約定。留成參數只會讓日後有人又傳回原始
     解析度。
 
+    **失敗時先落一筆結構化 ERROR 再原樣往外拋**：`_read_segment` 內多數 fail-loud 檢查
+    的訊息自帶片段路徑，但初始化段、以及不屬於那幾個 `ValueError` 的例外（解碼器的
+    OSError、`FrameRing.write_slot` 的形狀錯誤）只會留下 `multiprocessing` 預設輸出的
+    裸 traceback——與另外十幾個進程的輸出交錯在同一份 stderr，按行切割的日誌系統上還會
+    散成十幾筆 DEFAULT 等級的紀錄。攝影機名在此之前根本沒傳進讀取進程（只有整數
+    `stream_id`），所以 `stream_name` 是新加的參數而非從既有值推導。
+
     Args:
         stream_id: 該路攝影機的編號。
+        stream_name: 該路攝影機的 `stream_dirname`，例外紀錄的 `camera` 欄位用。
+            與 `stream_id` 相鄰擺放，兩個一起看才對得起來。
         segments: 當天要依序讀取的片段清單。
         data_queue: 送往推理進程的資料佇列。
         free_queue: 供推理進程歸還已消費 slot 的佇列。
@@ -398,8 +419,52 @@ def run_video_reader(
         source_shape: 該路的原始解析度（`probe_frame_shape` 的探測值）。**這不是緩衝
             的尺寸**（緩衝照推論尺寸配置），只用來逐格核對解析度沒有中途變動。
     """
-    ring = FrameRing(ring_buffer, num_slots, INFER_HEIGHT, INFER_WIDTH)
-    reader = DailyStreamVideoReader(
-        stream_id, segments, data_queue, free_queue, ring, source_shape
-    )
-    reader.run()
+    try:
+        ring = FrameRing(ring_buffer, num_slots, INFER_HEIGHT, INFER_WIDTH)
+        reader = DailyStreamVideoReader(
+            stream_id, segments, data_queue, free_queue, ring, source_shape
+        )
+    except BaseException as exc:
+        logger.exception(
+            "讀取進程在初始化階段失敗",
+            error=exc,
+            stream_id=stream_id,
+            camera=stream_name,
+            # 這個階段還沒有片段可指，且訊息本身不斷言階段
+            segment=None,
+        )
+        # 組裝失敗時 `run()` 的 finally 還沒有機會執行，這一路的結束訊號沒人送——推理
+        # 進程會一直阻塞到父進程 `_terminate_all` 的 SIGTERM（`data_queue` 無 maxsize，
+        # 這個 put 不會阻塞，也不需要 `TRACK_FAILED` 那種 timeout）。同
+        # `pipeline.run_inference_pipeline` 組裝段的理由，也同它「只包組裝這一段」的界線：
+        # 包到 `reader.run()` 會在同一次失敗送出兩個 READER_FAILED
+        data_queue.put(READER_FAILED)
+        raise
+    try:
+        reader.run()
+    except KeyboardInterrupt:
+        # 終端機 Ctrl+C 送給整個 process group，每一路 reader 都會在 `_read_segment` 的
+        # 阻塞點收到它，而本 repo 把 Ctrl+C 當非錯誤路徑（`pipeline` 那側是 warning、
+        # `main` 是 sys.exit(130)）。不先攔就會在使用者主動中斷時噴出 N 筆 severity=ERROR
+        # 與 N 份 KeyboardInterrupt stacktrace，在雲端日誌上是假警報。相對地
+        # `_terminate_all` 的 SIGTERM 對 reader 是預設處置（不像 `run_track_worker` 攔
+        # 起來轉 SystemExit），不會進到 Python 的例外路徑，被父進程收掉不會多噴紀錄
+        raise
+    except BaseException as exc:
+        # 這裡用 `.exception()`（完整 stacktrace），與 `detector.py` 記引擎 metadata 時
+        # 「刻意不用 .exception()」那條決定不衝突：那筆是非致命的 WARNING、訊息可有可無，
+        # 寧可短以免長行超過 PIPE_BUF 4096 被切斷；這筆是致命失敗路徑上的根因來源，被
+        # 切斷的 traceback 仍優於沒有 traceback。交錯的機率也不同——那筆在啟動期九路引擎
+        # metadata 同時在寫，這筆在失敗當下通常只有出事的那一路在寫
+        seg = reader.current_segment
+        logger.exception(
+            "讀取進程失敗",
+            error=exc,
+            stream_id=stream_id,
+            camera=stream_name,
+            # 傳 `str(seg.path)` 而非 `seg`：`SegmentInfo` 是 dataclass 而非 pydantic
+            # model，`_normalize_log_value` 會 fallback 到 `str(value)`，欄位值變成
+            # dataclass repr——可讀但不好斷言，也不是路徑
+            segment=str(seg.path) if seg else None,
+        )
+        raise
