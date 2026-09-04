@@ -616,6 +616,50 @@ def test_reader_entry_reports_an_initialization_failure_with_a_null_segment(
     assert _drain(entry.data_queue) == [video_reader.READER_FAILED]
 
 
+def test_reader_still_signals_when_filling_the_free_queue_fails(monkeypatch, capsys):
+    """填 `free_queue` 那一段也要包在 `run()` 的 try 內。
+
+    它在 `for segment` 之前、`_read_segment` 一次都還沒跑。落在 try 之外的話，這一段
+    失敗（queue 已關閉、資源吃緊時 feeder thread 起不來）會有 ERROR 紀錄與非零
+    exitcode，但推理進程仍阻塞在 `data_queue.get()`——只能等主進程一輪
+    `p.join(timeout=0.5)` 掃到非零 exitcode 再 `_terminate_all` 送 SIGTERM（九路全開一輪
+    約 5–6 秒），正是組裝段補送 `READER_FAILED` 要消掉的那個空窗。
+    """
+
+    class _BrokenFreeQueue(queue.Queue):
+        def put(self, *args, **kwargs):
+            raise RuntimeError("free_queue 已關閉")
+
+    entry = _entry_over(monkeypatch, _segments("030000.000Z.mkv"))
+    entry.readers.clear()
+    monkeypatch.setattr(
+        video_reader.DailyStreamVideoReader,
+        "_read_segment",
+        lambda self, segment: pytest.fail("不該讀到任何片段"),
+    )
+
+    def call_with_broken_free_queue():
+        video_reader.run_video_reader(
+            3,
+            "test_cam001",
+            _segments("030000.000Z.mkv"),
+            entry.data_queue,
+            _BrokenFreeQueue(),
+            None,
+            _RingStub.num_slots,
+            FrameShape(height=1080, width=1920),
+        )
+
+    with pytest.raises(RuntimeError, match="free_queue 已關閉"):
+        call_with_broken_free_queue()
+
+    (record,) = _error_records(capsys.readouterr().err)
+    assert record["camera"] == "test_cam001"
+    # 還沒進 for 迴圈，`current_segment` 仍是初始值
+    assert record["segment"] is None
+    assert _drain(entry.data_queue) == [video_reader.READER_FAILED]
+
+
 def test_reader_entry_logs_nothing_when_every_segment_is_read(monkeypatch, capsys):
     """正常路徑不留 ERROR 紀錄，`current_segment` 也回到 `None`。
 

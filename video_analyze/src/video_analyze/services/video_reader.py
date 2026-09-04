@@ -364,11 +364,15 @@ class DailyStreamVideoReader:
             ValueError: 任一片段開檔／讀取 FPS 失敗，或影格解析度與探測值不符、
                 像素格式不是 `nv12`（見 `_read_segment`）。
         """
-        # free_queue 由 reader 自己起跑時填滿，避免「父進程先 put 再 fork」的競態
-        for slot in range(self.ring.num_slots):
-            self.free_queue.put(slot)
         failed = False
         try:
+            # free_queue 由 reader 自己起跑時填滿，避免「父進程先 put 再 fork」的競態。
+            # **這一段要包在 try 內**：它失敗（queue 已關閉、資源吃緊時 feeder thread
+            # 起不來）而 finally 沒送訊號的話，推理進程會一直阻塞在 `data_queue.get()`，
+            # 只能等主進程掃到非零 exitcode 再 SIGTERM——與 `run_video_reader` 的組裝段
+            # 補送 `READER_FAILED` 是同一個空窗
+            for slot in range(self.ring.num_slots):
+                self.free_queue.put(slot)
             for segment in self.segments:
                 self.current_segment = segment
                 self._read_segment(segment)
@@ -425,6 +429,11 @@ def run_video_reader(
             stream_id, segments, data_queue, free_queue, ring, source_shape
         )
     except BaseException as exc:
+        # 這一段**不**放行 `KeyboardInterrupt`（與下面 `reader.run()` 那段不同）：兩個
+        # 建構子之間的窗口是微秒級、reader 又是最後才 fork 的一批，Ctrl+C 落在這裡的
+        # 機率可忽略，而放行就得同時決定「不送 READER_FAILED 會不會讓推理進程卡住」。
+        # 界線與 `pipeline.run_inference_pipeline` 的組裝段一致（那裡也是純
+        # `except BaseException`）。代價是這個窗口內的 Ctrl+C 會留一筆 ERROR
         logger.exception(
             "讀取進程在初始化階段失敗",
             error=exc,

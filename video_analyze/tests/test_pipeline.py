@@ -5,11 +5,16 @@ pipeline 才碰得到；提到模組層級之後可以用假的 process 物件�
 `name`／`pid`／`exitcode`／`is_alive()` 四樣，不需要真的起子進程。
 """
 
+import datetime
 import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from video_analyze.services import pipeline
+from video_analyze.services.video_reader import FrameShape, SegmentInfo
 
 
 class _ProcStub:
@@ -135,3 +140,103 @@ def test_forced_kill_warning_carries_the_process_name(capsys):
     assert record["component"] == "pipeline"
     assert record["name"] == "reader[test_cam002]"
     assert record["pid"] == 51235
+
+
+def test_every_subprocess_is_started_with_its_role_as_the_name(monkeypatch):
+    """`analyze_daily` 起子進程時要傳 `name=`——彙總的一半在呼叫端。
+
+    上面幾支測試餵的是自帶 `name` 的假 process，等於**假設**呼叫端會傳；沒有這一支的
+    話，日後有人重構子進程啟動段（抽 helper、漏抄一個 kwarg）就會讓訊息回到只有
+    `pid`、子進程 traceback 的表頭回到 `Process-12:`，而整批測試照樣全綠。
+
+    順便釘住讀取進程的 `args` tuple：`run_video_reader` 的簽章多了 `stream_name`，而
+    呼叫端傳的是**位置參數**，順序寫錯不會有型別錯誤，只會讓攝影機名與片段清單對調
+    而在子進程內崩在別的地方。
+    """
+    cameras = [
+        SimpleNamespace(stream_dirname="test_cam001"),
+        SimpleNamespace(stream_dirname="test_cam002"),
+    ]
+    segments = [
+        SegmentInfo(
+            path=Path("test_cam001/2026/08/01/040000.000Z.mkv"),
+            start=datetime.datetime(2026, 8, 1, 12, 0),
+        )
+    ]
+    monkeypatch.setattr(
+        pipeline,
+        "load_registry",
+        lambda _path: SimpleNamespace(
+            storage=SimpleNamespace(file_ext="mkv"),
+            resolve_cameras=lambda _ids: cameras,
+        ),
+    )
+    monkeypatch.setattr(pipeline, "discover_segments", lambda *args: list(segments))
+    monkeypatch.setattr(
+        pipeline, "probe_frame_shape", lambda _seg: FrameShape(height=1080, width=1920)
+    )
+    monkeypatch.setattr(pipeline, "probe_stream_fps", lambda _seg: 20.0)
+    monkeypatch.setattr(
+        pipeline, "claim_parts_dir", lambda _path: os.open(os.devnull, os.O_RDONLY)
+    )
+    monkeypatch.setattr(pipeline, "create_ring_buffers", lambda n, *args: [None] * n)
+
+    started: list[dict] = []
+
+    class _RecordingProcess:
+        """記下每次 `mp.Process(...)` 的 `target`／`args`／`name`。
+
+        一起來就報「已結束、exitcode=1」，讓 `analyze_daily` 在主迴圈第一輪就中止——
+        本測試要的是啟動段傳了什麼，不是跑完一整天。
+        """
+
+        def __init__(self, target=None, args=(), name=None):
+            self.name = name
+            self.pid = 51000 + len(started)
+            self.exitcode = 1
+            started.append({"target": target, "args": args, "name": name})
+
+        def start(self) -> None:
+            pass
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout=None) -> None:
+            pass
+
+        def terminate(self) -> None:
+            pass
+
+        def kill(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline.mp, "Process", _RecordingProcess)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        pipeline.analyze_daily(
+            date=datetime.date(2026, 8, 1), bucket_dir="bucket_c31", camera_ids=None
+        )
+
+    assert [entry["name"] for entry in started] == [
+        "track[shard0]",
+        "track[shard1]",
+        "inference",
+        "reader[test_cam001]",
+        "reader[test_cam002]",
+    ]
+    # 角色與所屬對象要出現在拋出的訊息裡，這條 AC 的兩半才算都接上
+    message = str(excinfo.value)
+    assert "reader[test_cam001]" in message
+    assert "track[shard0]" in message
+
+    reader_args = [
+        entry["args"]
+        for entry in started
+        if entry["target"] is pipeline.run_video_reader
+    ]
+    assert len(reader_args) == 2
+    # `run_video_reader(stream_id, stream_name, segments, ...)`：前三個位置參數的順序
+    stream_id, stream_name, passed_segments = reader_args[0][:3]
+    assert (stream_id, stream_name) == (0, "test_cam001")
+    assert passed_segments == segments

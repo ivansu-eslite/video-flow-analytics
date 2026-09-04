@@ -413,9 +413,9 @@ zone 與 line 幾何都不會被驗證。
 N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程：
 
 三種子進程都帶名字（`mp.Process(name=...)`）：`reader[<stream_dirname>]`、`inference`、
-`track[shard<k>]`。有兩個地方讀得到它——主進程異常彙總的訊息，以及子進程預設 traceback 的
-表頭（`Process reader[loc_cam]:`），所以在十幾個進程交錯的 stderr 上不必靠時間順序猜是哪
-一路死掉。
+`track[shard<k>]`。有三個地方讀得到它——主進程異常彙總的訊息、`_terminate_all` 的強制 kill
+warning，以及子進程預設 traceback 的表頭（`Process reader[loc_cam]:`），所以在十幾個進程
+交錯的 stderr 上不必靠時間順序猜是哪一路死掉。
 
 - **影格走共享記憶體、不走 pickle**（`frame_ring.py`）：每路一塊固定格數的環形緩衝
   （`mp.RawArray`），queue 只傳 slot 索引，避免每格影格逐格 pickle 的高成本。推理進程
@@ -494,9 +494,10 @@ N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程�
   `OSError`、`FrameRing.write_slot` 的形狀錯誤，原本都只留下一段既沒有攝影機也沒有片段的裸
   traceback。組裝階段（`FrameRing`／`DailyStreamVideoReader`）失敗時 `segment` 為 `null`，
   並**補送一次 `READER_FAILED`**——該階段 `run()` 的 `finally` 還沒機會執行，不補送的話推理
-  進程會一直阻塞到父進程 `_terminate_all` 的 SIGTERM。`KeyboardInterrupt` 刻意不走這條：
-  Ctrl+C 送給整個 process group，N 路齊噴 ERROR 在日誌上是假警報，而本 repo 把它當非錯誤
-  路徑處理。
+  進程會一直阻塞到父進程 `_terminate_all` 的 SIGTERM。**讀取階段的** `KeyboardInterrupt` 刻意不
+  走這條：Ctrl+C 送給整個 process group，每一路都會在阻塞點收到它，N 路齊噴 ERROR 在日誌上
+  是假警報，而本 repo 把它當非錯誤路徑處理。組裝階段沒有這道放行（窗口是兩個建構子之間、
+  微秒級），Ctrl+C 恰好落在那裡仍會留一筆 ERROR。
 - 任一子進程異常結束 → 主進程拋 `RuntimeError`，訊息逐個列出「角色 pid exitcode」，負
   exitcode 另附訊號名（`-9` → `SIGKILL`）。**不是所有被訊號終止的進程都顯示得出訊號名**：
   `run_track_worker` 攔了 SIGTERM 轉 `SystemExit(128 + signum)`，那條路徑的 exitcode 是正
