@@ -130,7 +130,8 @@ def check_train_imgsz(model: YOLO) -> None:
     """訓練用的 `imgsz` 與 `INFER_WIDTH`／`INFER_HEIGHT` 之間原本沒有任何自動檢查：
     兩者不一致代表推論解析度偏離訓練解析度，模型要在沒見過的尺度上推論。
 
-    權重裡沒有 `train_args.imgsz`（外部來源、舊權重）時印警告放行，不擋建置。
+    權重裡沒有 `train_args.imgsz`，或有但不是 ultralytics `train`／`val` 保證的
+    單一 int（外部來源、舊權重、手改過的 ckpt）時印警告放行，不擋建置。
 
     Args:
         model: 已載入 `.pt` 的 `ultralytics.YOLO` 實例。
@@ -141,8 +142,8 @@ def check_train_imgsz(model: YOLO) -> None:
     ckpt = getattr(model, "ckpt", None)
     train_args = ckpt.get("train_args") if isinstance(ckpt, dict) else None
     train_imgsz = train_args.get("imgsz") if isinstance(train_args, dict) else None
-    if train_imgsz is None:
-        print("[警告] 權重沒有 train_args.imgsz，略過訓練／推論解析度比對。")
+    if not isinstance(train_imgsz, int):
+        print("[警告] 權重沒有可用的 train_args.imgsz，略過訓練／推論解析度比對。")
         return
     infer_imgsz = max(INFER_WIDTH, INFER_HEIGHT)
     if train_imgsz != infer_imgsz:

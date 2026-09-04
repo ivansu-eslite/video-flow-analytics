@@ -16,7 +16,8 @@ batch 維是 `1`–`--batch`。判準本身（含舊的寬 profile 引擎要被�
 test_trt_runner.py 的 `check_profile_shapes`，這裡只釘建置端產生的值餵得過它。
 
 `check_train_imgsz` 釘的是訓練 `imgsz` 與 `INFER_WIDTH`／`INFER_HEIGHT` 的比對：一致放行、
-不一致拋錯、權重沒有 `train_args.imgsz`（各種缺法）只印警告放行。用假 `ckpt` 屬性即可，
+不一致拋錯、`train_args.imgsz` 缺漏或不是 ultralytics `train`／`val` 保證的單一 int（各種
+缺法與型別不符，後者見外部來源或手改過的 ckpt）只印警告放行。用假 `ckpt` 屬性即可，
 不必碰真的 `.pt` 權重或 GPU。
 """
 
@@ -167,6 +168,14 @@ def test_check_train_imgsz_rejects_a_mismatch():
         pytest.param({}, id="no_train_args"),
         pytest.param({"train_args": {}}, id="no_imgsz"),
         pytest.param({"train_args": None}, id="train_args_not_a_dict"),
+        pytest.param(
+            {"train_args": {"imgsz": [max(INFER_WIDTH, INFER_HEIGHT)]}},
+            id="imgsz_is_a_list",
+        ),
+        pytest.param(
+            {"train_args": {"imgsz": str(max(INFER_WIDTH, INFER_HEIGHT))}},
+            id="imgsz_is_a_string",
+        ),
     ],
 )
 def test_check_train_imgsz_warns_and_passes_when_train_args_missing(ckpt, capsys):
