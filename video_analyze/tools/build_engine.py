@@ -126,6 +126,33 @@ def read_train_info(model: YOLO) -> dict:
     }
 
 
+def check_train_imgsz(model: YOLO) -> None:
+    """訓練用的 `imgsz` 與 `INFER_WIDTH`／`INFER_HEIGHT` 之間原本沒有任何自動檢查：
+    兩者不一致代表推論解析度偏離訓練解析度，模型要在沒見過的尺度上推論。
+
+    權重裡沒有 `train_args.imgsz`，或有但不是 ultralytics `train`／`val` 保證的
+    單一 int（外部來源、舊權重、手改過的 ckpt）時印警告放行，不擋建置。
+
+    Args:
+        model: 已載入 `.pt` 的 `ultralytics.YOLO` 實例。
+
+    Raises:
+        SystemExit: `train_args.imgsz` 與 `max(INFER_WIDTH, INFER_HEIGHT)` 不一致。
+    """
+    ckpt = getattr(model, "ckpt", None)
+    train_args = ckpt.get("train_args") if isinstance(ckpt, dict) else None
+    train_imgsz = train_args.get("imgsz") if isinstance(train_args, dict) else None
+    if not isinstance(train_imgsz, int):
+        print("[警告] 權重沒有可用的 train_args.imgsz，略過訓練／推論解析度比對。")
+        return
+    infer_imgsz = max(INFER_WIDTH, INFER_HEIGHT)
+    if train_imgsz != infer_imgsz:
+        raise SystemExit(
+            f"訓練 imgsz（{train_imgsz}）與 max(INFER_WIDTH, INFER_HEIGHT)"
+            f"（{infer_imgsz}）不一致，推論解析度會偏離訓練解析度。"
+        )
+
+
 def engine_filename(weights: Path, compute_capability: str) -> str:
     """引擎檔名：來源權重的 stem ＋ `_sm<SM>`。
 
@@ -442,6 +469,7 @@ def main() -> None:
 
     weights_sha256 = sha256_of(args.weights)
     source_model = YOLO(str(args.weights))
+    check_train_imgsz(source_model)
     vfa_metadata = build_vfa_metadata(
         args.weights, environment, read_train_info(source_model)
     )

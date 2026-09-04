@@ -14,6 +14,11 @@ test_engine_metadata.py，這裡只釘「`verify_engine` 有呼叫到它、且�
 `profile_shapes` 的部分釘的是 C21／ADR-015 的那次收窄：空間維三個界都是推論尺寸、
 batch 維是 `1`–`--batch`。判準本身（含舊的寬 profile 引擎要被擋下）在
 test_trt_runner.py 的 `check_profile_shapes`，這裡只釘建置端產生的值餵得過它。
+
+`check_train_imgsz` 釘的是訓練 `imgsz` 與 `INFER_WIDTH`／`INFER_HEIGHT` 的比對：一致放行、
+不一致拋錯、`train_args.imgsz` 缺漏或不是 ultralytics `train`／`val` 保證的單一 int（各種
+缺法與型別不符，後者見外部來源或手改過的 ckpt）只印警告放行。用假 `ckpt` 屬性即可，
+不必碰真的 `.pt` 權重或 GPU。
 """
 
 import json
@@ -136,6 +141,47 @@ def test_profile_shapes_rejects_a_batch_below_one():
     """`--batch` 小於 1 在組出 profile 之前就擋下——那個 profile 任何一批都送不進去。"""
     with pytest.raises(ValueError, match="必須 >= 1"):
         build_engine.profile_shapes(0)
+
+
+class _FakeModel:
+    """`check_train_imgsz` 只讀 `model.ckpt`，不必是真的 `ultralytics.YOLO` 實例。"""
+
+    def __init__(self, ckpt):
+        self.ckpt = ckpt
+
+
+def test_check_train_imgsz_passes_when_matching():
+    model = _FakeModel({"train_args": {"imgsz": max(INFER_WIDTH, INFER_HEIGHT)}})
+    build_engine.check_train_imgsz(model)  # 不拋錯
+
+
+def test_check_train_imgsz_rejects_a_mismatch():
+    model = _FakeModel({"train_args": {"imgsz": 320}})
+    with pytest.raises(SystemExit, match="320"):
+        build_engine.check_train_imgsz(model)
+
+
+@pytest.mark.parametrize(
+    "ckpt",
+    [
+        pytest.param(None, id="no_ckpt"),
+        pytest.param({}, id="no_train_args"),
+        pytest.param({"train_args": {}}, id="no_imgsz"),
+        pytest.param({"train_args": None}, id="train_args_not_a_dict"),
+        pytest.param(
+            {"train_args": {"imgsz": [max(INFER_WIDTH, INFER_HEIGHT)]}},
+            id="imgsz_is_a_list",
+        ),
+        pytest.param(
+            {"train_args": {"imgsz": str(max(INFER_WIDTH, INFER_HEIGHT))}},
+            id="imgsz_is_a_string",
+        ),
+    ],
+)
+def test_check_train_imgsz_warns_and_passes_when_train_args_missing(ckpt, capsys):
+    model = _FakeModel(ckpt)
+    build_engine.check_train_imgsz(model)  # 不拋錯，只印警告
+    assert "警告" in capsys.readouterr().out
 
 
 def test_verify_engine_rejects_a_header_missing_the_end2end_flag(monkeypatch, tmp_path):
