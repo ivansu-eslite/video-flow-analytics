@@ -733,6 +733,89 @@ def test_write_report_sorts_sheets_containing_blank_rows(tmp_path):
     assert {row[0] for row in rows[1:]} == {"2026-05-01", "2026-05-02"}
 
 
+def test_write_report_overwrite_sorts_zone_hourly_by_date_period_zone(tmp_path):
+    """ZONE_HOURLY_SORT_COLUMNS = (日期, 小時, 區域)：三層鍵各自要生效，不能只是
+    寫入順序恰好已排好，或只比對其中一欄就矇混過去。"""
+    path = tmp_path / "report.xlsx"
+    rows = [
+        ("2026-05-02", "星期六", "09:00", "checkout", 1),
+        ("2026-05-01", "星期五", "10:00", "checkout", 2),
+        ("2026-05-01", "星期五", "09:00", "entrance", 3),
+        ("2026-05-01", "星期五", "09:00", "checkout", 4),
+    ]
+    frames = _frames(zone_hourly=_make_zone_hourly_df(rows))
+    _write(path, frames, "overwrite", date="2026-05-01")
+
+    assert _sheet_rows(path)[SHEET_ZONE_HOURLY] == [
+        ("2026-05-01", "星期五", "09:00", "checkout", 4),
+        ("2026-05-01", "星期五", "09:00", "entrance", 3),
+        ("2026-05-01", "星期五", "10:00", "checkout", 2),
+        ("2026-05-02", "星期六", "09:00", "checkout", 1),
+    ]
+
+
+def test_write_report_overwrite_sorts_zone_peak_by_date_zone(tmp_path):
+    """ZONE_PEAK_SORT_COLUMNS = (日期, 區域)：不含「小時」，同日不同區域仍須排序。"""
+    path = tmp_path / "report.xlsx"
+    rows = [
+        ("2026-05-02", "星期六", "checkout", "09:00", 1),
+        ("2026-05-01", "星期五", "entrance", "09:00", 2),
+        ("2026-05-01", "星期五", "checkout", "10:00", 3),
+    ]
+    frames = _frames(zone_peak=_make_zone_peak_df(rows))
+    _write(path, frames, "overwrite", date="2026-05-01")
+
+    assert _sheet_rows(path)[SHEET_ZONE_PEAK] == [
+        ("2026-05-01", "星期五", "checkout", "10:00", 3),
+        ("2026-05-01", "星期五", "entrance", "09:00", 2),
+        ("2026-05-02", "星期六", "checkout", "09:00", 1),
+    ]
+
+
+def test_write_report_overwrite_sorts_line_hourly_by_date_period_line(tmp_path):
+    """LINE_HOURLY_SORT_COLUMNS = (日期, 小時, 計數線)：排序鍵不含「群組」，同一
+    群組底下的多條計數線也要照計數線名稱排。"""
+    path = tmp_path / "report.xlsx"
+    rows = [
+        ("2026-05-02", "星期六", "09:00", "group1", "main_gate", 1, 1, 0),
+        ("2026-05-01", "星期五", "10:00", "group1", "main_gate", 2, 2, 0),
+        ("2026-05-01", "星期五", "09:00", "group1", "side_gate", 3, 3, 0),
+        ("2026-05-01", "星期五", "09:00", "group1", "main_gate", 4, 4, 0),
+    ]
+    frames = _frames(line_hourly=_make_line_hourly_df(rows))
+    _write(path, frames, "overwrite", date="2026-05-01")
+
+    assert _sheet_rows(path)[SHEET_LINE_HOURLY] == [
+        ("2026-05-01", "星期五", "09:00", "group1", "main_gate", 4, 4, 0),
+        ("2026-05-01", "星期五", "09:00", "group1", "side_gate", 3, 3, 0),
+        ("2026-05-01", "星期五", "10:00", "group1", "main_gate", 2, 2, 0),
+        ("2026-05-02", "星期六", "09:00", "group1", "main_gate", 1, 1, 0),
+    ]
+
+
+def test_write_report_overwrite_sorts_line_peak_sheets_by_date_line(tmp_path):
+    """LINE_PEAK_SORT_COLUMNS = (日期, 計數線)：進場／出場兩個分頁共用同一個排序鍵
+    常數與同一批資料，兩頁都要各自排好，不是只有其中一頁生效。"""
+    path = tmp_path / "report.xlsx"
+    rows = [
+        ("2026-05-02", "星期六", "group1", "main_gate", "09:00", 1, 1),
+        ("2026-05-01", "星期五", "group1", "side_gate", "09:00", 2, 2),
+        ("2026-05-01", "星期五", "group1", "main_gate", "10:00", 3, 3),
+    ]
+    peak_df = _make_line_peak_df(rows)
+    frames = _frames(line_peak_in=peak_df, line_peak_out=peak_df)
+    _write(path, frames, "overwrite", date="2026-05-01")
+
+    expected = [
+        ("2026-05-01", "星期五", "group1", "main_gate", "10:00", 3, 3),
+        ("2026-05-01", "星期五", "group1", "side_gate", "09:00", 2, 2),
+        ("2026-05-02", "星期六", "group1", "main_gate", "09:00", 1, 1),
+    ]
+    rows_by_sheet = _sheet_rows(path)
+    assert rows_by_sheet[SHEET_LINE_PEAK_IN] == expected
+    assert rows_by_sheet[SHEET_LINE_PEAK_OUT] == expected
+
+
 def test_write_report_overwrite_is_idempotent_across_all_sheets(tmp_path):
     """同一天以 overwrite 重跑，6 個分頁的列序與內容都須逐列一致。"""
     path = tmp_path / "report.xlsx"
