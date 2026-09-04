@@ -1,6 +1,7 @@
 import datetime
 import multiprocessing as mp
 import os
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -119,6 +120,47 @@ def run_inference_pipeline(
     pipeline.start_loop(data_queues, free_queues, rings)
 
 
+def _describe_exit(process: mp.Process) -> str:
+    """把一個異常結束的子進程描述成「角色 + pid + 結束方式」一段文字。
+
+    角色取 `mp.Process(name=...)`，不另外維護一份 pid→角色的對照表：`name` 同時被
+    兩個消費端讀到——父進程這裡的 `p.name`，以及子進程預設 traceback 的表頭
+    （`BaseProcess._bootstrap` 的 `except:` 分支寫 `Process %s:`），一個 kwarg 讓那份
+    交錯的 stderr 也認得出是哪一路，不必再靠時間順序猜。
+
+    **負 exitcode 才轉訊號名**，而「被訊號終止」不一定表現為負值：
+    `run_track_worker` 攔了 SIGTERM 轉 `raise SystemExit(128 + signum)`，`_bootstrap`
+    對帶 int code 的 `SystemExit` 走專門分支，`exitcode` 是正的 143。措辭因此不暗示
+    所有訊號死亡都顯示得出訊號名。
+    """
+    detail = f"{process.name} pid={process.pid} exitcode={process.exitcode}"
+    if process.exitcode is not None and process.exitcode < 0:
+        try:
+            detail += f" {signal.Signals(-process.exitcode).name}"
+        except ValueError:
+            # 這是失敗路徑上最後一道訊息，自己爆掉會把根因蓋掉：對不上的訊號值就
+            # 只留原本的負 exitcode
+            pass
+    return detail
+
+
+def _raise_if_abnormal(processes: list[mp.Process]) -> None:
+    """任一子進程已結束且 exitcode 非 0 就中止整批分析。
+
+    判定條件是 `not p.is_alive() and p.exitcode`——0 為 falsy（正常結束），負值成立
+    （被訊號終止）。訊息帶得出每個進程的角色與所屬對象，因為 `pid` 對不回「哪一路
+    攝影機」、也對不回「這是讀取、推理還是追蹤」，而真正的根因在子進程自己的
+    traceback 上、與另外十幾個進程的輸出交錯在同一份 stderr。
+
+    Raises:
+        RuntimeError: 有子進程異常結束。
+    """
+    abnormal = [p for p in processes if not p.is_alive() and p.exitcode]
+    if abnormal:
+        detail = "；".join(_describe_exit(p) for p in abnormal)
+        raise RuntimeError(f"子進程異常結束（{detail}），分析已中止。")
+
+
 def _terminate_all(processes: list[mp.Process]) -> None:
     """終止所有仍在存活的子進程，避免中斷後留下孤兒進程。"""
     for p in processes:
@@ -127,7 +169,7 @@ def _terminate_all(processes: list[mp.Process]) -> None:
     for p in processes:
         p.join(timeout=5)
         if p.is_alive():
-            logger.warning("進程未在時限內結束，強制 kill", pid=p.pid)
+            logger.warning("進程未在時限內結束，強制 kill", name=p.name, pid=p.pid)
             p.kill()
             p.join()
 
@@ -235,14 +277,6 @@ def analyze_daily(
         )
         processes: list[mp.Process] = []
 
-        def _raise_if_abnormal(procs: list[mp.Process]) -> None:
-            abnormal = [p for p in procs if not p.is_alive() and p.exitcode]
-            if abnormal:
-                detail = ", ".join(
-                    f"pid={p.pid} exitcode={p.exitcode}" for p in abnormal
-                )
-                raise RuntimeError(f"子進程異常結束（{detail}），分析已中止。")
-
         # 一片一條 queue，傳的是偵測框（每格幾十個框、幾 KB）而非影格——影格在推論完成
         # 後就沒有用途（slot 當下就歸還了，見 ADR-010）。
         # **上限不可省**：影格側的背壓只覆蓋到推論為止，沒有這個上限，追蹤一落後 payload
@@ -269,6 +303,9 @@ def analyze_daily(
                             sid for sid in range(num_streams) if route[sid] == shard_id
                         ),
                     ),
+                    # 角色與所屬對象一起帶著走：父進程的異常彙總讀 `p.name`，子進程
+                    # 預設 traceback 的表頭也印同一個值（見 `_describe_exit`）
+                    name=f"track[shard{shard_id}]",
                 )
                 track_proc.start()
                 processes.append(track_proc)
@@ -283,6 +320,7 @@ def analyze_daily(
                     track_queues,
                     route,
                 ),
+                name="inference",
             )
             infer_proc.start()
             processes.append(infer_proc)
@@ -292,6 +330,9 @@ def analyze_daily(
                     target=run_video_reader,
                     args=(
                         i,
+                        # 攝影機名在讀取進程內沒有第二個來源（那側只有整數
+                        # `stream_id`），失敗紀錄要指得出是哪一路就得傳進去
+                        stream_names[i],
                         segments,
                         data_queues[i],
                         free_queues[i],
@@ -302,6 +343,7 @@ def analyze_daily(
                         # 形狀檢查不再擋得住中途換解析度
                         frame_shapes[i],
                     ),
+                    name=f"reader[{stream_names[i]}]",
                 )
                 reader_proc.start()
                 processes.append(reader_proc)
