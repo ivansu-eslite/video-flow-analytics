@@ -20,6 +20,16 @@ BASELINE_FRAME_WIDTH = 1920
 # 有兩個意思；`config.toml` 無法引用常數，那一份由 tests/test_config.py 鎖住一致性。
 DEFAULT_BOUNDARY_BAND_PX_1080P = 25
 
+# 停留判定的兩個門檻（秒）。兩者都是絕對時間，不隨解析度換算（與上面的像素參數
+# 刻意不同，見 ADR-016）。
+# - THRESHOLD：連續停留多久才計一次 `dwell_events`，20 秒由使用者拍板。
+# - GAP：同一段停留可容忍多長的中斷（漏偵測、腳底點抖出區外）；有效上界是
+#   `track_buffer / fps` ≈ 1–2 秒，超過就是在容忍「人真的走出去又回來」，見 ADR-016。
+# 兩處預設共用這一份（`ZoneConfig` 與 `map_zones_daily` 的簽名），`config.toml`
+# 無法引用常數，那一份由 tests/test_config.py 鎖住一致性。
+DEFAULT_DWELL_THRESHOLD_SECONDS = 20.0
+DEFAULT_DWELL_GAP_SECONDS = 3.0
+
 # 追蹤結果 parquet 必須具備的欄位；缺任一欄代表是舊版 video_analyze 的產物，直接
 # fail-loud。`frame_width`／`frame_height` 用來換算像素參數（見 ADR-004、ADR-006）
 # ——`frame_height` 本次的換算用不到，仍列為必要：兩欄同時寫入，只有其中一欄代表產物
@@ -41,4 +51,5 @@ ZONE_COUNTS_SCHEMA = {
     "time_bucket": pl.Datetime("us", "Asia/Taipei"),
     "unique_visitors": pl.Int64,
     "entries": pl.Int64,
+    "dwell_events": pl.Int64,
 }

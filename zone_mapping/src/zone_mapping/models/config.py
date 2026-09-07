@@ -11,7 +11,11 @@ from pydantic_settings import (
 from vfa_config import InputConfig, get_toml_path
 from vfa_observability import StructuredLogger
 
-from zone_mapping.config.constants import DEFAULT_BOUNDARY_BAND_PX_1080P
+from zone_mapping.config.constants import (
+    DEFAULT_BOUNDARY_BAND_PX_1080P,
+    DEFAULT_DWELL_GAP_SECONDS,
+    DEFAULT_DWELL_THRESHOLD_SECONDS,
+)
 
 logger = StructuredLogger(component="config")
 
@@ -24,6 +28,12 @@ class ZoneConfig(BaseModel):
             （寬 1920）為基準的像素值；執行時依各攝影機的 `frame_width` 換算成
             實際像素。`0` = 純內外判定（每次跨越邊界都計），且 0 換算後仍是 0。
             預設 25 取自實測（見 README「已知限制」）。
+        dwell_threshold_seconds: `dwell_events` 的停留門檻（秒）：同一個 track 在
+            區域內連續待滿這麼久才計一次。改這個值等於換一個指標的定義，跨日報表
+            混用不同的值不會有任何訊號（見 ADR-016）。
+        dwell_gap_seconds: 同一段停留可容忍的中斷長度（秒）：區內兩次出現的間隔
+            超過它就切成兩段。有效上界是 `track_buffer / fps`（約 1–2 秒），再放大
+            只會把「真的走出區域又回來」接成一段（見 ADR-016）。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -31,6 +41,12 @@ class ZoneConfig(BaseModel):
     boundary_band_px_1080p: float = Field(
         default=DEFAULT_BOUNDARY_BAND_PX_1080P, ge=0
     )
+    # 兩個門檻用 gt=0（不是 band 的 ge=0）：0 對 band 有明確的退化語義（純內外判定），
+    # 對停留沒有——門檻 0 會讓每個在區內的段都計一次，數字看起來合理但量的是別的東西。
+    dwell_threshold_seconds: float = Field(
+        default=DEFAULT_DWELL_THRESHOLD_SECONDS, gt=0
+    )
+    dwell_gap_seconds: float = Field(default=DEFAULT_DWELL_GAP_SECONDS, gt=0)
 
     @model_validator(mode="before")
     @classmethod

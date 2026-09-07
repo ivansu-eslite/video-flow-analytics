@@ -240,10 +240,13 @@ byte 級相同。
 - `zone_counts.parquet`／`line_counts.parquet` 經 `time_bucket` 聚合後**比逐格穩定得多**，
   是**交付期／大重構做 golden 回歸比對**時更省事的標的（vfa 日常改動的把關是各包
   pytest、不依賴 golden；golden 產在交付期、存放於 argus GCS）。⚠ 但**不是 byte 級一致
-  的保證**：`unique_visitors` 是 `n_unique(track_id)`、entries 與計數線進出都以
-  `.over("track_id")` 分窗，仍吃 track 的分群結果，[ADR-006](docs/adr/zone_mapping/006-zone-boundary-band.md)
-  就記過同設定重跑訪客數 55→57 的案例。2026-08-28 那批的下游輸出確實 byte 級相同，
-  但那是該批的實測值，不能當成通則。
+  的保證**：`unique_visitors` 是 `n_unique(track_id)`，entries、zone 停留人次
+  （`dwell_events`，見 [ADR-016](docs/adr/zone_mapping/016-zone-dwell-threshold.md)）與計數線
+  進出都以 `.over("track_id")` 分窗，仍吃 track 的分群結果，
+  [ADR-006](docs/adr/zone_mapping/006-zone-boundary-band.md)
+  就記過同設定重跑訪客數 55→57 的案例。`dwell_events` 對 track 分群比另外兩者更敏感：
+  它量的是同一個 `track_id` 連續在區內多久，一次斷軌就把一段達標的停留切成兩段不達標的。
+  2026-08-28 那批的下游輸出確實 byte 級相同，但那是該批的實測值，不能當成通則。
 
 **列順序不在契約內，跑到一半時輸出目錄會多一個 `tracking_results.parts/`。** 追蹤進程
 依攝影機分片之後（`[tracker].shards`，預設 2，見 ADR-012），各片先寫自己的
