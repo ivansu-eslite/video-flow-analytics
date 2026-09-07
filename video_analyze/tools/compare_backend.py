@@ -32,7 +32,7 @@ ADR-011 的分界就是這一條：正式產品只有一套 inference implementa
     uv run --package video_analyze python video_analyze/tools/compare_backend.py \
         --bucket bucket_20260801_small \
         --model 20260714-153811_yolo26m_baseline.pt \
-        --model-b 20260714-153811_yolo26m_baseline_sm120.engine
+        --model-b 20260714-153811_yolo26m_baseline_sm120_a5523a3f.engine
 
 （在 repo 根目錄執行；`--package` 不改變 cwd，`--directory` 會。）
 """

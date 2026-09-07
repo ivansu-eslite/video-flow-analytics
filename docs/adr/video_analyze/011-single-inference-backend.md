@@ -186,6 +186,10 @@ argus 的 promotion 用 `Path(source_model_uri).stem` 當 `model_version`，同�
 
 引擎走 artifact，不進版控（`.gitignore` 一併加上 `*.engine` 與匯出中繼的 `*.onnx`）。
 
+⚠ 這裡只處理了一半：同一份權重在**同一張卡**上重建出來的兩顆引擎，這個格式下仍然同名。
+命名格式已於 [ADR-018](018-engine-filename-build-identity.md) 補上引擎內容的 sha256 前 8 碼，
+現行格式是 `<權重 stem>_sm<SM>_<sha8>.engine`。
+
 ### 10. 比對沒過就沒有產物
 
 `build_engine.py` 先把產物落在 `.unverified` 尾綴上，跑完 metadata／精度／形狀驗證與對
