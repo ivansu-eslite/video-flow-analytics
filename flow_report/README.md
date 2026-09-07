@@ -12,12 +12,13 @@
 `outputs/{bucket}/report.xlsx`（而非逐日各產一份），讓 BI 工具對這份不斷累加的資料做長期
 觀測。
 
-報表含六個分頁：
+報表含七個分頁：
 
 | 分頁 | 欄位 | 寫入者 |
 | --- | --- | --- |
 | 各區域人流 | 日期、星期、小時、區域、人流量 | 本階段 |
 | 各區域每日尖峰 | 日期、星期、區域、尖峰時段、尖峰人流 | 本階段 |
+| 各區域停留人次 | 日期、星期、小時、區域、停留人次 | 本階段 |
 | 各出入口人流 | 日期、星期、小時、群組、計數線、進場人數、出場人數、淨進出 | 本階段 |
 | 各出入口每日進場尖峰 | 日期、星期、群組、計數線、尖峰時段、尖峰進場、尖峰出場 | 本階段 |
 | 各出入口每日出場尖峰 | 同上 | 本階段 |
@@ -26,6 +27,11 @@
 - 兩個出入口尖峰分頁的表頭相同，差別只在尖峰時段由哪個量決定：進場尖峰看 `in_count`、
   出場尖峰看 `out_count`；並列時都取較早的時段。兩者都同時列出該時段的進場與出場人數。
 - 「淨進出」= 進場 − 出場，在彙總時算出，`line_counts.parquet` 本身沒有這一欄。
+- **「停留人次」不是人數，也不是「人流量」的子集**：它彙總 `zone_counts.parquet` 的
+  `dwell_events`（在該區域連續停留達門檻秒數的人次），同一人在同一時段內兩段都達標會計
+  2，而 `metric = "unique_visitors"` 對他只算 1。因此同一個區域同一個時段，停留人次可能
+  大於人流量，兩者不能相減，下游也不可以寫 `停留人次 <= 人流量` 這種 sanity check。
+  這個分頁固定彙總 `dwell_events`，不受 `[report].metric` 影響。
 - `camera_id` 不進報表：區域與計數線名稱都是全域唯一的（見下方使用限制）。
 
 純 CPU 運算，不需重跑偵測、區域事件統計或計數線統計；只調整報表參數時僅需重跑本階段。
@@ -166,15 +172,15 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 | `error` | 發現重複日期即整個中止，不寫入任何內容 |
 
 `overwrite` 與 `error` 的日期集合取**本次彙總的日期，加上區域與計數線兩邊資料實際帶到的
-日期**，且作用於本階段寫入的五個分頁（`活動事件` 由其他來源寫入，本階段完全不動它）：
+日期**，且作用於本階段寫入的六個分頁（`活動事件` 由其他來源寫入，本階段完全不動它）：
 
 - 本次彙總的日期一律計入，因為上游重跑後該日事件可能清空（0 列是正常產物，不是缺資料）；
   只看資料內容的話這種情況一列都清不到，該日的舊資料會留在報表裡。
 
-- `overwrite` 時聯集日期一律從五個分頁清除，該日沒有資料的分頁**只清不寫**。若改成「沒有
-  資料的分頁完全不動」，registry 移除 `lines` 後重跑該日，出入口三頁會留著舊列、區域兩頁
+- `overwrite` 時聯集日期一律從六個分頁清除，該日沒有資料的分頁**只清不寫**。若改成「沒有
+  資料的分頁完全不動」，registry 移除 `lines` 後重跑該日，出入口三頁會留著舊列、區域三頁
   換成新列，同一天在不同分頁混雜新舊資料。
-- `error` 時只要任一分頁的既有日期與聯集日期相交就整個中止，五個分頁都不寫入。
+- `error` 時只要任一分頁的既有日期與聯集日期相交就整個中止，六個分頁都不寫入。
 
 ## 哪些輸入是必要的
 
@@ -184,9 +190,9 @@ on_duplicate_date = "append"  # "overwrite" / "append" / "error"
 
 | registry 的內容 | 缺對應的 parquet 時 |
 | --- | --- |
-| 有任一攝影機 `participates_in_zone_mapping` 且 `zones` 非空 | 缺 `zone_counts.parquet` 即報錯，訊息指出要先跑 `zone_mapping` |
+| 有任一攝影機 `participates_in_zone_mapping` 且 `zones` 非空 | 缺 `zone_counts.parquet` 即報錯，訊息指出要先跑 `zone_mapping`；該檔缺 `dwell_events` 欄（舊版 `zone_mapping` 的產物）同樣報錯 |
 | 有任一攝影機 `lines` 非空 | 缺 `line_counts.parquet` 即報錯，訊息指出要先跑 `line_counting` |
-| 沒有任何 `zones` 定義 | 不報錯，區域兩頁不寫入資料（表頭仍建立） |
+| 沒有任何 `zones` 定義 | 不報錯，區域三頁不寫入資料（表頭仍建立） |
 | 沒有任何 `lines` 定義 | 不報錯，出入口三頁不寫入資料（表頭仍建立） |
 | 兩者都沒有定義 | 報錯：沒有可彙總的統計 |
 
@@ -204,9 +210,14 @@ parquet 之後被改過，靜默跳過會讓該類統計整批從報表消失，
 理由：純看檔案的話，「定義了計數線卻忘了跑 `line_counting`」與「這個 bucket 本來就沒有
 計數線」無法區分，前者會靜默少三頁。**刻意不提供跳過用的設定旗標**——要跳過的正當做法是
 把該攝影機的 `lines` 從 registry 拿掉。代價是 `flow_report` 從此被 `line_counting` 綁住：
-registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都產不出來。
+registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域三頁都產不出來。
 
-不論該 bucket 有沒有計數線，六個分頁的表頭一律建立，讓 BI 端接到的 schema 穩定。
+**欄位層級也適用同一個判準**：registry 有區域定義時，`zone_counts.parquet` 必須帶
+`dwell_events` 欄，缺這一欄整份報表中止（連出入口三頁也一起沒有），不是只跳過停留那一頁。
+靜默跳過的話，跨日累加的報表會出現「有些日期有停留、有些沒有」，看報表的人無從分辨是
+「那天沒人停留」還是「那天沒算」。解法見「已知限制」。
+
+不論該 bucket 有沒有計數線，七個分頁的表頭一律建立，讓 BI 端接到的 schema 穩定。
 `line_counts.parquet` 是 **0 列**（當日無任何跨越事件）則是 `line_counting` 的正常產物、
 不是缺資料，不報錯。
 
@@ -240,10 +251,10 @@ registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都�
 
 | 路徑 | 讀 / 寫 | 內容 |
 | --- | --- | --- |
-| `outputs/{bucket}/{date}/zone_counts.parquet` | 讀 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries` / `dwell_events`（`dwell_events` 為停留人次，issue #163 起才有，本套件目前不讀）；registry 有區域定義時缺少即報錯 |
+| `outputs/{bucket}/{date}/zone_counts.parquet` | 讀 | 每時段每區域事件統計，欄位 `camera_id` / `zone` / `time_bucket` / `unique_visitors` / `entries` / `dwell_events`（`dwell_events` 為停留人次，issue #163 起才有）；registry 有區域定義時缺少即報錯，缺 `dwell_events` 欄亦報錯 |
 | `outputs/{bucket}/{date}/line_counts.parquet` | 讀 | 每時段每計數線進出人數，欄位 `line_group` / `camera_id` / `line` / `time_bucket` / `in_count` / `out_count`；registry 有計數線定義時缺少即報錯 |
 | `{bucket_dir}/camera_registry.yaml` | 讀 | 攝影機清單與區域／計數線定義；缺少時報錯 |
-| `outputs/{bucket}/report.xlsx` | 寫 | 跨日累加的 Excel 報表（六個分頁）；不存在時建立，存在時依 `on_duplicate_date` 更新（缺哪個分頁就補建哪個） |
+| `outputs/{bucket}/report.xlsx` | 寫 | 跨日累加的 Excel 報表（七個分頁）；不存在時建立，存在時依 `on_duplicate_date` 更新（缺哪個分頁就補建哪個） |
 
 **時區**：兩份 parquet 的 `time_bucket` 都已是台北在地時間（`Asia/Taipei`），本階段
 只去掉時區標記、保留原本的 wall-clock 值，不做任何時區位移。
@@ -264,6 +275,19 @@ registry 只要有任一 `lines`，沒跑 `line_counting` 就連區域兩頁都�
   `INPUT__BUCKET_MINUTES` 一次覆寫），但三份 `config.toml` 仍各填一次；唯一能消除手抄的
   做法（寫進 parquet 檔級 metadata）已在 [ADR-008](../docs/adr/shared/008-config-section-namespace.md)
   否決，**這是已接受的最終狀態，不是待辦**。
+- **舊版 `zone_counts.parquet` 要重跑才補得回來**：缺 `dwell_events` 欄時本階段整份中止，
+  出入口三頁也一起產不出來。補跑歷史日期時一定會撞到——解法是用新版 `zone_mapping` 重跑
+  該日的 `zone_counts.parquet`（純 CPU 運算，不必重跑偵測），再跑本階段。
+- **升級之前寫進報表的日期，在「各區域停留人次」頁上是空的**：`report.xlsx` 是跨日累加
+  的，本階段不回填歷史日期。BI 端若把空值當 0 解讀，會看成「那幾天沒人停留」。要補回來
+  只能把那幾天逐日重跑（`zone_mapping` → `flow_report`，且 `on_duplicate_date` 設成
+  `overwrite`）。
+- **報表不記錄停留門檻秒數，跨日混口徑不會有訊號**：門檻 `dwell_threshold_seconds` 只在
+  `zone_mapping` 的設定裡，`zone_counts.parquet` 沒有記（見
+  [ADR-016](../docs/adr/zone_mapping/016-zone-dwell-threshold.md)），本階段無從得知，
+  也刻意不自己開一個純標籤用的設定——那會製造「報表標 20 秒、上游其實跑 30 秒」這種沒有
+  訊號的假標籤，比不標更糟。中途改門檻又沒重跑歷史日期的話，「停留人次」欄底下會混兩種
+  定義的數字。
 - **`line_group` 只是報表的一個維度欄位**：本階段不做範圍層級的加總（例如整個賣場的進出
   合計），出入口三頁都是逐計數線的數字。
 - **幾何改過但名稱沒變時不會有任何訊號**：本階段讀的是當下的 registry，不是產生 parquet

@@ -34,6 +34,7 @@ def _make_zone_counts(rows):
             "zone": pl.Utf8,
             "entries": pl.Int64,
             "unique_visitors": pl.Int64,
+            "dwell_events": pl.Int64,
         },
         orient="row",
     )
@@ -42,10 +43,10 @@ def _make_zone_counts(rows):
 def test_rollup_by_period_sums_entries_within_hour():
     df = _make_zone_counts(
         [
-            (datetime.datetime(2026, 5, 1, 19, 0), "checkout", 100, 80),
-            (datetime.datetime(2026, 5, 1, 19, 15), "checkout", 50, 40),
-            (datetime.datetime(2026, 5, 1, 19, 45), "checkout", 30, 20),
-            (datetime.datetime(2026, 5, 1, 20, 0), "checkout", 5, 5),
+            (datetime.datetime(2026, 5, 1, 19, 0), "checkout", 100, 80, 7),
+            (datetime.datetime(2026, 5, 1, 19, 15), "checkout", 50, 40, 3),
+            (datetime.datetime(2026, 5, 1, 19, 45), "checkout", 30, 20, 2),
+            (datetime.datetime(2026, 5, 1, 20, 0), "checkout", 5, 5, 1),
         ]
     )
     result = rollup_by_period(df, period_minutes=60, metric="entries")
@@ -60,19 +61,49 @@ def test_rollup_by_period_sums_entries_within_hour():
 def test_rollup_by_period_supports_unique_visitors_metric():
     df = _make_zone_counts(
         [
-            (datetime.datetime(2026, 5, 1, 19, 0), "checkout", 100, 80),
-            (datetime.datetime(2026, 5, 1, 19, 15), "checkout", 50, 40),
+            (datetime.datetime(2026, 5, 1, 19, 0), "checkout", 100, 80, 7),
+            (datetime.datetime(2026, 5, 1, 19, 15), "checkout", 50, 40, 3),
         ]
     )
     result = rollup_by_period(df, period_minutes=60, metric="unique_visitors")
     assert result["value"].to_list() == [120]
 
 
+def test_rollup_by_period_sums_dwell_events_within_hour():
+    """`dwell_events` 與 `entries` 同型（事件型），跨 bucket 相加不重複計。
+
+    值刻意與同幾列的 `entries`／`unique_visitors` 不同：彙總時取錯欄位就會露餡。
+    """
+    df = _make_zone_counts(
+        [
+            (datetime.datetime(2026, 5, 1, 19, 0), "checkout", 100, 80, 7),
+            (datetime.datetime(2026, 5, 1, 19, 15), "checkout", 50, 40, 3),
+            (datetime.datetime(2026, 5, 1, 20, 0), "checkout", 5, 5, 1),
+        ]
+    )
+    result = rollup_by_period(df, period_minutes=60, metric="dwell_events")
+    values_by_period = dict(zip(result["period"].to_list(), result["value"].to_list()))
+    assert values_by_period == {"19:00": 10, "20:00": 1}
+
+
+def test_rollup_by_period_keeps_zones_separate_for_dwell_events():
+    """停留人次也是逐 zone 彙總，不會把別的區域的人次算進來。"""
+    df = _make_zone_counts(
+        [
+            (datetime.datetime(2026, 5, 1, 19, 0), "checkout", 100, 80, 7),
+            (datetime.datetime(2026, 5, 1, 19, 0), "entrance", 10, 8, 2),
+        ]
+    )
+    result = rollup_by_period(df, period_minutes=60, metric="dwell_events")
+    values_by_zone = dict(zip(result["zone"].to_list(), result["value"].to_list()))
+    assert values_by_zone == {"checkout": 7, "entrance": 2}
+
+
 def test_rollup_by_period_keeps_zones_separate():
     df = _make_zone_counts(
         [
-            (datetime.datetime(2026, 5, 1, 19, 0), "checkout", 100, 80),
-            (datetime.datetime(2026, 5, 1, 19, 0), "entrance", 10, 8),
+            (datetime.datetime(2026, 5, 1, 19, 0), "checkout", 100, 80, 7),
+            (datetime.datetime(2026, 5, 1, 19, 0), "entrance", 10, 8, 2),
         ]
     )
     result = rollup_by_period(df, period_minutes=60, metric="entries")
