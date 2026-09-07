@@ -8,6 +8,11 @@
 編進去（`..._sm75.engine`）就是為了讓兩顆不可能被混用——下游 argus 的 promotion 用
 `Path(source_model_uri).stem` 當 `model_version`，兩顆同名會直接撞在一起。
 
+**檔名還帶引擎內容的 sha256 前 8 碼**（`<權重 stem>_sm<SM>_<sha8>.engine`，ADR-018）：
+`_sm<SM>` 只擋跨架構混用，同一份權重在同一張卡上重建出來的兩顆引擎，檔頭逐欄相同、
+只有內容不同，光靠 `_sm<SM>` 仍然同名。hash 取的是引擎檔的完整內容（檔頭 ＋ 序列化
+引擎），拿到檔案的人可以直接 `sha256sum` 覆核檔名。
+
 **引擎由本工具自己建，不走 ultralytics 的引擎匯出**（ADR-015）：ONNX 中繼檔仍由
 ultralytics 匯出，之後的 builder／network／optimization profile／config 都在
 `build_serialized_engine` 裡，檔頭由 `services/engine_metadata.py` 寫。接管的理由只有
@@ -153,17 +158,43 @@ def check_train_imgsz(model: YOLO) -> None:
         )
 
 
-def engine_filename(weights: Path, compute_capability: str) -> str:
-    """引擎檔名：來源權重的 stem ＋ `_sm<SM>`。
+def engine_basename(weights: Path, compute_capability: str) -> str:
+    """引擎檔名中與建置結果無關的前半段：來源權重的 stem ＋ `_sm<SM>`（不含副檔名）。
+
+    **建置之前就算得出來**，暫存檔名靠它組出——正式檔名要等引擎建完才知道內容 hash，
+    不先把這一段拆開的話，暫存名只能從正式名推導，而正式名此時還不存在。
 
     Args:
         weights: 來源 `.pt`。
         compute_capability: 建置機的 compute capability（如 `"7.5"`）。
 
     Returns:
-        如 `20260714-153811_yolo26m_baseline_sm75.engine`。
+        如 `20260714-153811_yolo26m_baseline_sm75`。
     """
-    return f"{weights.stem}_sm{compute_capability.replace('.', '')}.engine"
+    return f"{weights.stem}_sm{compute_capability.replace('.', '')}"
+
+
+def engine_filename(weights: Path, compute_capability: str, engine_sha256: str) -> str:
+    """引擎檔名：`<權重 stem>_sm<SM>_<引擎內容 sha256 前 8 碼>.engine`。
+
+    `_sm<SM>` 擋的是「不同架構的兩顆引擎混用」；`_<sha8>` 擋的是另一半——**同一份權重
+    在同一張卡上重建，兩顆引擎的檔頭逐欄相同**（來源權重 hash、SM、TensorRT 版本、
+    wheel 變體、驅動全部一樣），只有內容不同。兩顆同名的後果是下游 promotion 拿
+    `Path(source_model_uri).stem` 當 `model_version` 時撞在一起，上傳到物件儲存也直接
+    覆蓋，而看結果的人無從分辨那批數字是哪一顆跑出來的。
+
+    hash 取的是**引擎檔的完整內容**（檔頭 ＋ 序列化引擎），所以拿到檔案的人可以直接
+    `sha256sum` 覆核檔名。
+
+    Args:
+        weights: 來源 `.pt`。
+        compute_capability: 建置機的 compute capability（如 `"7.5"`）。
+        engine_sha256: 引擎檔內容的 SHA-256（十六進位小寫，`sha256_of` 的輸出）。
+
+    Returns:
+        如 `20260714-153811_yolo26m_baseline_sm75_a46e7566.engine`。
+    """
+    return f"{engine_basename(weights, compute_capability)}_{engine_sha256[:8]}.engine"
 
 
 def profile_shapes(batch: int) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -476,10 +507,10 @@ def main() -> None:
     del source_model  # 匯出會自己再載一次，這裡只是為了讀 ckpt
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    final_path = args.output_dir / engine_filename(
-        args.weights, environment.compute_capability
-    )
-    staged = final_path.with_suffix(final_path.suffix + _UNVERIFIED_SUFFIX)
+    # 正式檔名帶引擎內容的 sha8，建完才算得出來，所以暫存名只能由 `engine_basename`
+    # 直接組（不從正式路徑推導）
+    basename = engine_basename(args.weights, environment.compute_capability)
+    staged = args.output_dir / f"{basename}.engine{_UNVERIFIED_SUFFIX}"
     export_engine(args.weights, args.batch, vfa_metadata, staged)
 
     try:
@@ -533,8 +564,16 @@ def main() -> None:
             "--skip-compare 重跑。"
         )
         return
+
+    engine_sha256 = sha256_of(staged)
+    final_path = args.output_dir / engine_filename(
+        args.weights, environment.compute_capability, engine_sha256
+    )
+    if final_path.exists():
+        # 檔名帶的是內容 hash，同名即同內容，覆蓋是等價操作
+        print(f"[注意] {final_path.name} 已存在；檔名帶內容 hash，同名即同內容，直接覆蓋。")
     staged.rename(final_path)
-    print(f"\n引擎已產出：{final_path}")
+    print(f"\n引擎已產出：{final_path}\n  sha256 {engine_sha256}")
 
 
 if __name__ == "__main__":
