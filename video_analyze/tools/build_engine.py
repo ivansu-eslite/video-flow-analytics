@@ -4,14 +4,14 @@
 **同一支工具、兩台機器、兩顆引擎**：TensorRT 引擎不可跨架構重用——`IBuilderConfig`
 沒有指定 target SM 的 API，`HardwareCompatibilityLevel` 只有 `NONE`／`AMPERE_PLUS`／
 `SAME_COMPUTE_CAPABILITY`，而 `AMPERE_PLUS` 不含 Turing。所以正式引擎（T4／sm75）只能
-在 T4 上建，開發機（RTX 5090／sm120）建的那顆只能給地端用、不可上線。引擎檔名把 SM
-編進去（`..._sm75.engine`）就是為了讓兩顆不可能被混用——下游 argus 的 promotion 用
-`Path(source_model_uri).stem` 當 `model_version`，兩顆同名會直接撞在一起。
+在 T4 上建，開發機（RTX 5090／sm120）建的那顆只能給地端用、不可上線。
 
-**檔名還帶引擎內容的 sha256 前 8 碼**（`<權重 stem>_sm<SM>_<sha8>.engine`，ADR-018）：
-`_sm<SM>` 只擋跨架構混用，同一份權重在同一張卡上重建出來的兩顆引擎，檔頭逐欄相同、
-只有內容不同，光靠 `_sm<SM>` 仍然同名。hash 取的是引擎檔的完整內容（檔頭 ＋ 序列化
-引擎），拿到檔案的人可以直接 `sha256sum` 覆核檔名。
+**產物名是 `<權重 stem>_sm<SM>_<引擎內容 sha256 前 8 碼>.engine`**（如
+`..._sm75_d98a7c87.engine`，ADR-018），兩段尾綴各擋一半。`_sm<SM>` 擋跨架構混用——下游
+argus 的 promotion 用 `Path(source_model_uri).stem` 當 `model_version`，T4 與 5090 兩顆
+同名會直接撞在一起。`_<sha8>` 擋同權重同卡的兩次建置混用：那兩顆的檔頭逐欄比對只有
+ultralytics 寫的 `date` 時間戳不同，光靠 `_sm<SM>` 仍然同名。hash 取的是引擎檔的完整
+內容（檔頭 ＋ 序列化引擎），拿到檔案的人可以直接 `sha256sum` 覆核檔名。
 
 **引擎由本工具自己建，不走 ultralytics 的引擎匯出**（ADR-015）：ONNX 中繼檔仍由
 ultralytics 匯出，之後的 builder／network／optimization profile／config 都在
@@ -178,8 +178,9 @@ def engine_filename(weights: Path, compute_capability: str, engine_sha256: str) 
     """引擎檔名：`<權重 stem>_sm<SM>_<引擎內容 sha256 前 8 碼>.engine`。
 
     `_sm<SM>` 擋的是「不同架構的兩顆引擎混用」；`_<sha8>` 擋的是另一半——**同一份權重
-    在同一張卡上重建，兩顆引擎的檔頭逐欄相同**（來源權重 hash、SM、TensorRT 版本、
-    wheel 變體、驅動全部一樣），只有內容不同。兩顆同名的後果是下游 promotion 拿
+    在同一張卡上重建，兩顆引擎的檔頭只差一個 `date` 時間戳**（來源權重 hash、SM、
+    TensorRT 版本、wheel 變體、驅動全部一樣），而 `date` 不在檔名裡、也覆核不了。
+    兩顆同名的後果是下游 promotion 拿
     `Path(source_model_uri).stem` 當 `model_version` 時撞在一起，上傳到物件儲存也直接
     覆蓋，而看結果的人無從分辨那批數字是哪一顆跑出來的。
 
@@ -565,14 +566,36 @@ def main() -> None:
         )
         return
 
-    engine_sha256 = sha256_of(staged)
-    final_path = args.output_dir / engine_filename(
-        args.weights, environment.compute_capability, engine_sha256
-    )
-    if final_path.exists():
-        # 檔名帶的是內容 hash，同名即同內容，覆蓋是等價操作
-        print(f"[注意] {final_path.name} 已存在；檔名帶內容 hash，同名即同內容，直接覆蓋。")
-    staged.rename(final_path)
+    # 這一段（算 hash ＋ 改名）刻意**不在**上面那個 `except BaseException` 裡：產物到這裡
+    # 已經通過全部驗收，這時候刪掉它等於白跑一次建置（T4 上約 7 分鐘）。改名沒完成時只
+    # 印清楚「檔案還在、名字沒換」，讓人拿得回來
+    try:
+        engine_sha256 = sha256_of(staged)
+        final_path = args.output_dir / engine_filename(
+            args.weights, environment.compute_capability, engine_sha256
+        )
+        if final_path.exists():
+            # **不能只因為同名就覆蓋。** 載入端不驗「檔名的 sha8 是否等於檔案內容」
+            # （ADR-018），所以磁碟上叫 `..._<sha8>.engine` 的檔不保證內容真的是那個
+            # hash——手動命名或改錯名的引擎都長這樣。直接覆蓋會把可能是唯一一份的檔
+            # 靜默輾掉，量一次再說（相對整趟建置可忽略）
+            existing_sha256 = sha256_of(final_path)
+            if existing_sha256 != engine_sha256:
+                raise ValueError(
+                    f"{final_path.name} 已存在，但它的內容 sha256 是 {existing_sha256}，"
+                    f"與檔名宣告的不符（本次產物是 {engine_sha256}）。那顆檔的名字是手動"
+                    f"套上去的或改錯了，覆蓋會把它輾掉。產物留在 {staged}，處理完那顆檔"
+                    "再自行改名。"
+                )
+            print(f"[注意] {final_path.name} 已存在且內容相同，直接覆蓋。")
+        staged.rename(final_path)
+    except BaseException:
+        print(
+            f"[中止] 產物已通過全部驗收，但沒能改成正式檔名；**檔案還在 {staged}**，"
+            "不必重建，處理完下面的原因後自行改名即可。",
+            file=sys.stderr,
+        )
+        raise
     print(f"\n引擎已產出：{final_path}\n  sha256 {engine_sha256}")
 
 

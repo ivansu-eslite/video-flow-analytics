@@ -21,6 +21,7 @@ test_trt_runner.py 的 `check_profile_shapes`，這裡只釘建置端產生的�
 不必碰真的 `.pt` 權重或 GPU。
 """
 
+import hashlib
 import json
 import struct
 from pathlib import Path
@@ -322,3 +323,61 @@ def test_main_leaves_the_skip_compare_product_unverified(monkeypatch, tmp_path):
     assert [p.name for p in out.iterdir()] == [
         "20260714-153811_yolo26m_baseline_sm75.engine.unverified"
     ]
+
+
+def test_main_names_the_product_after_the_engine_it_actually_built(monkeypatch, tmp_path):
+    """走完整條成功路徑，釘住「檔名的 sha8 hash 的是**引擎檔**」。
+
+    上面那兩支檔名測試只驗字串組成——`engine_filename` 收的是已經算好的 sha，換成 hash
+    來源權重、hash ONNX 中繼檔，或 hash 別的東西，它們一支都不會紅。這裡的期望值由 stub
+    真正寫進磁碟的那串 bytes 現算，`main()` 裡把 `sha256_of(staged)` 換成
+    `sha256_of(args.weights)` 就會立刻對不上。
+    """
+    out = tmp_path / "out"
+    weights = _stub_build_pipeline(monkeypatch, tmp_path, failures=[])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["build_engine.py", "--weights", str(weights), "--output-dir", str(out),
+         "--batch", "16", "--bucket", str(tmp_path / "bucket")],
+    )
+
+    build_engine.main()
+
+    expected_sha = hashlib.sha256(b"engine-bytes").hexdigest()
+    produced = list(out.iterdir())
+    assert [p.name for p in produced] == [
+        f"20260714-153811_yolo26m_baseline_sm75_{expected_sha[:8]}.engine"
+    ]
+    # 檔名不只要「長得像」，還要真的等於該檔內容的 sha256 前 8 碼
+    assert sha256_of(produced[0])[:8] == produced[0].name.split("_")[-1].removesuffix(
+        ".engine"
+    )
+
+
+def test_main_refuses_to_overwrite_a_file_whose_name_lies_about_its_content(
+    monkeypatch, tmp_path
+):
+    """正式檔名已存在、但那個檔的內容對不上它宣告的 hash 時，fail loud 不覆蓋。
+
+    載入端不驗「檔名的 sha8 是否等於檔案內容」（ADR-018），所以磁碟上叫
+    `..._<sha8>.engine` 的檔不保證內容真的是那個 hash——手動命名或改錯名的引擎都長這樣。
+    只憑同名就覆蓋，會把可能是唯一一份的引擎靜默輾掉。產物要留在 `.unverified` 上，
+    通過驗收的東西不因為改名失敗而消失。
+    """
+    out = tmp_path / "out"
+    weights = _stub_build_pipeline(monkeypatch, tmp_path, failures=[])
+    expected_sha = hashlib.sha256(b"engine-bytes").hexdigest()
+    out.mkdir()
+    squatter = out / f"20260714-153811_yolo26m_baseline_sm75_{expected_sha[:8]}.engine"
+    squatter.write_bytes(b"a-different-engine-with-a-borrowed-name")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["build_engine.py", "--weights", str(weights), "--output-dir", str(out),
+         "--batch", "16", "--bucket", str(tmp_path / "bucket")],
+    )
+
+    with pytest.raises(ValueError, match="與檔名宣告的不符"):
+        build_engine.main()
+
+    assert squatter.read_bytes() == b"a-different-engine-with-a-borrowed-name"
+    assert (out / "20260714-153811_yolo26m_baseline_sm75.engine.unverified").is_file()
