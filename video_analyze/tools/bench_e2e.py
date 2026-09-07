@@ -87,6 +87,10 @@ DEFAULT_RUNS_DIR = Path("outputs/bench_e2e")
 DEFAULT_OUTPUT_ROOT = Path("outputs")
 DEFAULT_CONFIG = Path("video_analyze/config.toml")
 DEFAULT_FOOT_POINT = "head"
+# 與 `src/video_analyze/services/foot_point.py` 的 `FOOT_POINT_METHODS`、
+# `models/config.py` 的 `FootPointConfig.method` 是同一組字面值；本檔刻意只用
+# stdlib（見模組 docstring），不 import 該模組取值，新增算法時三處要一起改。
+FOOT_POINT_METHODS = ("head", "bbox_bottom")
 DEFAULT_REPEAT = 2
 DEFAULT_LABEL = "main"
 DEFAULT_EXCLUDE_PREFIXES = "smoke"
@@ -643,6 +647,22 @@ def check_name_component(value: str, flag: str) -> str:
     return value
 
 
+def check_foot_point(value: str, flag: str = "--foot-point") -> str:
+    """驗證 `--foot-point`：白名單比 `check_name_component` 更嚴格，直接用它。
+
+    這個值同時進產物檔名（`_b{batch}_{foot}_r{n}`）與子進程環境變數
+    `FOOT_POINT__METHOD`；打錯字目前不會被擋，要等到子進程吃到未知值、`zone_mapping`／
+    `line_counting` 兩包 fail loud 擋下時才會現形——這時每個 bucket 的 `outputs/` 都已經
+    被本工具開頭的 `bucket_output_dir` 清空過（`rmtree`），前面幾輪已經跑完的量測結果
+    也一併沒了。
+    """
+    if value not in FOOT_POINT_METHODS:
+        raise SystemExit(
+            f"{flag} 不是可用的落腳點算法：{value!r}；可用值為 {list(FOOT_POINT_METHODS)}"
+        )
+    return value
+
+
 def bucket_output_dir(bucket: str, output_root: Path = DEFAULT_OUTPUT_ROOT) -> Path:
     """算出每輪開頭要清空的目錄，並擋下逃逸。
 
@@ -952,6 +972,7 @@ def command_run(args: argparse.Namespace) -> int:
 
     check_name_component(args.label, "--label")
     check_name_component(args.machine, "--machine")
+    check_foot_point(args.foot_point)
 
     cleared_dirs = [bucket_output_dir(bucket) for bucket in buckets]
     check_runs_dir_disjoint(args.runs_dir, cleared_dirs)
@@ -1183,7 +1204,8 @@ def main() -> None:
     run.add_argument(
         "--foot-point",
         default=DEFAULT_FOOT_POINT,
-        help=f"FOOT_POINT__METHOD，預設 {DEFAULT_FOOT_POINT}。**不是矩陣的第四條軸**："
+        help=f"FOOT_POINT__METHOD，預設 {DEFAULT_FOOT_POINT}，可用值為 "
+        f"{list(FOOT_POINT_METHODS)}。**不是矩陣的第四條軸**："
         "對照組只掛在單一格上，當成軸會讓每輪從 5 個 run 變 8 個；"
         "要跑對照組請再跑一次本工具、寫進同一個產物目錄（report 本就按組態分組）",
     )

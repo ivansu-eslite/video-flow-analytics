@@ -26,6 +26,7 @@ from bench_e2e import (
     artifact_paths,
     bucket_output_dir,
     build_run_env,
+    check_foot_point,
     check_name_component,
     check_runs_dir_disjoint,
     clear_artifacts,
@@ -639,6 +640,26 @@ def test_check_name_component_rejects_unsafe_labels(label):
     """
     with pytest.raises(SystemExit):
         check_name_component(label, "--label")
+
+
+@pytest.mark.parametrize(
+    "value", ["", "Head", "head ", "bbox-bottom", "a/b", "head/bbox_bottom", "bbox bottom"]
+)
+def test_check_foot_point_rejects_unknown_values(value):
+    """打錯字的 `--foot-point` 會進產物檔名與子進程環境變數 `FOOT_POINT__METHOD`。
+
+    現在不擋的話，要等到每個 bucket 的 `outputs/` 都被 `bucket_output_dir` 的
+    `rmtree` 清過、下游 `zone_mapping`／`line_counting` fail loud 之後才會發現，
+    這時前面幾輪已經跑完的量測結果已經被清空。
+    """
+    with pytest.raises(SystemExit):
+        check_foot_point(value)
+
+
+@pytest.mark.parametrize("value", ["head", "bbox_bottom"])
+def test_check_foot_point_accepts_known_values(value):
+    """合法值原樣通過，不擋正常用法。"""
+    assert check_foot_point(value) == value
 
 
 @pytest.mark.parametrize("bucket", ["../etc", "a/b", "", " bucket_x", "bucket/../.."])
