@@ -86,6 +86,17 @@ def _dwell_total(result: pl.DataFrame) -> int:
     return int(result["dwell_events"].sum())
 
 
+def _reorder_rows(cam_sub: pl.DataFrame, order: list[int]) -> pl.DataFrame:
+    """把明細的列順序換成 `order`，內容一列不增不減。
+
+    `order` 寫死而非隨機洗牌：不是每一種順序都能讓排序失效現形（整份反轉時
+    `dwell_events` 反而照樣算對），各測試用的順序是實測挑出來的，隨機化會讓這幾支
+    測試時紅時綠。
+    """
+    assert sorted(order) == list(range(cam_sub.height)), "order 必須是列索引的排列"
+    return cam_sub[order]
+
+
 def test_signed_distance_positive_inside_negative_outside():
     """符號代表內外、絕對值是到邊界的最短距離。"""
     signed_d, inside = signed_distance_to_polygon(
@@ -453,6 +464,43 @@ def test_dwell_is_zero_not_null_for_buckets_without_a_stay():
     assert result["dwell_events"].to_list() == [0]
     assert result["dwell_events"].null_count() == 0
     assert result["dwell_events"].dtype == pl.Int64
+
+
+def test_dwell_does_not_depend_on_input_row_order():
+    """同一份明細把列順序打散，`dwell_events` 要不變。
+
+    `tracking_results.parquet` 的列順序不在契約內（上游多進程分片落盤，逐片相接），
+    所以判定不能靠輸入本來就排好。拿掉 `count_zone_visits` 的
+    `.sort("track_id", "timestamp")` 之後，這份打散的明細會被 `diff()` 算出一個
+    超過容忍窗的假間隔，一段 20 秒的停留被切成兩段短的，`dwell_events` 由 1 變 0——
+    而輸出檔完全正常。
+    """
+    cam_sub = _make_cam_sub([_DEEP_INSIDE] * 5, offsets=[0, 5, 10, 15, 20])
+
+    ordered = _visits(cam_sub, dwell=20.0, gap=6.0)
+    shuffled = _visits(_reorder_rows(cam_sub, [1, 3, 0, 2, 4]), dwell=20.0, gap=6.0)
+
+    assert _dwell_total(ordered) == 1
+    assert _dwell_total(shuffled) == 1
+
+
+def test_entries_does_not_depend_on_input_row_order():
+    """同上，`entries` 也不依賴列順序。
+
+    `entries` 靠 forward-fill 沿用前一格的已確認狀態、再 shift 比對前一格，兩者都是
+    「前一格」——順序打散後第二次進入會被吃掉（2 變 1）。這與 `dwell_events` 是
+    各自獨立的失效，故各釘一支。
+    """
+    cam_sub = _make_cam_sub(
+        [_DEEP_OUTSIDE, _DEEP_INSIDE, _DEEP_OUTSIDE, _DEEP_INSIDE],
+        offsets=[0, 5, 10, 15],
+    )
+
+    ordered = _visits(cam_sub)
+    shuffled = _visits(_reorder_rows(cam_sub, [1, 3, 0, 2]))
+
+    assert _entries_total(ordered) == 2
+    assert _entries_total(shuffled) == 2
 
 
 def test_validate_zone_cameras_reports_value_error_when_data_cameras_has_none():
