@@ -53,7 +53,11 @@ class ModelConfig(BaseModel):
     Attributes:
         model_path: TensorRT 引擎檔路徑（cwd 相對）。**只吃 `.engine`**——正式推論
             路徑沒有 Torch 權重那條（ADR-011），指到 `.pt` 會被 `YOLODetector`
-            當場擋下。引擎綁 SM，檔名帶 `_sm<SM>` 尾綴以免兩顆不同架構的引擎混用。
+            當場擋下。引擎綁 SM，檔名帶 `_sm<SM>_<sha8>` 兩段尾綴：前者以免兩顆
+            不同架構的引擎混用，後者（引擎內容 sha256 前 8 碼）以免同權重同卡的
+            兩次建置混用——那兩顆的檔頭逐欄相同，只有內容不同（ADR-018）。
+            **這個預設值是容器沒帶 `config.toml` 時的 fallback，要與實際上架的引擎
+            檔名逐字相同**，否則正式環境載不到引擎。
         source_weights_sha256: 釘住引擎的來源 `.pt` 內容 hash。設了就在載入時比對
             引擎自帶的 metadata，不符即中止；留空代表不釘（只記 warning）。這是
             唯一擋得下「換成另一顆 id 剛好都存在、語義卻不同的權重」的檢查——
@@ -70,7 +74,7 @@ class ModelConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    model_path: str = "20260714-153811_yolo26m_baseline_sm75.engine"
+    model_path: str = "20260714-153811_yolo26m_baseline_sm75_d98a7c87.engine"
     source_weights_sha256: str = ""
     batch: int = Field(default=1, ge=1)
     classes: list[int] = Field(

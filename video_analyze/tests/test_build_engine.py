@@ -21,8 +21,10 @@ test_trt_runner.py 的 `check_profile_shapes`，這裡只釘建置端產生的�
 不必碰真的 `.pt` 權重或 GPU。
 """
 
+import hashlib
 import json
 import struct
+from pathlib import Path
 
 import build_engine
 import pytest
@@ -31,6 +33,7 @@ from video_analyze.services.engine_metadata import (
     VFA_METADATA_KEY,
     VFA_METADATA_SCHEMA,
     GpuEnvironment,
+    sha256_of,
 )
 from video_analyze.services.letterbox import INFER_HEIGHT, INFER_WIDTH
 from video_analyze.services.trt_runner import check_profile_shapes
@@ -200,3 +203,181 @@ def test_verify_engine_rejects_a_header_missing_the_end2end_flag(monkeypatch, tm
 
     with pytest.raises(ValueError, match="end2end"):
         build_engine.verify_engine(engine, batch=16, expected_sha256=_SHA)
+
+
+def test_engine_basename_has_no_extension_and_no_content_hash():
+    """暫存檔名要在建置**之前**就組得出來，所以這一段只吃權重與 SM 兩個輸入。
+
+    有人把它改回從正式檔名推導（`final_path.with_suffix(...)`）就會重新引入雞生蛋
+    問題：正式名要等引擎建完算出內容 hash 才知道，而暫存名在那之前就要用。
+    """
+    assert (
+        build_engine.engine_basename(Path("a/b/20260714-153811_yolo26m_baseline.pt"), "7.5")
+        == "20260714-153811_yolo26m_baseline_sm75"
+    )
+    assert (
+        build_engine.engine_basename(Path("baseline.pt"), "12.0") == "baseline_sm120"
+    )
+
+
+def test_engine_filename_carries_the_compute_capability_and_the_content_hash():
+    """`_sm<SM>` 擋跨架構混用，`_<sha8>` 擋同權重同卡的兩次建置混用。"""
+    assert (
+        build_engine.engine_filename(
+            Path("20260714-153811_yolo26m_baseline.pt"), "7.5", "a46e7566" + "f" * 56
+        )
+        == "20260714-153811_yolo26m_baseline_sm75_a46e7566.engine"
+    )
+    assert (
+        build_engine.engine_filename(Path("baseline.pt"), "12.0", "0" * 64)
+        == "baseline_sm120_00000000.engine"
+    )
+
+
+def test_engine_filename_sha8_can_be_checked_with_sha256sum(tmp_path):
+    """檔名裡的 8 碼要**逐字**等於該檔 `sha256sum` 的前 8 碼——這條就是命名規則本身。
+
+    拿到引擎的人（含下游 argus 的交付上架）靠這一點覆核「檔名指的是不是這顆二進位」；
+    改去 hash 來源權重、或改成別的長度，這裡都要紅。
+    """
+    engine = tmp_path / "fake.engine"
+    engine.write_bytes(b"not-a-real-engine")
+
+    name = build_engine.engine_filename(
+        Path("20260714-153811_yolo26m_baseline.pt"), "7.5", sha256_of(engine)
+    )
+
+    assert name.endswith(".engine")
+    assert name.split("_")[-1].removesuffix(".engine") == sha256_of(engine)[:8]
+
+
+def _stub_build_pipeline(monkeypatch, tmp_path, *, failures):
+    """把 `main()` 裡碰 GPU 的每一段換掉，只留下檔名與產物去留的流程。
+
+    `export_engine` 換成「寫一顆假 bytes 到指定落點」，正式檔名於是由該檔的內容 hash
+    決定——與真實流程同一條路徑，只是不必真的建一顆引擎（T4 上約 7 分鐘）。
+
+    Args:
+        failures: `check_report` 的回傳；非空即代表比對沒過。
+
+    Returns:
+        來源權重的假檔路徑。
+    """
+    weights = tmp_path / "20260714-153811_yolo26m_baseline.pt"
+    weights.write_bytes(b"not-a-real-weight")
+
+    monkeypatch.setattr(build_engine, "current_gpu_environment", lambda: _ENV)
+    monkeypatch.setattr(build_engine, "YOLO", lambda *a, **k: object())
+    monkeypatch.setattr(build_engine, "check_train_imgsz", lambda model: None)
+    monkeypatch.setattr(build_engine, "build_vfa_metadata", lambda *a, **k: {})
+    monkeypatch.setattr(
+        build_engine,
+        "export_engine",
+        lambda weights, batch, vfa_metadata, dest: dest.write_bytes(b"engine-bytes"),
+    )
+    monkeypatch.setattr(build_engine, "verify_engine", lambda *a, **k: {})
+    monkeypatch.setattr(build_engine, "compare_backends", lambda **k: {})
+    monkeypatch.setattr(build_engine, "print_summary", lambda report: None)
+    monkeypatch.setattr(build_engine, "check_report", lambda report, max_p99_px: failures)
+    return weights
+
+
+def test_main_deletes_the_product_when_the_comparison_fails(monkeypatch, tmp_path):
+    """比對沒過就沒有產物：暫存檔刪掉，磁碟上也不留任何正式檔名的檔。
+
+    正式名現在是**驗收通過之後**才算出來的（要有檔案才有內容 hash）。這支釘的是那次
+    調整沒有把失敗路徑搬出保護範圍——留下一顆正式檔名的引擎，等於讓沒過比對的產物可以
+    直接上線。
+    """
+    out = tmp_path / "out"
+    weights = _stub_build_pipeline(monkeypatch, tmp_path, failures=["落腳點偏差 p99 超標"])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["build_engine.py", "--weights", str(weights), "--output-dir", str(out),
+         "--batch", "16", "--bucket", str(tmp_path / "bucket")],
+    )
+
+    with pytest.raises(ValueError, match="比對沒過"):
+        build_engine.main()
+
+    assert list(out.iterdir()) == []
+
+
+def test_main_leaves_the_skip_compare_product_unverified(monkeypatch, tmp_path):
+    """`--skip-compare` 的產物停在 `.engine.unverified`，不改成正式檔名。
+
+    smoke 的產物混進正式檔名是這支工具最容易造成的事故：磁碟上會多一顆與通過比對的
+    產物長得一模一樣的引擎，事後無從分辨。尾綴也讓它載不進正式推論路徑
+    （`YOLODetector` 只吃 `.engine`）。
+    """
+    out = tmp_path / "out"
+    weights = _stub_build_pipeline(monkeypatch, tmp_path, failures=[])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["build_engine.py", "--weights", str(weights), "--output-dir", str(out),
+         "--batch", "16", "--skip-compare"],
+    )
+
+    build_engine.main()
+
+    assert [p.name for p in out.iterdir()] == [
+        "20260714-153811_yolo26m_baseline_sm75.engine.unverified"
+    ]
+
+
+def test_main_names_the_product_after_the_engine_it_actually_built(monkeypatch, tmp_path):
+    """走完整條成功路徑，釘住「檔名的 sha8 hash 的是**引擎檔**」。
+
+    上面那兩支檔名測試只驗字串組成——`engine_filename` 收的是已經算好的 sha，換成 hash
+    來源權重、hash ONNX 中繼檔，或 hash 別的東西，它們一支都不會紅。這裡的期望值由 stub
+    真正寫進磁碟的那串 bytes 現算，`main()` 裡把 `sha256_of(staged)` 換成
+    `sha256_of(args.weights)` 就會立刻對不上。
+    """
+    out = tmp_path / "out"
+    weights = _stub_build_pipeline(monkeypatch, tmp_path, failures=[])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["build_engine.py", "--weights", str(weights), "--output-dir", str(out),
+         "--batch", "16", "--bucket", str(tmp_path / "bucket")],
+    )
+
+    build_engine.main()
+
+    expected_sha = hashlib.sha256(b"engine-bytes").hexdigest()
+    produced = list(out.iterdir())
+    assert [p.name for p in produced] == [
+        f"20260714-153811_yolo26m_baseline_sm75_{expected_sha[:8]}.engine"
+    ]
+    # 檔名不只要「長得像」，還要真的等於該檔內容的 sha256 前 8 碼
+    assert sha256_of(produced[0])[:8] == produced[0].name.split("_")[-1].removesuffix(
+        ".engine"
+    )
+
+
+def test_main_refuses_to_overwrite_a_file_whose_name_lies_about_its_content(
+    monkeypatch, tmp_path
+):
+    """正式檔名已存在、但那個檔的內容對不上它宣告的 hash 時，fail loud 不覆蓋。
+
+    載入端不驗「檔名的 sha8 是否等於檔案內容」（ADR-018），所以磁碟上叫
+    `..._<sha8>.engine` 的檔不保證內容真的是那個 hash——手動命名或改錯名的引擎都長這樣。
+    只憑同名就覆蓋，會把可能是唯一一份的引擎靜默輾掉。產物要留在 `.unverified` 上，
+    通過驗收的東西不因為改名失敗而消失。
+    """
+    out = tmp_path / "out"
+    weights = _stub_build_pipeline(monkeypatch, tmp_path, failures=[])
+    expected_sha = hashlib.sha256(b"engine-bytes").hexdigest()
+    out.mkdir()
+    squatter = out / f"20260714-153811_yolo26m_baseline_sm75_{expected_sha[:8]}.engine"
+    squatter.write_bytes(b"a-different-engine-with-a-borrowed-name")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["build_engine.py", "--weights", str(weights), "--output-dir", str(out),
+         "--batch", "16", "--bucket", str(tmp_path / "bucket")],
+    )
+
+    with pytest.raises(ValueError, match="與檔名宣告的不符"):
+        build_engine.main()
+
+    assert squatter.read_bytes() == b"a-different-engine-with-a-borrowed-name"
+    assert (out / "20260714-153811_yolo26m_baseline_sm75.engine.unverified").is_file()
