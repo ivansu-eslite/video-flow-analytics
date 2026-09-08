@@ -86,24 +86,32 @@ docker run --gpus all --shm-size=256m \
 
 - **`--gpus all`**：GPU 為必要，且必須與建置引擎時是同一個架構（見[環境需求](#環境需求)）。
 - **`--shm-size`**：不給這個旗標時 Docker 只給 64 MiB，一定不夠。出貨設定（`batch = 16`、
-  九路）合計需求 202.5 MiB，`256m` 是進位後的最小值；`MODEL__BATCH` 會連帶放大緩衝
-  （`MODEL__BATCH=32` 九路合計 405 MiB），改了要跟著調。不夠時的處置只有「把 `/dev/shm`
-  調大」一個方向——降 `batch` 或減路數都會改變這次跑出來的東西。空間不夠不會報錯：
-  CPython 會靜默改用 `/tmp`，實際落點看啟動 log 每一路的 `backing_dirs`，出現 `/tmp`
-  就是那一路掉出去了（[ADR-010](../docs/adr/video_analyze/010-zero-copy-frame-lifetime.md)）。
+  九路）合計需求 202.5 MiB，`256m` 是往上取一個常見值、順便留餘裕（低於 202.5 MiB 一定
+  起不來）；`MODEL__BATCH` 會連帶放大緩衝（`MODEL__BATCH=32` 九路合計 405 MiB），改了要
+  跟著調。合計需求超過 `/dev/shm` 總容量時，程式在配置第一塊之前就以 `RuntimeError` 中止
+  （`require_shm_capacity`），不會硬跑；錯誤訊息給三條路（調小 `[model].batch`、減少路數、
+  把 `/dev/shm` 調大），部署上優先調大 `/dev/shm`——另外兩條會改變這次跑的組態（減路數
+  就是少跑幾台；改 `batch` 偵測結果相同，但吞吐與 GPU 使用率跟著變）。這道擋比的是**總
+  容量**，擋不掉「同機其他行程佔著 `/dev/shm`」造成的逐塊降級：那種情況 CPython 會靜默改用
+  `/tmp`（磁碟上的 mmap），程式照跑、輸出正常，只有讀寫成本變成磁碟等級。實際落點看啟動
+  log 每一路的 `backing_dirs`，出現 `/tmp` 就是那一路掉出去了
+  （[ADR-010](../docs/adr/video_analyze/010-zero-copy-frame-lifetime.md)）。
 - **`NVIDIA_DRIVER_CAPABILITIES` 要帶 `video`**：`nvidia/cuda` 系列基底映像預設只給
   `compute,utility`，少了 `video` 容器內就不會掛進顯示卡的解碼器函式庫（`libnvcuvid`），
   PyAV 的 cuda 硬解建不起來。讀取層是 `allow_software_fallback=False`（見[環境需求](#環境需求)
   的系統相依那列），所以症狀不是變慢而是每個片段都失敗、整天 0 產出，而容器起得來、
   模型也載得進去。
 
-> **2026-09-09 在一台 Tesla T4（driver 595.71.05）的 GCE VM 上實測過**（docker 29.4 ＋
-> nvidia-container-toolkit 1.20.0）：照上面的 `docker run --gpus all` 跑，
+> **2026-09-09 在一台 Tesla T4（driver 595.71.05）的 GCE VM 上實測過**（docker 29.1.3 ＋
+> nvidia-container-toolkit 1.20.0，兩者都是當次自行安裝，GCE VM 預設沒有）：照上面的
+> `docker run --gpus all` 跑，
 > `NVIDIA_DRIVER_CAPABILITIES` 用基底預設的 `compute,utility`（或完全不設）時，容器內
 > `ldconfig` 找不到 `libnvcuvid`，PyAV 的 cuda 硬解在**解第一格**時拋
 > `av.error.PermissionError: [Errno 1] Operation not permitted: 'avcodec_send_packet()'`；
 > 補上 `video` 之後同一支片段解得出來（1920×1080、`nv12`）。三組各跑兩輪，逐字一致。
-> 地端是直接跑在主機上、`libnvcuvid` 本來就在，這條在地端驗不到。
+> 驗的是最小重現——照 `services/video_reader.py` 同一組 `HWAccel` 參數開檔並解第一格，
+> 不是跑完整的 `video_analyze`。地端是直接跑在主機上、`libnvcuvid` 本來就在，這條在
+> 地端驗不到。
 >
 > ⚠ **失敗點在解碼、不在開檔**：`av.open()` 本身會成功，例外是後面 `container.decode()`
 > 拋的，所以 `services/video_reader.py` 對開檔那層包的「帶檔名的 `ValueError`」不會被
