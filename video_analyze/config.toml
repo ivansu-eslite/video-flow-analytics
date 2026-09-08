@@ -15,7 +15,8 @@ shards = 2
 # **這裡填的是開發機那顆（sm120 = RTX 5090）**：引擎綁 SM、不可跨架構重用，正式環境
 # 的 T4 要用 `..._sm75_<sha8>.engine`。兩者由 `tools/build_engine.py` 各自在目標卡上建，
 # 檔名的 `_sm<SM>` 擋不同架構混用，`_<sha8>`（引擎內容 sha256 前 8 碼）擋同權重同卡的
-# 兩次建置混用——那兩顆的檔頭逐欄相同、只有內容不同（ADR-018）。檔名可用 sha256sum 覆核。
+# 兩次建置混用——那兩顆的檔頭只差一個 date 時間戳、只有內容不同（ADR-018）；date 本身
+# 不在檔名裡，檔名可用 sha256sum 覆核。
 # 容器內若沒有一併複製 config.toml，套用的是 models/config.py 的預設值（那邊填 sm75）。
 model_path = "20260714-153811_yolo26m_baseline_sm120_a5523a3f.engine"
 # 引擎來源權重的內容 hash。載入時比對引擎自帶的 metadata，不符即中止——這是唯一擋得下

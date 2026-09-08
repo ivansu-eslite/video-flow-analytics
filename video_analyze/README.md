@@ -115,7 +115,7 @@ camera_ids = []            # 空 = camera_registry.yaml 內全部攝影機
 | 區塊 | 欄位 | 預設 | 約束 / 說明 |
 | --- | --- | --- | --- |
 | `[tracker]` | ByteTrack 各項閾值 | 見範例 | `*_thresh` 皆介於 0–1，`track_buffer >= 1` |
-| `[model]` | `model_path` | `"…_sm75_<sha8>.engine"` | TensorRT 引擎路徑。**只吃 `.engine`**，指到 `.pt` 直接中止。檔名的兩段尾綴都是刻意的：`_sm<SM>` 因為引擎綁架構，`_<sha8>`（引擎內容 sha256 前 8 碼）因為同權重同卡的兩次建置檔頭逐欄相同，兩顆同名會在下游 promotion 撞在一起 |
+| `[model]` | `model_path` | `"…_sm75_<sha8>.engine"` | TensorRT 引擎路徑。**只吃 `.engine`**，指到 `.pt` 直接中止。檔名的兩段尾綴都是刻意的：`_sm<SM>` 因為引擎綁架構，`_<sha8>`（引擎內容 sha256 前 8 碼）因為同權重同卡的兩次建置檔頭只差一個 `date` 時間戳、而 `date` 不在檔名裡，兩顆同名會在下游 promotion 撞在一起 |
 | | `source_weights_sha256` | `""` | 釘住引擎的來源 `.pt` 內容 hash，不符即中止。留空只記 warning——這是唯一擋得下「換成另一顆 id 剛好都存在、語義卻不同的權重」的檢查 |
 | | `batch` | `1` | 單次推理批次，`>= 1`（範例用 `16`）；**不得超過引擎建置時綁的最大批次**（`build_engine.py --batch`，同一尺度），超過即中止 |
 | | `classes` | `[0, 2]` | 要保留的偵測類別 id；權重類別為 `0=head, 1=vbody, 2=fbody`；至少 1 個元素。載入時會驗證此清單存在於**引擎 metadata 的 `names`**（不是另建 predictor 去讀 `model.names`，那會把引擎多載一次），不符直接拋錯。**必須含 fbody**（追蹤目標）；`method = "head"` 時**還必須含 head**，否則直接拋錯——少了 head 每一列都會退回框底邊中點，改動靜默失效 |
