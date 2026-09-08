@@ -578,14 +578,23 @@ def _sheet_rows(path: Path) -> dict[str, list[tuple]]:
 def test_write_report_creates_all_sheets_with_headers(tmp_path):
     """不論該 bucket 有沒有計數線，7 個分頁的表頭一律建立，讓 BI 端的 schema 穩定。
 
-    表頭寫死字面值而非拿 constants 的常數比對：常數比對是恆等式，改了定義照樣
-    通過，擋不住無意間的欄位增刪。這些字串是 BI 端接的對外契約，該由測試釘住。
+    分頁名與表頭都寫死字面值而非拿 constants 的常數比對：常數比對是恆等式，改了定義
+    照樣通過，擋不住無意間的欄位增刪或改名。這些字串是 BI 端接的對外契約，該由測試
+    釘住；分頁名的順序即分頁在檔案中的順序。
     """
     path = tmp_path / "report.xlsx"
     _write(path, _zone_frames(), on_duplicate_date="append")
 
     wb = openpyxl.load_workbook(path)
-    assert wb.sheetnames == list(_ALL_SHEETS)
+    assert wb.sheetnames == [
+        "各區域人流",
+        "各區域每日尖峰",
+        "各區域停留人次",
+        "各出入口人流",
+        "各出入口每日進場尖峰",
+        "各出入口每日出場尖峰",
+        "活動事件",
+    ]
     assert [c.value for c in wb[SHEET_ZONE_HOURLY][1]] == [
         "日期", "星期", "小時", "區域", "人流量",
     ]

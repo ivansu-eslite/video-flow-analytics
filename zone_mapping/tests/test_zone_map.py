@@ -557,6 +557,34 @@ def test_gap_tolerance_check_passes_when_window_covers_interval(tmp_path):
     assert pl.read_parquet(counts_path).height == 1
 
 
+def test_gap_tolerance_check_does_not_depend_on_row_order(tmp_path):
+    """同一份明細把列順序倒過來寫進 parquet，取樣間隔檢查一樣要擋下。
+
+    列順序不在 `tracking_results.parquet` 的契約內。少了排序，相鄰列的時間差全是
+    負的、中位數跟著變負，`dwell_gap_seconds` 永遠不會小於它——這道 fail loud 靜默
+    失效，那台攝影機整天的 `dwell_events` 是 0 而報表照樣產得出來，正是這個檢查要
+    避免的事。
+    """
+    bucket_dir, output_dir = _one_zone_bucket(tmp_path)
+    # 與上面兩支同一份明細（2 fps、12 格），只有寫進檔案的列順序相反
+    _write_tracking_results(
+        output_dir / "tracking_results.parquet",
+        "loc_cam001",
+        tracks={1: [i * 0.5 for i in reversed(range(12))]},
+    )
+
+    with pytest.raises(ValueError, match="dwell_gap_seconds") as excinfo:
+        map_zones_daily(
+            date=datetime.date(2026, 5, 1),
+            bucket_dir=str(bucket_dir),
+            bucket_minutes=60,
+            dwell_gap_seconds=0.01,
+            output_root=tmp_path / "outputs",
+        )
+
+    assert "500.0 ms" in str(excinfo.value)
+
+
 def test_gap_tolerance_check_skipped_when_samples_insufficient(tmp_path):
     """每個 track 都只有一列時算不出間隔中位數，記 warning 放行、不誤擋。
 
