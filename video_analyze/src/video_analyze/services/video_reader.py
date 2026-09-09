@@ -112,7 +112,7 @@ def _parse_segment_start(path: Path, day: date) -> datetime:
     return start
 
 
-def _decode_frames(container, path: Path):
+def _decode_frames(container, path: Path, cause_hint: str):
     """逐格解碼，解碼器拋錯時補上片段路徑再拋。
 
     `av.open()` 那層特地把失敗包成帶路徑的 `ValueError`，理由是「這一路的對應片段就無從
@@ -131,12 +131,17 @@ def _decode_frames(container, path: Path):
     Args:
         container: 已開啟的 `av` 容器。
         path: 該片段的路徑，只用在錯誤訊息裡。
+        cause_hint: 附在訊息尾巴的可能成因，**由呼叫端給**：兩個呼叫端的開檔方式不同
+            （`_read_segment` 掛 `hwaccel`、`probe_frame_shape` 走軟解），共用一句
+            「缺硬體解碼權限」會讓軟解那條路印出不可能成立的成因，把排查引去查裝置
+            權限與驅動，而真正該換掉的是那支壞檔。
 
     Yields:
         解出的每一格。
 
     Raises:
-        ValueError: 解碼過程中拋出任何 PyAV 例外。
+        ValueError: 解碼器拋出 `av.FFmpegError` 或裸 `RuntimeError`。其餘例外原樣往上拋
+            （例如沒有視訊串流時 `decode(video=0)` 的 `IndexError`，由呼叫端先擋）。
     """
     decoded = 0
     try:
@@ -150,8 +155,8 @@ def _decode_frames(container, path: Path):
             yield av_frame
     except (av.FFmpegError, RuntimeError) as exc:
         raise ValueError(
-            f"{path} 第 {decoded} 格解碼失敗（frame_index 0 起算，前 {decoded} 格已解出）："
-            "常見成因是執行環境缺少硬體解碼權限，或該片段本身損毀。"
+            f"{path} 第 {decoded} 格解碼失敗"
+            f"（frame_index 0 起算，前 {decoded} 格已解出）。{cause_hint}"
         ) from exc
 
 
@@ -184,9 +189,17 @@ def probe_frame_shape(segment: SegmentInfo) -> FrameShape:
             # ffmpeg 開得起來但沒有視訊串流（例如只有音軌）時，`decode(video=0)` 會拋出
             # 不帶檔名的 `IndexError`；cv2 這種檔案是 `isOpened()` 為否，走 fail loud。
             raise ValueError(f"片段不含視訊串流: {segment.path}")
-        frame = next(_decode_frames(container, segment.path), None)
+        frame = next(
+            # 這裡的 `av.open()` 沒掛 `hwaccel`（走軟解），缺硬體解碼權限的症狀不會出現
+            # 在探測階段，故成因只提壞檔。
+            _decode_frames(container, segment.path, "常見成因是該片段本身損毀。"),
+            None,
+        )
         if frame is None:
             raise ValueError(f"片段讀不到任何影格，無法探測解析度: {segment.path}")
+        # 這一行刻意留在 `_decode_frames` 的包裝外：要包住它就得把整個迴圈體圈進來，
+        # 而那會把 ring／queue 的失敗也標成「解碼失敗」。代價是色彩轉換失敗時拋的 PyAV
+        # 例外不帶片段路徑，上面的 `Raises` 有這個已知缺口。
         height, width = frame.to_ndarray(format="bgr24").shape[:2]
         return FrameShape(height=height, width=width)
     finally:
@@ -344,7 +357,11 @@ class DailyStreamVideoReader:
                 raise ValueError(f"片段不含視訊串流: {segment.path}")
             fps = _stream_fps(container.streams.video[0], segment.path)
             frame_index = 0
-            for av_frame in _decode_frames(container, segment.path):
+            for av_frame in _decode_frames(
+                container,
+                segment.path,
+                "常見成因是執行環境缺少硬體解碼權限，或該片段本身損毀。",
+            ):
                 # 「整天解析度固定」的 fail-loud 檢查要在這裡做：縮放前移之前，這件事
                 # 由 `FrameRing.write_slot` 的形狀檢查順便擋下（緩衝依首格解析度配置），
                 # 但 letterbox 會把任何尺寸都抹平成推論尺寸，那道網就失效了。中途換

@@ -132,14 +132,21 @@ class _FakeContainer:
 
 
 class _RingStub:
-    """環形緩衝的替身，只記下每次寫入的形狀。"""
+    """環形緩衝的替身，只記下每次寫入的形狀。
+
+    `write_error` 模擬 `/dev/shm` 不足時 `FrameRing.write_slot` 拋的 `RuntimeError`，
+    用來釘住「解碼失敗的包裝不涵蓋迴圈體」。
+    """
 
     num_slots = 4
 
-    def __init__(self):
+    def __init__(self, write_error=None):
         self.written = []
+        self._write_error = write_error
 
     def write_slot(self, slot, frame):
+        if self._write_error is not None:
+            raise self._write_error
         self.written.append(frame.shape)
 
 
@@ -346,6 +353,45 @@ def test_reader_wraps_a_mid_stream_decode_failure_as_value_error(monkeypatch):
 
     assert "030000.000Z.mkv" in str(excinfo.value)
     assert excinfo.value.__cause__ is boom
+
+
+def test_reader_wraps_a_bare_runtime_error_from_the_decoder(monkeypatch):
+    """解碼器拋裸 `RuntimeError` 時同樣要包起來。
+
+    PyAV 18.1.0 有拋裸 `RuntimeError` 的前例（見開檔那層的註解），它不是
+    `av.FFmpegError` 的子類別；只接 `FFmpegError` 會讓這種失敗漏掉包裝，往上拋的仍是
+    不帶片段路徑的原始例外——正是這裡要修掉的症狀。
+    """
+    boom = RuntimeError("decoder failed")
+    reader = _reader_over(
+        monkeypatch,
+        [_FakeAvFrame(1080, 1920)],
+        FrameShape(height=1080, width=1920),
+        decode_error=boom,
+    )
+
+    with pytest.raises(ValueError, match="第 1 格解碼失敗") as excinfo:
+        reader._read_segment(_segment())
+
+    assert excinfo.value.__cause__ is boom
+
+
+def test_reader_does_not_relabel_a_ring_write_failure_as_a_decode_failure(monkeypatch):
+    """共享記憶體寫入失敗要原樣往上拋：包裝只涵蓋「取下一格」。
+
+    把整個迴圈圈進 `try` 的話，`/dev/shm` 不足會被說成「片段解碼失敗，常見成因是
+    執行環境缺少硬體解碼權限」，排查方向被引到影片檔與顯示卡權限上。
+    """
+    boom = RuntimeError("shm: cannot allocate slot")
+    reader = _reader_over(
+        monkeypatch, [_FakeAvFrame(1080, 1920)], FrameShape(height=1080, width=1920)
+    )
+    reader.ring = _RingStub(write_error=boom)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        reader._read_segment(_segment())
+
+    assert excinfo.value is boom
 
 
 def test_reader_reads_a_segment_that_decodes_to_zero_frames(monkeypatch):
