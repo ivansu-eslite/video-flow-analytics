@@ -533,6 +533,10 @@ N 個讀取進程 ＋ 1 個推理進程 ＋ `[tracker].shards` 個追蹤進程�
   的日期目錄，寧可中止也不靜默寫錯天。此檢查在 `discover_segments` 掃描時、於主進程
   執行，**任一路踩到就整天中止**（不是只跳過該攝影機或該片段）。
 - 其餘片段的開檔 / 讀 FPS 失敗 → 讀取子進程拋錯、以非零 exitcode 結束。
+- **解碼中途失敗（例如環境缺 NVDEC 權限：`av.open()` 成功、失敗在解第一格）→ 讀取子進程
+  拋帶片段路徑與格號的 `ValueError`**。PyAV 的原始例外只有一行
+  `Operation not permitted: 'avcodec_send_packet()'`，九路同時跑時看不出是哪一路、
+  哪一支片段。
 - **引擎載入前的檢查，任一不過即中止**（`services/detector.py`）：`model_path` 不是
   `.engine`、引擎檔不存在（`model_path` 是 cwd 相對路徑，跑錯目錄就是這個症狀；自己先
   擋是為了訊息——下一步讀檔頭時拋的例外只有一個路徑字串。經 `YOLO` 載入時這道檢查還
