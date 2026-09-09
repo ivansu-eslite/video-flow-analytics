@@ -75,6 +75,55 @@ uv run --package video_analyze video_analyze
 > 相對路徑**，`uv run --package` 不改變 cwd。本套件自己的 `config.toml` 則以共用 lib 的
 > `get_toml_path(__file__)`（往上找 `pyproject.toml`）定位，不受 cwd 影響。
 
+### 在容器裡跑
+
+容器裡跑有三項要明確指定，預設值都不對：
+
+```bash
+docker run --gpus all --shm-size=256m \
+  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video ...
+```
+
+- **`--gpus all`**：GPU 為必要，且必須與建置引擎時是同一個架構（見[環境需求](#環境需求)）。
+- **`--shm-size`**：不給這個旗標時 Docker 只給 64 MiB，一定不夠。出貨設定（`batch = 16`、
+  九路）合計需求 202.5 MiB，`256m` 是往上取一個常見值、順便留餘裕（低於 202.5 MiB 一定
+  起不來）；`MODEL__BATCH` 會連帶放大緩衝（`MODEL__BATCH=32` 九路合計 405 MiB），改了要
+  跟著調。合計需求超過 `/dev/shm` 總容量時，程式在配置第一塊之前就以 `RuntimeError` 中止
+  （`require_shm_capacity`），不會硬跑；錯誤訊息給三條路（調小 `[model].batch`、減少路數、
+  把 `/dev/shm` 調大），部署上優先調大 `/dev/shm`——另外兩條會改變這次跑的組態（減路數
+  就是少跑幾台；改 `batch` 偵測結果相同，但吞吐與 GPU 使用率跟著變）。這道擋比的是**總
+  容量**，擋不掉「同機其他行程佔著 `/dev/shm`」造成的逐塊降級：那種情況 CPython 會靜默改用
+  `/tmp`（磁碟上的 mmap），程式照跑、輸出正常，只有讀寫成本變成磁碟等級。實際落點看啟動
+  log 每一路的 `backing_dirs`，出現 `/tmp` 就是那一路掉出去了
+  （[ADR-010](../docs/adr/video_analyze/010-zero-copy-frame-lifetime.md)）。
+- **`NVIDIA_DRIVER_CAPABILITIES` 要帶 `video`**：`nvidia/cuda` 系列基底映像預設只給
+  `compute,utility`，少了 `video` 容器內就不會掛進顯示卡的解碼器函式庫（`libnvcuvid`），
+  PyAV 的 cuda 硬解建不起來。讀取層是 `allow_software_fallback=False`（見[環境需求](#環境需求)
+  的系統相依那列），所以症狀不是變慢而是每個片段都失敗、整天 0 產出，而容器起得來、
+  模型也載得進去。
+
+> **2026-09-09 在一台 Tesla T4（driver 595.71.05）的 GCE VM 上實測過**（docker 29.1.3 ＋
+> nvidia-container-toolkit 1.20.0，兩者都是當次自行安裝，GCE VM 預設沒有）：照上面的
+> `docker run --gpus all` 跑，
+> `NVIDIA_DRIVER_CAPABILITIES` 用基底預設的 `compute,utility`（或完全不設）時，容器內
+> `ldconfig` 找不到 `libnvcuvid`，PyAV 的 cuda 硬解在**解第一格**時拋
+> `av.error.PermissionError: [Errno 1] Operation not permitted: 'avcodec_send_packet()'`；
+> 補上 `video` 之後同一支片段解得出來（1920×1080、`nv12`）。三組各跑兩輪，逐字一致。
+> 驗的是最小重現——照 `services/video_reader.py` 同一組 `HWAccel` 參數開檔並解第一格，
+> 不是跑完整的 `video_analyze`。地端是直接跑在主機上、`libnvcuvid` 本來就在，這條在
+> 地端驗不到。
+>
+> ⚠ **失敗點在解碼、不在開檔**：`av.open()` 本身會成功，例外是後面 `container.decode()`
+> 拋的，所以 `services/video_reader.py` 對開檔那層包的「帶檔名的 `ValueError`」不會被
+> 觸發，log 裡看不到是哪一支片段。排查要往解碼迴圈看。
+>
+> ⚠ **這個變數只在 `docker run --gpus all` 這條路徑上有效。** 改用 `--runtime=nvidia`
+> 時，nvidia-container-toolkit 讀的是一份事先產好的裝置清單檔（規格名稱是容器裝置介面，
+> 縮寫 CDI，檔案在 `/var/run/cdi/nvidia.yaml`）。那份清單把 `libnvcuvid` 直接列了進去、
+> 不分驅動能力，所以這個變數完全不參與：填空字串、甚至填一個不存在的值，`libnvcuvid`
+> 照樣掛得進容器，不帶 `video` 也能硬解。**要驗這一項就照上面用 `--gpus all`**，不要
+> 順手加 `--runtime=nvidia`，否則會驗出「不帶 `video` 也沒事」的假結論。
+
 ## 設定
 
 設定分成兩個檔案，職責清楚切分：
