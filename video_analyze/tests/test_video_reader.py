@@ -4,6 +4,7 @@ from fractions import Fraction
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import av
 import numpy as np
 import pytest
 
@@ -102,7 +103,11 @@ class _FakeStreams:
 
 
 class _FakeContainer:
-    """`av.open()` 的替身，依序吐出指定的影格。"""
+    """`av.open()` 的替身，依序吐出指定的影格。
+
+    `decode_error` 模擬「吐完前幾格之後解碼器才拋錯」：缺硬體解碼權限時
+    `av.open()` 會成功、失敗發生在解第一格，這種形狀的失敗只有替身能造出來。
+    """
 
     def __init__(
         self,
@@ -110,13 +115,17 @@ class _FakeContainer:
         average_rate=Fraction(30, 1),
         guessed_rate=Fraction(30, 1),
         has_video=True,
+        decode_error=None,
     ):
         self._frames = frames
+        self._decode_error = decode_error
         streams = [_FakeStream(average_rate, guessed_rate)] if has_video else []
         self.streams = _FakeStreams(streams)
 
     def decode(self, video=0):  # 參數名對齊 av 的介面
         yield from self._frames
+        if self._decode_error is not None:
+            raise self._decode_error
 
     def close(self):
         pass
@@ -320,6 +329,39 @@ def test_reader_rejects_a_segment_whose_frame_rate_is_unknown(monkeypatch):
         reader._read_segment(_segment())
 
 
+def test_reader_wraps_a_mid_stream_decode_failure_as_value_error(monkeypatch):
+    """解碼器中途拋錯要帶著片段路徑與格號往上拋。
+
+    PyAV 的原始例外只有一行 `Operation not permitted: 'avcodec_send_packet()'`，
+    九路同時跑時看不出是哪一路、哪一支片段。
+    """
+    frames = [_FakeAvFrame(1080, 1920) for _ in range(2)]
+    boom = av.error.PermissionError(1, "avcodec_send_packet()")
+    reader = _reader_over(
+        monkeypatch, frames, FrameShape(height=1080, width=1920), decode_error=boom
+    )
+
+    with pytest.raises(ValueError, match="第 2 格解碼失敗") as excinfo:
+        reader._read_segment(_segment())
+
+    assert "030000.000Z.mkv" in str(excinfo.value)
+    assert excinfo.value.__cause__ is boom
+
+
+def test_reader_reads_a_segment_that_decodes_to_zero_frames(monkeypatch):
+    """解得出 0 格的片段要正常結束。
+
+    逐格解碼的 `StopIteration` 若沒在 generator 內部接住，Python 會把它換成
+    `RuntimeError: generator raised StopIteration`（PEP 479），這一路就整個崩掉。
+    既有兩支「沒有視訊串流」的測試在 `streams.video` 那道檢查就返回，走不到解碼。
+    """
+    reader = _reader_over(monkeypatch, [], FrameShape(height=1080, width=1920))
+
+    reader._read_segment(_segment())
+
+    assert reader.ring.written == []
+
+
 def test_reader_rejects_a_segment_without_a_video_stream(monkeypatch):
     """ffmpeg 開得起來但沒有視訊串流時，要帶著檔名擋下，不是拋裸的 `IndexError`。"""
     reader = _reader_over(
@@ -337,6 +379,33 @@ def test_probe_frame_shape_rejects_a_segment_without_a_video_stream(monkeypatch)
     )
 
     with pytest.raises(ValueError, match="視訊串流"):
+        video_reader.probe_frame_shape(_segment())
+
+
+def test_probe_frame_shape_wraps_a_first_frame_decode_failure_as_value_error(
+    monkeypatch,
+):
+    """探測首格時解碼失敗，要符合這個函式宣告的 `Raises: ValueError` 契約。"""
+    boom = av.error.PermissionError(1, "avcodec_send_packet()")
+    monkeypatch.setattr(
+        video_reader.av, "open", lambda _path: _FakeContainer([], decode_error=boom)
+    )
+
+    with pytest.raises(ValueError, match="第 0 格解碼失敗") as excinfo:
+        video_reader.probe_frame_shape(_segment())
+
+    assert "030000.000Z.mkv" in str(excinfo.value)
+    assert excinfo.value.__cause__ is boom
+
+
+def test_probe_frame_shape_rejects_a_segment_that_decodes_to_zero_frames(monkeypatch):
+    """有視訊串流但解得出 0 格時，仍是「讀不到任何影格」的 `ValueError`。
+
+    與上一支的 PEP 479 理由相同：`StopIteration` 漏接會讓這裡變成 `RuntimeError`。
+    """
+    monkeypatch.setattr(video_reader.av, "open", lambda _path: _FakeContainer([]))
+
+    with pytest.raises(ValueError, match="讀不到任何影格"):
         video_reader.probe_frame_shape(_segment())
 
 

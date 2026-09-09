@@ -112,6 +112,49 @@ def _parse_segment_start(path: Path, day: date) -> datetime:
     return start
 
 
+def _decode_frames(container, path: Path):
+    """逐格解碼，解碼器拋錯時補上片段路徑再拋。
+
+    `av.open()` 那層特地把失敗包成帶路徑的 `ValueError`，理由是「這一路的對應片段就無從
+    查起」；解碼這層原本沒有同樣的包裝，而缺 NVDEC 權限這類問題正是在解第一格才爆
+    （`avcodec_send_packet()` 的 `PermissionError`），訊息不帶檔名。
+
+    接 `RuntimeError` 的理由與 `_read_segment` 開檔那層相同：PyAV 18.1.0 有拋裸
+    `RuntimeError` 的前例，只接 `FFmpegError` 會讓失敗漏掉包裝。**只包住「取下一格」
+    這一步**——呼叫端的迴圈體還有共享記憶體寫入與 queue 操作，把它們的失敗也標成「解碼
+    失敗」會把排查引到錯的方向；`to_ndarray()` 同理留在外面。
+
+    `StopIteration` 必須在這裡接住：逃出 generator 會被換成
+    `RuntimeError: generator raised StopIteration`（PEP 479），讓 0 格的片段從正常結束
+    變成整路崩掉。
+
+    Args:
+        container: 已開啟的 `av` 容器。
+        path: 該片段的路徑，只用在錯誤訊息裡。
+
+    Yields:
+        解出的每一格。
+
+    Raises:
+        ValueError: 解碼過程中拋出任何 PyAV 例外。
+    """
+    decoded = 0
+    try:
+        frames = container.decode(video=0)
+        while True:
+            try:
+                av_frame = next(frames)
+            except StopIteration:
+                return
+            decoded += 1
+            yield av_frame
+    except (av.FFmpegError, RuntimeError) as exc:
+        raise ValueError(
+            f"{path} 第 {decoded} 格解碼失敗（frame_index 0 起算，前 {decoded} 格已解出）："
+            "常見成因是執行環境缺少硬體解碼權限，或該片段本身損毀。"
+        ) from exc
+
+
 def probe_frame_shape(segment: SegmentInfo) -> FrameShape:
     """讀出片段首格以取得該路的**原始**影像尺寸。
 
@@ -130,7 +173,7 @@ def probe_frame_shape(segment: SegmentInfo) -> FrameShape:
         該路的 `FrameShape(height, width)`。
 
     Raises:
-        ValueError: 片段無法開啟、不含視訊串流，或讀不到任何影格。
+        ValueError: 片段無法開啟、不含視訊串流、首格解碼失敗，或讀不到任何影格。
     """
     try:
         container = av.open(str(segment.path))
@@ -141,7 +184,7 @@ def probe_frame_shape(segment: SegmentInfo) -> FrameShape:
             # ffmpeg 開得起來但沒有視訊串流（例如只有音軌）時，`decode(video=0)` 會拋出
             # 不帶檔名的 `IndexError`；cv2 這種檔案是 `isOpened()` 為否，走 fail loud。
             raise ValueError(f"片段不含視訊串流: {segment.path}")
-        frame = next(container.decode(video=0), None)
+        frame = next(_decode_frames(container, segment.path), None)
         if frame is None:
             raise ValueError(f"片段讀不到任何影格，無法探測解析度: {segment.path}")
         height, width = frame.to_ndarray(format="bgr24").shape[:2]
@@ -274,8 +317,8 @@ class DailyStreamVideoReader:
         """讀完單一片段的所有影格，逐格核對解析度與像素格式後縮放、寫入 slot。
 
         Raises:
-            ValueError: 片段無法開啟、不含視訊串流、讀不到 FPS，或任一影格的解析度與
-                `source_shape` 不符、像素格式不是 `nv12`（見迴圈內註解）。
+            ValueError: 片段無法開啟、不含視訊串流、讀不到 FPS、解碼中途失敗，或任一
+                影格的解析度與 `source_shape` 不符、像素格式不是 `nv12`（見迴圈內註解）。
         """
         try:
             container = av.open(
@@ -301,7 +344,7 @@ class DailyStreamVideoReader:
                 raise ValueError(f"片段不含視訊串流: {segment.path}")
             fps = _stream_fps(container.streams.video[0], segment.path)
             frame_index = 0
-            for av_frame in container.decode(video=0):
+            for av_frame in _decode_frames(container, segment.path):
                 # 「整天解析度固定」的 fail-loud 檢查要在這裡做：縮放前移之前，這件事
                 # 由 `FrameRing.write_slot` 的形狀檢查順便擋下（緩衝依首格解析度配置），
                 # 但 letterbox 會把任何尺寸都抹平成推論尺寸，那道網就失效了。中途換
@@ -353,8 +396,8 @@ class DailyStreamVideoReader:
         推理進程能區分兩者、避免把中途崩潰誤判為正常結束繼續寫出結果。
 
         Raises:
-            ValueError: 任一片段開檔／讀取 FPS 失敗，或影格解析度與探測值不符、
-                像素格式不是 `nv12`（見 `_read_segment`）。
+            ValueError: 任一片段開檔／讀取 FPS 失敗、解碼中途失敗，或影格解析度與探測值
+                不符、像素格式不是 `nv12`（見 `_read_segment`）。
         """
         # free_queue 由 reader 自己起跑時填滿，避免「父進程先 put 再 fork」的競態
         for slot in range(self.ring.num_slots):
