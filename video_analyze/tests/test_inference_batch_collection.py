@@ -70,7 +70,7 @@ def test_batch_mixes_sources_when_the_starting_stream_runs_short():
     queue 未必已補滿，所以混來源批次仍會發生，本次改動沒有消除它。但它**不會改變偵測
     結果**：影格在讀取端就已縮成統一的推論尺寸（issue #108），進到 ultralytics 的一批
     形狀相同，走不到 `same_shapes=False` 那條會隨批次組成變動的 letterbox 分支。實測
-    佐證見 CLAUDE.md 的「`tracking_results.parquet` 的重現性與正確性判準」——只改推論
+    佐證見 `.claude/rules/tracking-results-reproducibility.md`——只改推論
     批次大小（16→8，批次組成必然不同）跑出來的座標與基準逐值相同。
     """
     num_streams = 3

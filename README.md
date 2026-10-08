@@ -304,3 +304,4 @@ uv run --directory <pkg> pytest         # 執行測試
 
 此倉庫另附一份 [CLAUDE.md](CLAUDE.md)，是給 Claude Code 的工作指引，記錄跨套件、不易從
 單一套件程式碼看出的設計決策。
+只跟特定套件有關的說明放在 `.claude/rules/`，碰到對應目錄才載入（清單見 CLAUDE.md 最後一節）。

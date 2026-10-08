@@ -614,7 +614,8 @@ def test_gap_tolerance_check_skipped_when_samples_insufficient(tmp_path):
 def test_gap_estimate_not_zeroed_by_multiple_people_in_one_frame(tmp_path):
     """同一格畫面有多人時，取樣間隔的估算值不可被壓成 0。
 
-    `(camera_id, timestamp)` 不是唯一鍵（見 CLAUDE.md），同一格畫面每個目標一列。
+    `(camera_id, timestamp)` 不是唯一鍵（見 `.claude/rules/tracking-results-reproducibility.md`），
+    同一格畫面每個目標一列。
     把統計量改回該攝影機的 `timestamp.diff()` 中位數，三個人同框就讓多數 diff 是 0、
     中位數變 0，任何正的容忍窗都通過，這道 fail-loud 從此永遠不觸發——而且是在最
     需要它的忙碌攝影機上失效。

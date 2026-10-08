@@ -404,8 +404,9 @@ def load_run_records(runs_dir: Path) -> tuple[list[RunRecord], list[str]]:
     回傳 (讀得起來的 records, 每份壞產物一行的說明)。**一份壞掉的產物不該讓整份報表
     印不出來**——`parse_fps_log` 對重複的推論行刻意拋 `ValueError`，而那個訊息裡沒有
     檔名；子進程被 SIGKILL 截斷多位元組字元則會 `UnicodeDecodeError`。兩者原本都會
-    讓 `report` 整個掛掉，而使用者無從得知是哪一輪的產物有問題（CLAUDE.md 記過同一型
-    的坑：沒有檔名線索的例外）。所以逐檔隔離，壞的跳過但**大聲說出來**，不靜默丟棄。
+    讓 `report` 整個掛掉，而使用者無從得知是哪一輪的產物有問題
+    （`.claude/rules/shared-code.md` 記過同一型的坑：沒有檔名線索的例外）。
+    所以逐檔隔離，壞的跳過但**大聲說出來**，不靜默丟棄。
     """
     records: list[RunRecord] = []
     broken: list[str] = []

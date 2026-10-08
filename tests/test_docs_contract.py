@@ -33,6 +33,7 @@ ADR_DIR = REPO_ROOT / "docs" / "adr"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 ROOT_README = REPO_ROOT / "README.md"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+RULES_DIR = REPO_ROOT / ".claude" / "rules"
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 ADR_FILENAME_RE = re.compile(r"^(\d{3})-[a-z0-9-]+\.md$")
@@ -77,11 +78,13 @@ def _workspace_members() -> list[str]:
 
 PACKAGES = _packages_from_claude_md()
 LIBS = _libs()
+RULE_FILES = sorted(RULES_DIR.glob("*.md"))
 DOC_FILES = [
     CLAUDE_MD,
     ROOT_README,
     *(REPO_ROOT / pkg / "README.md" for pkg in PACKAGES),
     *(REPO_ROOT / "libs" / lib / "README.md" for lib in LIBS),
+    *RULE_FILES,
 ]
 
 
@@ -314,3 +317,82 @@ def test_markdown_links_point_to_existing_paths(doc: Path):
         if not (doc.parent / path).exists():
             broken.append(target)
     assert not broken, f"{doc.relative_to(REPO_ROOT)} 的連結指向不存在的路徑：{broken}"
+
+
+def _rule_paths(path: Path) -> list[str]:
+    """規則檔開頭 `paths:` 列的路徑條件；格式不合就回空清單（呼叫端判為不合格）。
+
+    第 1 行必須正好是 `---`：Claude Code 只認檔案最開頭的 frontmatter，前面多一行
+    空白就整段當內文、規則變成開場就載入，等於沒拆。
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] != "---":
+        return []
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        return []
+    try:
+        meta = yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError:
+        return []
+    paths = meta.get("paths") if isinstance(meta, dict) else None
+    return paths if isinstance(paths, list) else []
+
+
+def test_rules_dir_is_not_empty():
+    """下面幾支依規則檔參數化，目錄搬走或改名時它們會全數消失而照樣回綠。"""
+    assert RULE_FILES, (
+        f"{RULES_DIR.relative_to(REPO_ROOT)} 底下沒有任何規則檔。"
+        "目錄搬走或改名時要一併改本測試，不要讓這幾道檢查靜默消失"
+    )
+
+
+@pytest.mark.parametrize("rule", RULE_FILES, ids=lambda p: p.name)
+def test_rule_has_paths(rule: Path):
+    """每個規則檔都要帶 `paths:`，沒帶的會在每個 session 開場就載入，拆出去就白拆了。
+
+    路徑一律從 repo 根寫起、不加 `./` 或 `/`：Python 的 `Path.glob` 會吃 `./`，
+    不擋的話下一支驗不出 Claude Code 端可能不認的寫法。
+    """
+    paths = _rule_paths(rule)
+    assert paths, (
+        f"{rule.name} 開頭沒有合格的 `paths:`：第 1 行要正好是 `---`、frontmatter 要是"
+        "合法 YAML、`paths` 要是非空清單"
+    )
+    bad = [p for p in paths if not isinstance(p, str) or p.startswith(("./", "/"))]
+    assert not bad, f"{rule.name} 的路徑條件要從 repo 根寫起、不加 ./ 或 /：{bad}"
+
+
+@pytest.mark.parametrize("rule", RULE_FILES, ids=lambda p: p.name)
+def test_rule_paths_match_tracked_files(rule: Path):
+    """每條路徑條件至少要對到一個檔案，目錄改名後規則才不會靜默永遠不載入。
+
+    只算檔案不算資料夾：Claude Code 是在讀到或改到檔案時比對，只寫資料夾名
+    （`video_analyze`）的條件永遠對不到。CI 上只有進版控的檔，所以等於「對到
+    進版控的檔」。結尾的 `/**` 先補成 `/**/*`——`Path.glob("dir/**")` 只回資料夾。
+    """
+    unmatched = []
+    for pattern in _rule_paths(rule):
+        glob = pattern + "/*" if pattern.endswith("/**") else pattern
+        if not any(p.is_file() for p in REPO_ROOT.glob(glob)):
+            unmatched.append(pattern)
+    assert not unmatched, f"{rule.name} 的這些路徑條件對不到任何檔案：{unmatched}"
+
+
+def test_root_claude_md_lists_every_rule():
+    """根 CLAUDE.md 的目錄表要列出每個規則檔。
+
+    規則檔只在碰到對應路徑時載入，沒碰那些檔卻該先讀的情況（例如比對兩次執行的
+    輸出）只能靠這張表提醒；漏列一個，那份說明在這種情況下就沒人看得到。
+
+    只認表格列裡的連結：拿整份文字做子字串比對的話，刪了表格列、別處卻還提到檔名
+    （例如專案概述那句指向 shared-code.md 的連結）就驗不出來。
+    """
+    rows = "\n".join(
+        line
+        for line in CLAUDE_MD.read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("|")
+    )
+    missing = [r.name for r in RULE_FILES if f"(.claude/rules/{r.name})" not in rows]
+    assert not missing, f"根 CLAUDE.md 的目錄表沒列出這些規則檔：{missing}"
