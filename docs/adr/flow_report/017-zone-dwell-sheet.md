@@ -108,7 +108,7 @@ Description：加一個與「各區域人流」對稱的分頁，逐時段逐區
   `停留人次 <= 人流量` 這種 sanity check。
 - **`flow_report` 從此綁死 `zone_mapping` 的版本**：舊版產的 `zone_counts.parquet` 會讓
   整份報表產不出來，含出入口三頁。這是 ADR-005 那句話的第二個版本，差別只在這次判的是
-  欄位而不是檔案。解法是用新版 `zone_mapping` 重跑該日（純 CPU）。根 `CLAUDE.md` 的
+  欄位而不是檔案。解法是用新版 `zone_mapping` 重跑該日（純 CPU）。`.claude/rules/flow-report-inputs.md` 的
   跨套件硬性契約已記入這條。
 - **升級前寫進報表的日期，在新分頁上是空的。** `report.xlsx` 是跨日累加的，本階段不回填
   歷史日期；BI 端若把空值當 0 解讀，會看成「那幾天沒人停留」。這是加欄位到累加報表的

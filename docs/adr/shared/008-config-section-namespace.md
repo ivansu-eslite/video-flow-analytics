@@ -35,7 +35,7 @@ input.camera_ids
 `LINE__BUCKET_MINUTES`／`INPUT__BUCKET_MINUTES`），三者描述的是同一個口徑：上游兩包寫檔
 時的 `time_bucket` 粒度，`flow_report` 用它驗 `report.period_minutes` 是它的倍數。
 
-這與 CLAUDE.md「共用 lib 存在的理由」記載的 `load_registry_from_path` 是同一個劇本：同一
+這與 `.claude/rules/shared-code.md`「共用 lib 存在的理由」記載的 `load_registry_from_path` 是同一個劇本：同一
 份程式碼複製四份，各自漂移，直到某一份的漂移打壞別份。`find_project_root`／
 `_get_toml_path` 也是逐字相同的四份複製（去註解後 md5 皆為
 `2ebe2ac9a38cde4e4cb4d98d84754276`）。

@@ -126,7 +126,7 @@ C 是在 A 上加一行條件：該段至少要有一列 `signed_d > boundary_ba
    的窄區域檢查同型，靜默恆為 0 正是 fail-loud 要擋的那類錯誤。
 
    camera-wide 的 `timestamp` diff 有兩個致命問題：`(camera_id, timestamp)` 不是唯一鍵
-   （一格畫面每個目標一列，見 CLAUDE.md），同一格多人時 diff = 0，**忙碌的攝影機中位數
+   （一格畫面每個目標一列，見 `.claude/rules/tracking-results-reproducibility.md`），同一格多人時 diff = 0，**忙碌的攝影機中位數
    直接變 0、檢查永遠不觸發**；而沒有偵測的時段完全沒有列，**冷清的攝影機中位數會膨脹
    到幾十秒而誤擋**——規劃期實測 camera-wide 的間隔 max 有 61 秒，per-track 只有 2.1 秒。
 

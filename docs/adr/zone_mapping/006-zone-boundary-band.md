@@ -27,7 +27,7 @@ Accepted
 
 > 上表的訪客數與更早的實驗記錄略有出入（例如平擺桌2_外側 55 → 57）：
 > `tracking_results.parquet` 本身不可重現（ByteTrack 的 `track_id` 指派每次重跑都會變），
-> 見 CLAUDE.md。此表是本次改動當下重跑的版本，是這些數字的版控出處。
+> 見 `.claude/rules/tracking-results-reproducibility.md`。此表是本次改動當下重跑的版本，是這些數字的版控出處。
 
 四個 zone 的內切半徑（用本次實作的格點取樣算法重算）為 141.1／172.1／181.8／217.8 px
 （4K），是選 band 上限的實質限制：4K band 115 已讓三個代表性 track 完全不再被計入，
@@ -100,7 +100,7 @@ ADR-004 的其餘內容（尺規的選擇、尺寸來源的取捨）不變。
 
 `line_counting` 與 `zone_mapping` 各有一份三行的換算，兩邊函式本體幾乎逐字相同，差別只在
 zone 這邊多回一個 `scale`（窄區域的錯誤訊息要把建議上限換算回 1080p 基準值）。為這點差異
-抽一個殼，可讀性沒有變好。**第三個消費者出現時抽進 `libs/`**。（CLAUDE.md 記的 registry 防呆補丁漂移前科
+抽一個殼，可讀性沒有變好。**第三個消費者出現時抽進 `libs/`**。（`.claude/rules/shared-code.md` 記的 registry 防呆補丁漂移前科
 風險型態不同：那是同一份會演化的邏輯，這裡尺規正本已由 ADR-004 固定、
 `BASELINE_FRAME_WIDTH` 是常數。）
 

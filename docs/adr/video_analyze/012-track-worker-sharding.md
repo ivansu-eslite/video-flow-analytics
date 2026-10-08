@@ -56,7 +56,7 @@ outputs/<bucket>/<date>/
 現在是逐片相接、片內才交錯。下游 zone／line 都走 `group_by` 向量化，不依賴列順序。
 
 驗收因此是「N=1 與 N=2 各跑一輪，對齊 `(camera_id, timestamp)` 後逐值相同」，不是逐
-byte 比對——`track_id` 的指派本來就不可重現（見根 `CLAUDE.md`）。
+byte 比對——`track_id` 的指派本來就不可重現（見 `.claude/rules/tracking-results-reproducibility.md`）。
 
 ### 輸出為什麼必須改成 part 檔
 

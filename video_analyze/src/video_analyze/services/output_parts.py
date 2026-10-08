@@ -259,7 +259,8 @@ def merge_parts(results_path: Path, part_paths: list[Path]) -> int:
 
     列順序與改動前不同（改動前是九路按到達順序交錯，現在是逐片相接、片內才交錯）。
     下游 zone／line 都走 `group_by` 向量化，不依賴列順序；比對兩次跑批也一律先用
-    `(camera_id, timestamp)` 對齊同一格再逐值比（見根 `CLAUDE.md`）。
+    `(camera_id, timestamp)` 對齊同一格再逐值比
+    （見 `.claude/rules/tracking-results-reproducibility.md`）。
 
     最後的 `rmtree` 會把 `.lock` 一起帶走，**這一步不同於認領時的清殘骸**：那時刪掉
     鎖檔會讓另一個執行在新建的 inode 上取得鎖而兩邊都以為自己獨佔，這裡則是正式檔已經
