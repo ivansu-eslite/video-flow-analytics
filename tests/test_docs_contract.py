@@ -332,7 +332,10 @@ def _rule_paths(path: Path) -> list[str]:
         end = lines.index("---", 1)
     except ValueError:
         return []
-    meta = yaml.safe_load("\n".join(lines[1:end]))
+    try:
+        meta = yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError:
+        return []
     paths = meta.get("paths") if isinstance(meta, dict) else None
     return paths if isinstance(paths, list) else []
 
@@ -353,7 +356,10 @@ def test_rule_has_paths(rule: Path):
     不擋的話下一支驗不出 Claude Code 端可能不認的寫法。
     """
     paths = _rule_paths(rule)
-    assert paths, f"{rule.name} 開頭沒有 `paths:` 清單（第 1 行要正好是 `---`）"
+    assert paths, (
+        f"{rule.name} 開頭沒有合格的 `paths:`：第 1 行要正好是 `---`、frontmatter 要是"
+        "合法 YAML、`paths` 要是非空清單"
+    )
     bad = [p for p in paths if not isinstance(p, str) or p.startswith(("./", "/"))]
     assert not bad, f"{rule.name} 的路徑條件要從 repo 根寫起、不加 ./ 或 /：{bad}"
 
@@ -379,7 +385,14 @@ def test_root_claude_md_lists_every_rule():
 
     規則檔只在碰到對應路徑時載入，沒碰那些檔卻該先讀的情況（例如比對兩次執行的
     輸出）只能靠這張表提醒；漏列一個，那份說明在這種情況下就沒人看得到。
+
+    只認表格列裡的連結：拿整份文字做子字串比對的話，刪了表格列、別處卻還提到檔名
+    （例如專案概述那句指向 shared-code.md 的連結）就驗不出來。
     """
-    text = CLAUDE_MD.read_text(encoding="utf-8")
-    missing = [r.name for r in RULE_FILES if f".claude/rules/{r.name}" not in text]
+    rows = "\n".join(
+        line
+        for line in CLAUDE_MD.read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("|")
+    )
+    missing = [r.name for r in RULE_FILES if f"(.claude/rules/{r.name})" not in rows]
     assert not missing, f"根 CLAUDE.md 的目錄表沒列出這些規則檔：{missing}"
