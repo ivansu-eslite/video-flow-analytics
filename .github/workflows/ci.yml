@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: read   # 只需要 checkout；通知走 webhook，不用 GitHub 權杖
+  contents: read   # 只需要 checkout
 
 jobs:
   # 根層 tests/ 的文件契約測試。--no-project 是因為它的相依只有 pytest 與 pyyaml
@@ -81,20 +81,3 @@ jobs:
           bad=$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)：\(.value.result)"' <<<"$NEEDS")
           if [ -n "$bad" ]; then printf '沒過的關：\n%s\n' "$bad"; exit 1; fi
           echo "$(jq length <<<"$NEEDS") 關都過"
-
-  notify-if-fail:
-    name: CI 紅了發聊天室
-    needs: [ci-gate]
-    if: failure() && !cancelled()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5   # 一次 curl
-    steps:
-      - env:
-          WEBHOOK: ${{ secrets.CI_CHAT_WEBHOOK_URL }}
-          # 含 # 的值要整個包引號，不然 YAML 把 # 之後當註解，整支 workflow 失效
-          WHERE: "${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.number) || github.ref_name }}"
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [ -z "$WEBHOOK" ]; then echo "沒設 webhook（CI_CHAT_WEBHOOK_URL），這次不發"; exit 0; fi
-          jq -n --arg t "vfa CI 紅了（$WHERE）：$RUN_URL" '{text: $t}' \
-            | curl -fsS -X POST -H 'Content-Type: application/json; charset=UTF-8' --data @- "$WEBHOOK"
