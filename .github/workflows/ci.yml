@@ -6,6 +6,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read   # 只需要 checkout
+
 jobs:
   # 根層 tests/ 的文件契約測試。--no-project 是因為它的相依只有 pytest 與 pyyaml
   # （後者用來解析本檔），經 workspace 解析會為了跑文件檢查而 resolve 八十幾個
@@ -60,3 +63,21 @@ jobs:
           enable-cache: true
       - run: uv run --directory video_analyze ruff check .
       - run: uv run --directory video_analyze pytest
+
+  # 規則集只勾這一關。if: always() 不能拿掉：前面有一關紅時這關會被跳過，
+  # 而 GitHub 把跳過的必過檢查當成通過。needs 要等於上面全部的 job，由
+  # tests/test_docs_contract.py 對回本檔。skipped、cancelled 都算沒過：之後加的
+  # job 若會被 if: 合法跳過，要在下面的 jq 放行那一關並寫理由，不然總結果會紅。
+  ci-gate:
+    name: CI 總結果
+    needs: [docs-contract, lint-test, video-analyze]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5   # 只跑一個 jq；上限是怕 runner 卡住時佔著必過檢查
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          bad=$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)：\(.value.result)"' <<<"$NEEDS")
+          if [ -n "$bad" ]; then printf '沒過的關：\n%s\n' "$bad"; exit 1; fi
+          echo "$(jq length <<<"$NEEDS") 關都過"
