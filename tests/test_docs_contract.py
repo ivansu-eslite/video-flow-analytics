@@ -17,6 +17,10 @@ lib 清單來自 libs/ 目錄、兩者合起來要等於 workspace members，新
 執行方式見 CLAUDE.md 常用指令段——本測試刻意不經 workspace 解析執行，避免為了跑
 文件檢查而裝上 video_analyze 的 torch 依賴子樹；相依只有 pytest 與 pyyaml（後者用來
 解析 ci.yml，理由見 _ci_covered_members），兩者都以 `--with` 帶進去。
+
+ci.yml 的「CI 總結果」job 是 GitHub 規則集唯一勾的必過檢查，test_ci_gate_waits_for_every_job
+保護三件事：總結果漏等某一關、前面紅時總結果被跳過、job 改名讓規則集對不上。保護不到
+的是 step 裡的判斷寫錯（由草稿 PR 上故意紅一次驗）與 YAML 值被截斷（由 actionlint 驗）。
 """
 
 from __future__ import annotations
@@ -39,6 +43,8 @@ LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 ADR_FILENAME_RE = re.compile(r"^(\d{3})-[a-z0-9-]+\.md$")
 ADR_INDEX_ROW_RE = re.compile(r"\[(\d+)\]\((docs/adr/[^)]+/(\d{3})-[^)]+\.md)\)")
 CI_DIRECTORY_RE = re.compile(r"uv run --directory (\S+)")
+CI_GATE_JOB = "ci-gate"
+CI_GATE_NAME = "CI 總結果"
 
 
 def _packages_from_claude_md() -> list[str]:
@@ -113,6 +119,22 @@ def _matrix_pkgs(job: dict) -> set[str]:
     }
 
 
+def _ci_jobs() -> dict:
+    workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+    jobs = workflow.get("jobs") if isinstance(workflow, dict) else None
+    if not jobs:
+        raise RuntimeError(
+            f"{CI_WORKFLOW.relative_to(REPO_ROOT)} 解析不出任何 job。"
+            "檔案搬走或結構改寫時要一併改本測試——算出空集合的話，這道護欄會靜默失效"
+        )
+    return jobs
+
+
+def _needs(job: object) -> set[str]:
+    needs = job.get("needs", []) if isinstance(job, dict) else []
+    return {needs} if isinstance(needs, str) else set(needs)
+
+
 def _ci_covered_members() -> set[str]:
     """ci.yml 實際會執行到的 workspace 成員。
 
@@ -128,13 +150,7 @@ def _ci_covered_members() -> set[str]:
     仍擋不到的是被 `if:` 條件停用的 job：條件要在 GitHub 的執行期才求得出值。
     見本檔測試的已知缺口。
     """
-    workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
-    jobs = workflow.get("jobs") if isinstance(workflow, dict) else None
-    if not jobs:
-        raise RuntimeError(
-            f"{CI_WORKFLOW.relative_to(REPO_ROOT)} 解析不出任何 job。"
-            "檔案搬走或結構改寫時要一併改本測試——算出空集合的話，這道護欄會靜默失效"
-        )
+    jobs = _ci_jobs()
     covered: set[str] = set()
     for job in jobs.values():
         if not isinstance(job, dict):  # job 主體被註解掉、只剩名字
@@ -210,6 +226,25 @@ def test_ci_runs_every_workspace_member():
     assert not missing, (
         f"這些 workspace 成員沒被 CI 執行到：{sorted(missing)}。"
         "新增成員時 .github/workflows/ci.yml 要一併加上，否則它的 lint 與測試靜默不跑"
+    )
+
+
+def test_ci_gate_waits_for_every_job():
+    """規則集只勾「CI 總結果」：它漏等某一關，那一關紅了照樣能合。"""
+    jobs = _ci_jobs()
+    gate = jobs.get(CI_GATE_JOB)
+    assert isinstance(gate, dict), f"ci.yml 少了 {CI_GATE_JOB}：GitHub 規則集只勾它"
+    assert gate.get("name") == CI_GATE_NAME, (
+        "改名要同步改 GitHub 規則集的必過檢查，不然所有 PR 都合不了"
+    )
+    followers = {name for name, job in jobs.items() if CI_GATE_JOB in _needs(job)}
+    expected = set(jobs) - {CI_GATE_JOB} - followers
+    needs = _needs(gate)
+    assert needs == expected, (
+        f"總結果漏等：{sorted(expected - needs)}；多等：{sorted(needs - expected)}"
+    )
+    assert str(gate.get("if", "")).strip() in {"always()", "${{ always() }}"}, (
+        "總結果要無條件執行：被跳過的必過檢查會被 GitHub 當成通過"
     )
 
 
