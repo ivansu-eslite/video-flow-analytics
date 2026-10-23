@@ -13,6 +13,10 @@ from pydantic import ValidationError
 from vfa_config import InputConfig, find_project_root, get_toml_path
 
 
+def test_temporary_gate_check():
+    assert False, "暫時：驗 CI 總結果會擋"
+
+
 def test_input_config_covers_all_four_packages_fields():
     """`[input]` 的欄位必須是四包需求的聯集，逐一釘住。
 
