@@ -1,3 +1,8 @@
+[tool.uv]
+# 新發佈未滿 7 天的版本當作不存在：套件發布權限被冒用、放上假版本的事件，
+# 通常在一兩天內就被下架，延後幾天再採用可避開這段時間。
+exclude-newer = "7 days"
+
 [tool.uv.workspace]
 members = ["video_analyze", "zone_mapping", "line_counting", "flow_report", "libs/*"]
 

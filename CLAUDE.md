@@ -105,6 +105,10 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
   pin 成同版，`libs/` 底下三個 lib 的 `pydantic`／`pyyaml` 也在此範圍內。單一 root `uv.lock`
   下版本一致由 `uv lock` 自動把關——`==` pin 彼此衝突會直接讓 `uv lock` 解析失敗；新增或
   升級依賴時留意是否需要四包同步。
+- 根 `pyproject.toml` 的 `[tool.uv]` 設 `exclude-newer = "7 days"`：發佈未滿 7 天的版本
+  uv 當作不存在，`uv add`、`uv lock --upgrade` 都不會取用。急用剛發佈的修補版時，在該次
+  指令加 `--exclude-newer <日期>` 蓋過。`uv.lock` 記的是天數（`exclude-newer-span = "P7D"`）
+  而非日期，所以 lock 不會每天變動。
 
 ## 碰到特定目錄才載入的設計說明
 
