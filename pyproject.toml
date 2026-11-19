@@ -18,3 +18,8 @@ target-version = "py312"
 # 與四包一致；ruff 的預設規則集不含 I（import 排序）與 W，
 # 不明寫的話 CI 會比本機寬鬆。
 select = ["E", "F", "I", "W"]
+
+# 只給根層 tests/ 的文件契約與 CI 釘版測試用：uv run --only-group docs-contract 只裝這組，
+# 不裝四包（也就不裝 video_analyze 的 torch）。版本跟四包同一次解析，記在 uv.lock。
+[dependency-groups]
+docs-contract = ["pytest>=9.1.1", "pyyaml==6.0.3", "ruff>=0.15.20"]

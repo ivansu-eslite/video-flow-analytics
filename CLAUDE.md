@@ -53,7 +53,8 @@ uv run --directory libs/vfa_observability ruff check .
 uv run --directory libs/vfa_config pytest          # （1 支）
 uv run --directory libs/vfa_config ruff check .
 
-uv run --no-project --with pytest --with pyyaml pytest tests/    # 文件契約測試（釘住文件裡可機械驗證的斷言）
+uv run --only-group docs-contract pytest tests/    # 根層測試（文件契約、CI 釘版）
+uv run --only-group docs-contract ruff check tests/
 ```
 
 **torch 隔離**：workspace 為單一 `.venv`，但 `uv sync --package <pkg>` 只裝該包依賴子樹
@@ -64,10 +65,12 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
 `pytest` 會從 repo 根遞迴收集到所有套件的測試而撞名衝突（`tests/test_config.py` 等檔名
 四包重複）；`--directory` 切進該套件資料夾，才會只解析到該套件自己的 `tests/`。
 
-根層的文件契約測試（`tests/`）要**指定路徑**並帶 `--no-project`：不指定路徑會遞迴收集到
-四包而撞名；`--no-project` 則是因為該測試的相依只有 pytest 與 pyyaml（後者用來解析
-`.github/workflows/ci.yml`），經 workspace 解析會為了跑文件檢查而裝上 `video_analyze`
-的 torch 依賴子樹。**不要改用在根 `pyproject.toml` 填
+根層的測試（`tests/`）要**指定路徑**並帶 `--only-group docs-contract`：不指定路徑會遞迴
+收集到四包而撞名；`--only-group` 則是因為該測試的相依只有 pytest 與 pyyaml（後者用來解析
+`.github/workflows/ci.yml`）加 ruff，這三個放在根 `pyproject.toml` 的 `docs-contract`
+相依群組、版本記在 `uv.lock`，只裝這一組就不會為了跑文件檢查而裝上 `video_analyze`
+的 torch 依賴子樹。CI 的 `uv run` 一律帶 `--locked`、第三方 action 一律釘 commit 指紋，
+由 `tests/test_ci_pins.py` 把關。**不要改用在根 `pyproject.toml` 填
 `testpaths` 的寫法**——那會讓 `uv run --package <pkg> pytest` 的撞名保護消失，變成靜默
 只跑文件測試、一支套件測試都沒跑卻回報通過。
 
@@ -106,8 +109,8 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
   下版本一致由 `uv lock` 自動把關——`==` pin 彼此衝突會直接讓 `uv lock` 解析失敗；新增或
   升級依賴時留意是否需要四包同步。
 - 根 `pyproject.toml` 的 `[tool.uv]` 設 `exclude-newer = "7 days"`：發佈未滿 7 天的版本
-  uv 當作不存在，`uv add`、`uv lock --upgrade` 都不會取用；CI 用 `--with` 帶進來的工具
-  （pytest、pyyaml、ruff）在 repo 根執行時也受同樣限制。`uv.lock` 記的是天數
+  uv 當作不存在，`uv add`、`uv lock --upgrade` 都不會取用；根層測試用的工具
+  （`docs-contract` 相依群組：pytest、pyyaml、ruff）也在同一次解析裡，受同樣限制。`uv.lock` 記的是天數
   （`exclude-newer-span = "P7D"`）而非日期，所以 lock 不會每天變動。
   急用剛發佈的修補版時，只放寬那一個套件：在根 `pyproject.toml` 的 `[tool.uv]` 加
   `exclude-newer-package = { <套件> = "<日期>" }`，再跑 `uv lock --upgrade-package <套件>`。

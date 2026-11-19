@@ -14,9 +14,10 @@ lib 清單來自 libs/ 目錄、兩者合起來要等於 workspace members，新
 這裡把它釘回 workspace members——否則新增成員時本檔的文件斷言會因 libs/* glob
 自動納入而通過，該成員的 lint 與測試卻靜默不執行。
 
-執行方式見 CLAUDE.md 常用指令段——本測試刻意不經 workspace 解析執行，避免為了跑
-文件檢查而裝上 video_analyze 的 torch 依賴子樹；相依只有 pytest 與 pyyaml（後者用來
-解析 ci.yml，理由見 _ci_covered_members），兩者都以 `--with` 帶進去。
+執行方式見 CLAUDE.md 常用指令段——本測試只裝根 pyproject.toml 的 `docs-contract`
+相依群組（`--only-group`），不裝四包，避免為了跑文件檢查而裝上 video_analyze 的 torch
+依賴子樹；相依只有 pytest 與 pyyaml（後者用來解析 ci.yml，理由見 _ci_covered_members）
+與 ruff，版本都記在 uv.lock。
 
 ci.yml 的「CI 總結果」job 是 GitHub 規則集唯一勾的必過檢查，test_ci_gate_waits_for_every_job
 保護三件事：總結果漏等某一關、前面紅時總結果被跳過、job 改名讓規則集對不上。保護不到
@@ -42,7 +43,7 @@ RULES_DIR = REPO_ROOT / ".claude" / "rules"
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 ADR_FILENAME_RE = re.compile(r"^(\d{3})-[a-z0-9-]+\.md$")
 ADR_INDEX_ROW_RE = re.compile(r"\[(\d+)\]\((docs/adr/[^)]+/(\d{3})-[^)]+\.md)\)")
-CI_DIRECTORY_RE = re.compile(r"uv run --directory (\S+)")
+CI_DIRECTORY_RE = re.compile(r"uv run (?:--locked )?--directory (\S+)")
 CI_GATE_JOB = "ci-gate"
 CI_GATE_NAME = "CI 總結果"
 

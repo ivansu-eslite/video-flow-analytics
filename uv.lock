@@ -21,6 +21,13 @@ members = [
     "zone-mapping",
 ]
 
+[manifest.dependency-groups]
+docs-contract = [
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pyyaml", specifier = "==6.0.3" },
+    { name = "ruff", specifier = ">=0.15.20" },
+]
+
 [[package]]
 name = "annotated-types"
 version = "0.7.0"
