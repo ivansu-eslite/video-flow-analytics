@@ -1,0 +1,20 @@
+# CI 用的外部工具以 commit 指紋指定版本（見 tests/test_ci_pins.py），指紋釘住後新版不會自己進來；
+# 這份讓 GitHub 每月比對一次，有新版就開升版 PR，並自動改好指紋與行尾的版號註解。
+# 開單不會改任何東西，合不合由人看過再決定。
+# 只管 GitHub Actions，不管 Python 套件：四包的版本要一起升（見 CLAUDE.md「四包版本 pin 成彼此一致」）。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # 新版發布滿 7 天才提：剛被入侵的版本通常幾天內會被發現撤下。
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "ci(deps)"
+    open-pull-requests-limit: 10
+    groups:
+      # 小版本與修補合成一張，大版本各自一張。
+      github-actions:
+        update-types: [minor, patch]
