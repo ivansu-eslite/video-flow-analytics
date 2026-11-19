@@ -19,7 +19,12 @@
 - 版號註解（`# v7.0.1`）跟指紋是不是同一版：要上網查才知道，靠寫的當下用
   `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` 查一次，之後由 Dependabot 一起改。
 - setup-uv 裝的 uv 本身是哪一版：指紋只管 action 的程式，不管它執行時再下載的東西。
-- shlex 把單字中間的 `#` 當成註解開頭：`echo a#b; uv run x` 的 `uv run x` 會被略過。
+- shlex 把單字中間的 `#` 當成註解開頭：`echo a#b; uv run x`、`if [ $# -eq 0 ]; then uv run x`
+  這類 `$#`／`${#arr}` 後面的 `uv run x` 會被略過。
+- 用變數存指令名（`U=uv; $U run x`）：切字後看不出那是 uv。
+- 假陽性（寧可紅了讓人看一眼）：旗標比對看整條指令，傳給子程式的參數（`uv run --locked
+  python x.py --frozen`）也會被當成 uv 的旗標；`echo "uv run …"` 這種只是印字也會被擋；
+  `uv run -q --locked …` 因為規則是「緊接 --locked」也算違規；版號註解只認 `vX.Y.Z` 三段。
 
 只用 pytest、pyyaml、標準庫；跟 test_docs_contract.py 同一套跑法
 （`uv run --locked --only-group docs-contract pytest tests/`）。
@@ -48,7 +53,9 @@ ACTION_RE = re.compile(r"[\w.-]+/[\w.-]+(?:/[\w./-]+)?@([0-9a-f]{40})")
 DOCKER_RE = re.compile(r"docker://\S+@sha256:[0-9a-f]{64}")
 VERSION_COMMENT_RE = re.compile(r"v\d+\.\d+\.\d+")
 USES_RE = re.compile(r"(?:^|[\s{,])uses:(?:\s+(.*))?$")
-HIDDEN_COMMAND_RE = re.compile(r"\buv\s+(?:run|sync|tool|pip)\b|\buvx\b|\bpip3?\s+install\b")
+HIDDEN_COMMAND_RE = re.compile(
+    r"\buv\s+(?:run|sync|lock|add|remove|tool|pip)\b|\b(?:uvx|pipx)\b|\bpip[\d.]*\s+install\b"
+)
 LOCK_DISABLING_ENV = ("UV_NO_SYNC", "UV_FROZEN")
 BYPASS = "沒經過 uv.lock，改用 uv run --locked"
 # 沒有 --locked 檢查、或會讓檢查失效的旗標，各自對應一句改法
@@ -235,7 +242,10 @@ def uv_violations(name: str, text: str) -> list[Violation]:
         if words is None:
             problems.append(Violation(where, "解析不了（引號沒配對？），拆成單純的指令"))
             continue
-        for i, word in enumerate(words):
+        for i, raw_word in enumerate(words):
+            # /usr/bin/uv、~/.local/bin/uvx 這種帶路徑的寫法也要認得
+            has_space = any(c.isspace() for c in raw_word)
+            word = raw_word if has_space else raw_word.rsplit("/", 1)[-1]
             following = words[i + 1 : i + 3]
             if word == "uv" and following[:1] in (["run"], ["sync"]):
                 if following[1:2] != ["--locked"]:
@@ -245,14 +255,22 @@ def uv_violations(name: str, text: str) -> list[Violation]:
                     Violation(where, message)
                     for message in _unlocked_flag_messages(words[i + 2 : end])
                 ]
+            elif word == "uv" and following[:1] == ["lock"]:
+                end = _end_of_command(words, i + 2)
+                if not {"--check", "--locked"} & set(words[i + 2 : end]):
+                    problems.append(
+                        Violation(where, "uv lock 會重算並改寫 uv.lock，CI 只能用 uv lock --check")
+                    )
+            elif word == "uv" and following[:1] in (["add"], ["remove"]):
+                problems.append(Violation(where, f"uv {following[0]} 會改寫 uv.lock，CI 不跑它"))
             elif word == "uv" and following[:1] and following[0].startswith("-"):
                 problems.append(
                     Violation(where, "uv 的選項寫在子指令後面：uv run --locked --directory x …")
                 )
-            elif word == "uvx" or (word == "uv" and following[:1] in (["tool"], ["pip"])):
+            elif word in ("uvx", "pipx") or (word == "uv" and following[:1] in (["tool"], ["pip"])):
                 used = " ".join([word, *following[:1]]) if word == "uv" else word
                 problems.append(Violation(where, f"{used} {BYPASS}"))
-            elif word in ("pip", "pip3") and following[:1] == ["install"]:
+            elif re.fullmatch(r"pip[\d.]*", word) and following[:1] == ["install"]:
                 problems.append(Violation(where, f"{word} install {BYPASS}"))
             elif word == "-m" and following[:1] == ["pip"]:
                 problems.append(Violation(where, f"python -m pip {BYPASS}"))
@@ -358,6 +376,8 @@ BAD_USES = {
     "flow style": "{uses: actions/checkout@v7}",
     "folded": f"uses: >-\n  actions/checkout@{SHA}",
     "docker tag": "uses: docker://alpine:1.0",
+    "spaced colon": "uses : actions/checkout@v7",
+    "quoted key": '"uses": actions/checkout@v7',
     "docker wrong digest": f"uses: docker://alpine@sha1:{DIGEST}",
 }
 GOOD_USES = {
@@ -400,6 +420,14 @@ BAD_UV = {
     "uv tool": "uv tool run ruff",
     "uv pip": "uv pip install x",
     "pip install": "pip install x",
+    "pip3 install": "pip3 install x",
+    "pip3.12 install": "pip3.12 install x",
+    "pipx": "pipx run ruff",
+    "absolute uv path": "/usr/bin/uv run pytest",
+    "absolute uvx path": "~/.local/bin/uvx ruff",
+    "uv lock": "uv lock\nuv run --locked pytest",
+    "uv add": "uv add x",
+    "uv remove": "uv remove x",
     "python -m pip": "python -m pip install x",
     "option before subcommand": "uv --directory x run pytest",
     "quiet before sync": "uv -q sync",
@@ -419,6 +447,9 @@ GOOD_UV = {
     "continuation locked": "uv run --locked \\\n  --directory x pytest",
     "chained": "uv run --locked a && uv run --locked b",
     "lock check": "uv lock --check",
+    "lock locked": "uv lock --locked",
+    "flag text after another command": "uv run --locked a && echo --no-project",
+    "absolute locked": "/usr/bin/uv run --locked pytest",
     "comment": "# uv run x\necho hi",
     "subshell locked": "out=$(uv run --locked x)",
     "ci-gate jq": (
@@ -453,3 +484,10 @@ ENV_CASES = {
 def test_uv_violations_flag_lock_disabling_env(text):
     problems = uv_violations("t.yml", text)
     assert problems and all("env" in p.where for p in problems)
+
+
+def test_uv_command_count_counts_run_and_sync():
+    """掃描範圍的計數兩種子指令都要算：只算 run 的話，sync 被拿掉時沒有訊號。"""
+    assert uv_command_count(_run("uv run --locked a\nuv sync --locked")) == 2
+    assert uv_command_count(_run("uv sync --locked")) == 1
+    assert uv_command_count(_run("echo hi")) == 0
