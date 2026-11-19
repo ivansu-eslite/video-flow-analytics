@@ -248,6 +248,24 @@ def test_ci_gate_waits_for_every_job():
     )
 
 
+def test_uv_holds_back_versions_released_within_seven_days():
+    """新發佈未滿 7 天的版本不可被 uv 選用，lock 也要記著同一個天數。
+
+    設定拿掉的話，`uv add`、`uv lock --upgrade` 會直接取用剛上架的版本，套件被冒用
+    發布假版本的事件（通常一兩天內下架）就擋不住，而且沒有任何訊號。lock 側也驗是因為
+    uv 對相對天數記成 `exclude-newer-span`：兩邊不一致代表 lock 是在別的設定下產生的。
+    只釘設定與 lock 欄位的字面值；uv 是否照設定挑版本由 uv 自己負責，這裡不驗。
+    """
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["tool"]["uv"].get("exclude-newer") == "7 days", (
+        "根 pyproject.toml 的 [tool.uv] 要設 exclude-newer = \"7 days\""
+    )
+    lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    assert lock.get("options", {}).get("exclude-newer-span") == "P7D", (
+        "uv.lock 沒記到 7 天的限制，請重跑 `uv lock`"
+    )
+
+
 def test_adr_files_follow_naming_and_placement():
     """ADR 一律放在 docs/adr/<子目錄>/NNN-描述.md。
 

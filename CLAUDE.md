@@ -105,6 +105,17 @@ torch 的完整環境。部署時各容器以 `uv sync --package <pkg>` 維持 C
   pin 成同版，`libs/` 底下三個 lib 的 `pydantic`／`pyyaml` 也在此範圍內。單一 root `uv.lock`
   下版本一致由 `uv lock` 自動把關——`==` pin 彼此衝突會直接讓 `uv lock` 解析失敗；新增或
   升級依賴時留意是否需要四包同步。
+- 根 `pyproject.toml` 的 `[tool.uv]` 設 `exclude-newer = "7 days"`：發佈未滿 7 天的版本
+  uv 當作不存在，`uv add`、`uv lock --upgrade` 都不會取用；CI 用 `--with` 帶進來的工具
+  （pytest、pyyaml、ruff）在 repo 根執行時也受同樣限制。`uv.lock` 記的是天數
+  （`exclude-newer-span = "P7D"`）而非日期，所以 lock 不會每天變動。
+  急用剛發佈的修補版時，只放寬那一個套件：在根 `pyproject.toml` 的 `[tool.uv]` 加
+  `exclude-newer-package = { <套件> = "<日期>" }`，再跑 `uv lock --upgrade-package <套件>`。
+  設定要寫進 `pyproject.toml`，不能只在命令列給旗標：只在命令列給的話，之後不帶旗標的
+  `uv lock --check` 會判 lock 過期，CI 的 `uv run` 也會重新解析並退回舊版。
+  該版本發佈滿 7 天後，把那一行拿掉再跑 `uv lock`，版本會留著；還沒滿 7 天就拿掉，
+  版本會被退回舊的。不要用整體的 `--exclude-newer <日期>`：它會讓 lock 的天數記錄改成
+  日期、整份重新解析，`tests/test_docs_contract.py` 的 7 天檢查也會轉紅。
 
 ## 碰到特定目錄才載入的設計說明
 
