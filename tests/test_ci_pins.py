@@ -438,6 +438,10 @@ BAD_UV = {
     "if": "if uv run x; then echo ok; fi",
     "env prefix": "FOO=1 uv run x",
     "quoted subshell": 'echo "$(uv run x)"',
+    "quoted command with trailing slash": 'bash -c "uv run pytest tests/"',
+    "quoted uv lock": 'bash -c "uv lock"',
+    "quoted pipx": 'bash -c "pipx run x"',
+    "quoted pip3.12": 'bash -c "pip3.12 install x"',
     "continuation not locked": "uv run \\\n  --directory x pytest",
     "unparsable": 'echo "unterminated',
 }
